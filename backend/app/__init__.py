@@ -1,0 +1,1 @@
+"""AiWardrobe FastAPI application package."""
