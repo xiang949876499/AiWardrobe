@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "AiWardrobe"
     environment: str = "development"
@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     ai_api_key: str | None = None
     ai_model: str = "gpt-4o-mini"
     ai_demo_mode: bool = Field(default=True)
+
+    outfit_ai_provider: str = "deepseek"
+    outfit_ai_base_url: str | None = None
+    outfit_ai_api_key: str | None = None
+    outfit_ai_model: str | None = None
+
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_api_key: str | None = None
+    deepseek_model: str = "deepseek-chat"
+
+    weather_provider: str = "open_meteo"
+    open_meteo_base_url: str = "https://api.open-meteo.com"
 
 
 @lru_cache

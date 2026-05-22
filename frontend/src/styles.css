@@ -151,6 +151,7 @@ select {
 
 .primaryButton,
 .secondaryButton,
+.dangerButton,
 .ghostButton,
 .navButton,
 .bottomNavButton,
@@ -187,6 +188,18 @@ select {
 
 .secondaryButton:hover {
   background: #fdf2f8;
+}
+
+.dangerButton {
+  background: #fff;
+  color: #b91c1c;
+  border-color: #fecaca;
+  font-weight: 800;
+  padding: 0 16px;
+}
+
+.dangerButton:hover {
+  background: #fef2f2;
 }
 
 .ghostButton {

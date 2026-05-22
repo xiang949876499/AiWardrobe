@@ -84,6 +84,10 @@ export function updateGarment(token: string, id: string, body: Partial<Garment>)
   return request<Garment>(`/garments/${id}`, { method: "PATCH", body: JSON.stringify(body) }, token);
 }
 
+export function deleteGarment(token: string, id: string) {
+  return request<void>(`/garments/${id}`, { method: "DELETE" }, token);
+}
+
 export function fetchTodayWeather(token: string, lat: number, lon: number) {
   return request<Weather>(`/weather/today?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, {}, token);
 }

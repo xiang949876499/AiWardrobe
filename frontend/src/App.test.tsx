@@ -83,6 +83,16 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText("上传几件常穿单品，AI 才能开始帮你搭配。")).toBeInTheDocument();
   });
 
+  test("clears stale session when the backend rejects the bearer token", async () => {
+    localStorage.setItem("aiwardrobe_token", "stale-token");
+    mockFetchOnce({ detail: "Invalid bearer token" }, 401);
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "注册账号" })).toBeInTheDocument();
+    expect(localStorage.getItem("aiwardrobe_token")).toBeNull();
+  });
+
   test("uploading a photo shows extracted pending-review garments", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
@@ -108,6 +118,28 @@ describe("AiWardrobe app", () => {
     expect(await screen.findByText("单品拆分完成")).toBeInTheDocument();
     expect(screen.getByText("待确认单品")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /确认上衣/ })).toBeInTheDocument();
+  });
+
+  test("deletes a garment from the detail page", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce({}, 204);
+
+    render(<App />);
+
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByText(/white/));
+    await user.click(screen.getByRole("button", { name: "删除衣服" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenLastCalledWith("/garments/garment-1", expect.objectContaining({
+        method: "DELETE",
+        headers: expect.any(Headers)
+      }));
+    });
+    expect(await screen.findByText("还没有衣服")).toBeInTheDocument();
   });
 
   test("outfit page fetches weather and saves a manual fixed outfit", async () => {
@@ -154,6 +186,33 @@ describe("AiWardrobe app", () => {
 
     expect(await screen.findByText("用户保存的固定搭配")).toBeInTheDocument();
     expect(screen.getByText("固定搭配")).toBeInTheDocument();
+  });
+
+  test("falls back to default city weather when geolocation is unavailable", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.stubGlobal("navigator", { ...navigator, geolocation: undefined });
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce({
+      date: "2026-05-22",
+      lat_key: "31.23",
+      lon_key: "121.47",
+      city: "当前位置",
+      condition: "Cloudy",
+      temperature: 24,
+      feels_like: 24,
+      precipitation: 0,
+      wind_speed: 6,
+      cached: false
+    });
+
+    render(<App />);
+
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByRole("button", { name: "搭配" }));
+
+    expect(await screen.findByText(/默认城市 · Cloudy/)).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain("/weather/today?lat=31.2304&lon=121.4737");
   });
 
   test("AI try-on entry shows unavailable feature cards", async () => {

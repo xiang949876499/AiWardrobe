@@ -47,7 +47,7 @@ async def upload_garment_photo(
             content_type=file.content_type or "image/jpeg",
             image_bytes=data,
         )
-        detections = [DetectedGarment(category=fallback.category, crop_box={"x": 0, "y": 0, "width": 1000, "height": 1000})]
+        detections = [DetectedGarment(category=fallback.category, crop_box=None)]
 
     upload.status = "tagging"
     suffix = Path(file.filename or "upload.jpg").suffix or ".jpg"
@@ -57,7 +57,7 @@ async def upload_garment_photo(
         analysis = await ai.analyze_garment(
             filename=f"{index}-{file.filename or 'upload.jpg'}",
             content_type=file.content_type or "image/jpeg",
-            image_bytes=data,
+            image_bytes=crop_bytes,
         )
         raw = dict(analysis.raw)
         raw["detected_category"] = detection.category
@@ -101,7 +101,9 @@ def get_upload_session(
     return upload
 
 
-def _crop_image_bytes(data: bytes, crop_box: dict[str, int]) -> bytes:
+def _crop_image_bytes(data: bytes, crop_box: dict[str, int] | None) -> bytes:
+    if crop_box is None:
+        return data
     try:
         from PIL import Image
 

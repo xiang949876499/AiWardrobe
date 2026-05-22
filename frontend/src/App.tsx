@@ -11,6 +11,7 @@ import {
   Search,
   Shirt,
   Sparkles,
+  Trash2,
   UploadCloud,
   Wand2
 } from "lucide-react";
@@ -19,6 +20,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
   clearToken,
   createManualOutfit,
+  deleteGarment,
   fetchGarments,
   fetchOutfits,
   fetchTodayWeather,
@@ -90,6 +92,10 @@ function App() {
       const response = await fetchGarments(authToken);
       setGarments(response.items);
     } catch (err) {
+      if (isAuthError(err)) {
+        handleLogout();
+        return;
+      }
       setError(errorMessage(err));
     } finally {
       setLoading(false);
@@ -104,6 +110,10 @@ function App() {
       const response = await fetchOutfits(token, favorite);
       setOutfits(response.items);
     } catch (err) {
+      if (isAuthError(err)) {
+        handleLogout();
+        return;
+      }
       setError(errorMessage(err));
     } finally {
       setLoading(false);
@@ -181,6 +191,11 @@ function App() {
             onSaved={(garment) => {
               setSelectedGarment(garment);
               setGarments((items) => mergeGarments([garment], items));
+              setActiveView("wardrobe");
+            }}
+            onDeleted={(id) => {
+              setSelectedGarment(null);
+              setGarments((items) => items.filter((item) => item.id !== id));
               setActiveView("wardrobe");
             }}
           />
@@ -445,7 +460,12 @@ function UploadView({ token, onPending, onConfirm }: {
   );
 }
 
-function DetailView({ token, garment, onSaved }: { token: string; garment: Garment; onSaved: (garment: Garment) => void }) {
+function DetailView({ token, garment, onSaved, onDeleted }: {
+  token: string;
+  garment: Garment;
+  onSaved: (garment: Garment) => void;
+  onDeleted: (id: string) => void;
+}) {
   const [form, setForm] = useState({
     category: garment.category,
     colors: garment.colors.join(", "),
@@ -474,6 +494,22 @@ function DetailView({ token, garment, onSaved }: { token: string; garment: Garme
         review_status: "confirmed"
       } as Partial<Garment>);
       onSaved(saved);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm("确定删除这件衣服吗？删除后将不会进入搭配推荐。")) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await deleteGarment(token, garment.id);
+      onDeleted(garment.id);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -516,6 +552,10 @@ function DetailView({ token, garment, onSaved }: { token: string; garment: Garme
           <Check size={18} aria-hidden="true" />
           确认并入库
         </button>
+        <button type="button" className="dangerButton" disabled={busy} onClick={handleDelete}>
+          <Trash2 size={18} aria-hidden="true" />
+          删除衣服
+        </button>
       </form>
     </section>
   );
@@ -539,23 +579,31 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   const [error, setError] = useState("");
   const readyGarments = garments.filter((garment) => garment.status === "ready");
 
+  async function loadWeather(lat: number, lon: number, placeLabel?: string) {
+    try {
+      const nextWeather = await fetchTodayWeather(token, lat, lon);
+      setWeather(nextWeather);
+      setWeatherMessage(`${placeLabel || nextWeather.city} · ${nextWeather.condition} · ${nextWeather.temperature}°C`);
+      setTemperature(nextWeather.temperature);
+    } catch {
+      setWeatherMessage("天气服务暂不可用，可继续生成");
+    }
+  }
+
   useEffect(() => {
+    const loadDefaultCityWeather = () => {
+      void loadWeather(31.2304, 121.4737, "默认城市");
+    };
+
     if (!navigator.geolocation) {
-      setWeatherMessage("未获取天气，可继续生成");
+      loadDefaultCityWeather();
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        try {
-          const nextWeather = await fetchTodayWeather(token, position.coords.latitude, position.coords.longitude);
-          setWeather(nextWeather);
-          setWeatherMessage(`${nextWeather.city} · ${nextWeather.condition} · ${nextWeather.temperature}°C`);
-          setTemperature(nextWeather.temperature);
-        } catch {
-          setWeatherMessage("天气服务暂不可用，可继续生成");
-        }
+      (position) => {
+        void loadWeather(position.coords.latitude, position.coords.longitude);
       },
-      () => setWeatherMessage("未获取天气，可继续生成")
+      loadDefaultCityWeather
     );
   }, [token]);
 
@@ -843,6 +891,10 @@ function mergeGarments(incoming: Garment[], existing: Garment[]) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请稍后重试";
+}
+
+function isAuthError(error: unknown) {
+  return error instanceof Error && /invalid bearer token|not authenticated|could not validate/i.test(error.message);
 }
 
 export default App;

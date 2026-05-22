@@ -58,6 +58,28 @@ def test_valid_uploaded_photo_writes_cropped_item_image(client: TestClient, tmp_
         assert image.size == (first["crop_box"]["width"], first["crop_box"]["height"])
 
 
+def test_single_item_upload_without_detection_box_keeps_full_image(client: TestClient, tmp_path) -> None:
+    token = login(client)
+
+    uploaded = client.post(
+        "/uploads/garment-photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shirt.jpg", _jpeg_bytes(width=1400, height=1200), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 201
+    first = uploaded.json()["garments"][0]
+    item_path = tmp_path / "uploads" / first["image_key"]
+    assert item_path.exists()
+    assert first["crop_box"] is None
+    assert first["ai_result"]["crop_box"] is None
+
+    from PIL import Image
+
+    with Image.open(item_path) as image:
+        assert image.size == (1400, 1200)
+
+
 def test_confirming_ai_tags_moves_item_into_ready_wardrobe(client: TestClient) -> None:
     token = login(client)
     uploaded = client.post(

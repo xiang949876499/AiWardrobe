@@ -8,6 +8,8 @@ export default defineConfig({
     proxy: {
       "/auth": "http://localhost:8000",
       "/garments": "http://localhost:8000",
+      "/uploads": "http://localhost:8000",
+      "/weather": "http://localhost:8000",
       "/outfits": "http://localhost:8000",
       "/static": "http://localhost:8000"
     }
