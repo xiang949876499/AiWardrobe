@@ -15,6 +15,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("JWT_SECRET", "test-secret-with-at-least-thirty-two-bytes")
     monkeypatch.setenv("TESTING", "true")
     monkeypatch.setenv("AI_DEMO_MODE", "true")
+    monkeypatch.setenv("WORKFLOW_PROVIDER", "demo")
     os.environ.pop("AI_API_KEY", None)
 
     from app.config import get_settings

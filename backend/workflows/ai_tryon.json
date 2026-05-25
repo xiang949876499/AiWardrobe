@@ -1,0 +1,21 @@
+{
+  "name": "ai_tryon",
+  "workflow_id": "replace-with-runninghub-ai-tryon-workflow-id",
+  "inputs": {
+    "person_image": {
+      "node_id": "replace-with-person-load-image-node-id",
+      "field_name": "image"
+    },
+    "garment_image": {
+      "node_id": "replace-with-garment-load-image-node-id",
+      "field_name": "image"
+    },
+    "prompt": {
+      "node_id": "replace-with-prompt-node-id",
+      "field_name": "text"
+    }
+  },
+  "task_options": {
+    "retainSeconds": 3600
+  }
+}

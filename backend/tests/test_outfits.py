@@ -80,3 +80,31 @@ def test_favorites_outfit(client: TestClient) -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert len(favorites.json()["items"]) == 1
+
+
+def test_deletes_outfit_from_history_and_favorites(client: TestClient) -> None:
+    token = login(client)
+    _create_garment(client, token, "shirt.jpg", "top")
+    _create_garment(client, token, "trousers.jpg", "bottom")
+    _create_garment(client, token, "loafers.jpg", "shoes")
+    outfit = client.post(
+        "/outfits/generate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"occasion": "work", "season": "spring", "temperature": 22},
+    ).json()
+    client.patch(
+        f"/outfits/{outfit['id']}/favorite",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"is_favorite": True},
+    )
+
+    deleted = client.delete(
+        f"/outfits/{outfit['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert deleted.status_code == 204
+    history = client.get("/outfits/history", headers={"Authorization": f"Bearer {token}"})
+    favorites = client.get("/outfits/history?favorite=true", headers={"Authorization": f"Bearer {token}"})
+    assert history.json()["items"] == []
+    assert favorites.json()["items"] == []
