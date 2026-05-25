@@ -50,6 +50,24 @@ class Settings(BaseSettings):
     weather_provider: str = "open_meteo"
     open_meteo_base_url: str = "https://api.open-meteo.com"
 
+    garment_ai_provider: str = "qwen"
+
+    workflow_provider: str = "demo"
+
+    comfyui_base_url: str = "http://127.0.0.1:8188"
+    comfyui_client_id: str = "aiwardrobe-backend"
+    comfyui_poll_interval_seconds: float = 1.0
+    comfyui_poll_timeout_seconds: int = 180
+    comfyui_garment_workflow_file: str = "workflows/garment_recognition.json"
+    comfyui_load_image_node_id: str = "78"
+
+    runninghub_base_url: str = "https://www.runninghub.cn"
+    runninghub_api_key: str | None = None
+    runninghub_poll_interval_seconds: float = 2.0
+    runninghub_poll_timeout_seconds: int = 120
+    runninghub_garment_workflow_file: str = "workflows/garment_recognition.json"
+    runninghub_tryon_workflow_file: str = "workflows/ai_tryon.json"
+
 
 @lru_cache
 def get_settings() -> Settings:

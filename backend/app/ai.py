@@ -2,12 +2,14 @@ import base64
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 
 from app.config import Settings
 from app.models import Garment
+from app.runninghub import RunningHubClient, RunningHubWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ VL_DEFAULTS: dict[str, object] = {
 }
 
 VL_ALLOWED_VALUES = {
-    "category": {"上衣", "下装", "外套", "连衣裙", "鞋子", "配饰", "未知"},
+    "category": {"上衣", "下装", "外套", "连衣裙", "鞋子", "包", "包袋", "配饰", "饰品", "未知"},
     "sleeve_length": {"长袖", "短袖", "无袖", "七分袖", "未知"},
     "pant_length": {"长裤", "九分裤", "短裤", "短裙", "中长裙", "未知"},
     "pattern": {"纯色", "条纹", "格子", "波点", "印花", "其他", "未知"},
@@ -96,6 +98,12 @@ class AiService:
         self.settings = settings
 
     async def analyze_garment(self, filename: str, content_type: str, image_bytes: bytes) -> AiAnalysis:
+        if self.settings.garment_ai_provider == "runninghub" and self.settings.runninghub_api_key:
+            try:
+                return await self._runninghub_analysis(filename, content_type, image_bytes)
+            except Exception:
+                logger.exception("RunningHub garment analysis failed; falling back to demo analysis")
+                return self._demo_analysis(filename)
         if self.settings.ai_demo_mode or not self._can_use_remote_garment_ai():
             return self._demo_analysis(filename)
         try:
@@ -140,7 +148,9 @@ class AiService:
             category = "outerwear"
         elif any(word in name for word in ["shoe", "sneaker", "loafer", "boot"]):
             category = "shoes"
-        elif any(word in name for word in ["bag", "scarf", "hat", "belt"]):
+        elif any(word in name for word in ["bag", "tote", "purse"]):
+            category = "bag"
+        elif any(word in name for word in ["scarf", "hat", "belt", "jewelry", "necklace"]):
             category = "accessory"
 
         color = "white"
@@ -246,6 +256,27 @@ class AiService:
             raw=parsed,
         )
 
+    async def _runninghub_analysis(self, filename: str, content_type: str, image_bytes: bytes) -> AiAnalysis:
+        workflow = RunningHubWorkflow.from_file(self._runninghub_garment_workflow_path())
+        inputs: dict[str, object] = {}
+        for prompt_input in ["prompt", "text"]:
+            if prompt_input in workflow.inputs:
+                inputs[prompt_input] = _garment_tagging_prompt()
+        result = await RunningHubClient(self.settings).run_workflow(
+            workflow,
+            inputs=inputs,
+            files={"image": (filename, content_type, image_bytes)},
+        )
+        parsed = _complete_vl_payload(json.loads(_extract_runninghub_text_result(result)))
+        logger.info("RunningHub garment analysis returned fields: %s", sorted(parsed.keys()))
+        return _analysis_from_vl_payload(parsed)
+
+    def _runninghub_garment_workflow_path(self) -> Path:
+        workflow_path = Path(self.settings.runninghub_garment_workflow_file)
+        if workflow_path.is_absolute():
+            return workflow_path
+        return Path(__file__).resolve().parents[1] / workflow_path
+
     def _demo_outfit(
         self,
         garments: list[Garment],
@@ -255,7 +286,7 @@ class AiService:
         weather: dict[str, object] | None = None,
     ) -> tuple[list[dict[str, object]], str]:
         selected: list[Garment] = []
-        for category in ["top", "bottom", "shoes", "outerwear", "accessory"]:
+        for category in ["top", "bottom", "shoes", "outerwear", "bag", "accessory"]:
             match = next((garment for garment in garments if garment.category == category), None)
             if match:
                 selected.append(match)
@@ -375,6 +406,83 @@ class AiService:
         return {"type": "json_object"}
 
 
+def _analysis_from_vl_payload(parsed: dict[str, object]) -> AiAnalysis:
+    category = _normalize_vl_category(str(parsed.get("category", "上衣")))
+    sub_category = _string_value(parsed, "sub_category")
+    pattern = _string_value(parsed, "pattern")
+    sleeve_length = _string_value(parsed, "sleeve_length")
+    pant_length = _string_value(parsed, "pant_length")
+    collar_type = _string_value(parsed, "collar_type")
+    style = _string_value(parsed, "style")
+    return AiAnalysis(
+        category=category,
+        colors=_compact_unknowns([_string_value(parsed, "main_color")]) or ["未知"],
+        style=style,
+        material=_string_value(parsed, "material"),
+        season=_compact_unknowns([_string_value(parsed, "season")]),
+        fit=_string_value(parsed, "version"),
+        tags=_compact_unknowns([sub_category, pattern, sleeve_length, pant_length, collar_type, style]),
+        confidence=float(parsed.get("confidence", 0.7)),
+        raw=parsed,
+    )
+
+
+def _extract_runninghub_text_result(result: dict[str, object]) -> str:
+    candidates = result.get("results") or result.get("data") or result
+    text = _find_json_text(candidates)
+    if text is None:
+        raise ValueError("RunningHub result does not contain JSON text output")
+    return text
+
+
+def _find_json_text(value: object) -> str | None:
+    if isinstance(value, str):
+        clean = value.strip()
+        if clean.startswith("{") or clean.startswith("["):
+            return clean
+        return None
+    if isinstance(value, list):
+        for item in value:
+            found = _find_json_text(item)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, dict):
+        for key in ["text", "content", "value", "json", "output", "result"]:
+            if key in value:
+                found = _find_json_text(value[key])
+                if found is not None:
+                    return found
+        for item in value.values():
+            found = _find_json_text(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _garment_tagging_prompt() -> str:
+    return """请识别这张图片中的服装，严格按照以下JSON格式输出，不要添加任何其他文字：
+{
+"category": "品类（只能是：上衣/下装/外套/连衣裙/鞋子/配饰）",
+"sub_category": "子品类（如：T恤/衬衫/牛仔裤/西装/运动鞋等）",
+"main_color": "主颜色（如：白色/黑色/蓝色/红色等）",
+"sleeve_length": "袖长（上衣必填，只能是：长袖/短袖/无袖/七分袖）",
+"pant_length": "裤长（下装必填，只能是：长裤/九分裤/短裤/短裙/中长裙）",
+"pattern": "图案（只能是：纯色/条纹/格子/波点/印花/其他）",
+"version": "版型（只能是：修身/宽松/直筒/紧身/oversize/标准）",
+"collar_type": "领型（上衣必填，只能是：翻领/圆领/V领/立领/连帽/其他）",
+"material": "材质（如：纯棉/牛仔/丝绸/羊毛/皮革/涤纶/针织等）",
+"style": "风格（如：简约/通勤/休闲/运动/复古/甜美/正式/街头等）",
+"season": "适用季节（只能是：春/夏/秋/冬/四季通用）",
+"confidence": 识别置信度（0-1之间的数字）
+}
+
+注意：
+如果某个属性无法确定，填"未知"
+严格遵守JSON格式，不要有语法错误
+只输出JSON，不要添加任何解释性文字"""
+
+
 def _occasion_label(occasion: str) -> str:
     return {
         "work": "上班",
@@ -392,7 +500,10 @@ def _normalize_vl_category(category: str) -> str:
         "连衣裙": "bottom",
         "外套": "outerwear",
         "鞋子": "shoes",
+        "包": "bag",
+        "包袋": "bag",
         "配饰": "accessory",
+        "饰品": "accessory",
     }.get(category.strip(), "top")
 
 
@@ -447,7 +558,9 @@ def _normalize_raw_category(category: str, sub_category: str) -> str:
         return "外套"
     if any(keyword in sub for keyword in ["鞋", "靴"]):
         return "鞋子"
-    if any(keyword in sub for keyword in ["包", "帽", "围巾", "腰带", "首饰"]):
+    if any(keyword in sub for keyword in ["包", "手袋", "托特", "背包"]):
+        return "包"
+    if any(keyword in sub for keyword in ["帽", "围巾", "腰带", "首饰", "项链", "耳环"]):
         return "配饰"
     return clean
 

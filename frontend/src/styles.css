@@ -152,6 +152,7 @@ select {
 .primaryButton,
 .secondaryButton,
 .dangerButton,
+.iconDangerButton,
 .ghostButton,
 .navButton,
 .bottomNavButton,
@@ -199,6 +200,19 @@ select {
 }
 
 .dangerButton:hover {
+  background: #fef2f2;
+}
+
+.iconDangerButton {
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  background: #fff;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.iconDangerButton:hover {
   background: #fef2f2;
 }
 
@@ -311,6 +325,13 @@ button:disabled {
   gap: 18px;
 }
 
+.wardrobeActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -389,6 +410,27 @@ button:disabled {
   padding: 0;
 }
 
+.selectableGarmentCard {
+  position: relative;
+  cursor: pointer;
+}
+
+.selectableGarmentCard input {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  accent-color: #db2777;
+  box-shadow: 0 0 0 3px #fff;
+}
+
+.selectableGarmentCard.selected {
+  border-color: #db2777;
+  background: #fff7fb;
+}
+
 .garmentCard:hover {
   border-color: #f9a8d4;
   background: #fff7fb;
@@ -450,6 +492,19 @@ button:disabled {
 .reviewBanner span {
   color: #64748b;
   font-weight: 600;
+}
+
+.batchBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #334155;
+  background: #fff;
+  border: 1px solid #f9a8d4;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-weight: 800;
 }
 
 .status.failed {
@@ -532,19 +587,8 @@ button:disabled {
 .uploadPreview {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(100px, 160px) 1fr;
-  gap: 14px;
-  align-items: start;
+  gap: 10px;
   margin-top: 10px;
-}
-
-.uploadPreview > img {
-  width: 100%;
-  aspect-ratio: 4 / 5;
-  object-fit: cover;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #f1f5f9;
 }
 
 .miniGrid {
@@ -689,16 +733,29 @@ button:disabled {
 
 .historyItem {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.historyOpenButton {
+  display: grid;
   gap: 6px;
   text-align: left;
   color: #111827;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
 }
 
 .historyItem:hover {
   border-color: #f9a8d4;
 }
 
-.historyItem span {
+.historyItem span,
+.historyOpenButton span {
   color: #64748b;
 }
 

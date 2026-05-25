@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-Category = Literal["top", "bottom", "outerwear", "shoes", "accessory"]
+Category = Literal["top", "bottom", "outerwear", "shoes", "bag", "accessory"]
 GarmentStatus = Literal["uploaded", "extracting", "tagging", "pending_review", "processing", "ready", "failed"]
 
 

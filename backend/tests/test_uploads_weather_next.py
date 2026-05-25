@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
 
+from app.comfyui import ComfyUIOutput
+from app.config import get_settings
 from tests.conftest import login
 
 
@@ -98,6 +100,115 @@ def test_confirming_ai_tags_moves_item_into_ready_wardrobe(client: TestClient) -
     assert confirmed.status_code == 200
     assert confirmed.json()["status"] == "ready"
     assert confirmed.json()["review_status"] == "confirmed"
+
+
+def test_plain_upload_creates_pending_item_without_ai(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+
+    def fail_analyze(*args, **kwargs):
+        raise AssertionError("plain upload must not call AI analysis")
+
+    import app.routers.uploads as uploads_module
+
+    monkeypatch.setattr(uploads_module.AiService, "analyze_garment", fail_analyze)
+    uploaded = client.post(
+        "/uploads/plain-garment",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("single-shirt.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 201
+    body = uploaded.json()
+    assert body["image_url"].startswith("/static/uploads/")
+    assert body["category"] == "top"
+    assert body["colors"] == []
+    assert body["tags"] == []
+    assert body["ai_result"]["source"] == "plain_upload"
+    assert body["ai_confidence"] == 0
+    assert body["status"] == "pending_review"
+    assert body["review_status"] == "pending_review"
+
+
+def test_auto_recognition_reserves_billing_before_workflow(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+    calls: list[tuple[str, str]] = []
+
+    import app.routers.uploads as uploads_module
+
+    def reserve(self, user_id: str, upload_id: str) -> None:
+        calls.append((user_id, upload_id))
+
+    monkeypatch.setattr(uploads_module.BillingService, "reserve_upload_recognition", reserve)
+    uploaded = client.post(
+        "/uploads/garment-photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("shirt.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 201
+    assert len(calls) == 1
+    assert calls[0][0]
+    assert calls[0][1] == uploaded.json()["id"]
+
+
+def test_auto_recognition_can_use_comfyui_outputs(monkeypatch, client: TestClient, tmp_path) -> None:
+    token = login(client)
+    monkeypatch.setenv("WORKFLOW_PROVIDER", "comfyui")
+    get_settings.cache_clear()
+
+    import app.routers.uploads as uploads_module
+
+    class FakeComfyUIClient:
+        def __init__(self, settings) -> None:
+            self.settings = settings
+
+        async def run_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes):
+            return [
+                ComfyUIOutput("top", "top.png", "", "output", b"top-bytes"),
+                ComfyUIOutput("bottom", "pants.png", "", "output", b"pants-bytes"),
+                ComfyUIOutput("shoes", "shoes.png", "", "output", b"shoes-bytes"),
+            ]
+
+    monkeypatch.setattr(uploads_module, "ComfyUIClient", FakeComfyUIClient)
+    uploaded = client.post(
+        "/uploads/garment-photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("look.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 201
+    body = uploaded.json()
+    assert [garment["category"] for garment in body["garments"]] == ["top", "bottom", "shoes"]
+    assert body["garments"][0]["ai_result"]["workflow_provider"] == "comfyui"
+    assert body["garments"][0]["ai_result"]["comfyui_filename"] == "top.png"
+    assert (tmp_path / "uploads" / body["garments"][0]["image_key"]).read_bytes() == b"top-bytes"
+    assert (tmp_path / "uploads" / body["garments"][1]["image_key"]).read_bytes() == b"pants-bytes"
+    assert (tmp_path / "uploads" / body["garments"][2]["image_key"]).read_bytes() == b"shoes-bytes"
+
+
+def test_comfyui_auto_recognition_failure_does_not_fallback_to_original(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+    monkeypatch.setenv("WORKFLOW_PROVIDER", "comfyui")
+    get_settings.cache_clear()
+
+    import app.routers.uploads as uploads_module
+
+    class FakeComfyUIClient:
+        def __init__(self, settings) -> None:
+            self.settings = settings
+
+        async def run_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes):
+            return []
+
+    monkeypatch.setattr(uploads_module, "ComfyUIClient", FakeComfyUIClient)
+    uploaded = client.post(
+        "/uploads/garment-photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("look.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 502
+    assert uploaded.json()["detail"] == "ComfyUI workflow did not return garment images"
 
 
 def test_today_weather_is_cached_for_same_location(client: TestClient) -> None:

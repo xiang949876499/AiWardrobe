@@ -44,7 +44,7 @@ Services:
 
 - Frontend: [http://localhost:5173](http://localhost:5173)
 - Backend: [http://localhost:8000](http://localhost:8000)
-- MinIO console: [http://localhost:9001](http://localhost:9001)
+- MinIO console: [http://localhost:9101](http://localhost:9101)
 - Postgres: `localhost:5432`
 
 By default Docker Compose runs with `AI_DEMO_MODE=true`. To use DeepSeek for outfit recommendation, copy `.env.example` to `.env`, set `AI_DEMO_MODE=false`, and provide:

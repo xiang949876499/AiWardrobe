@@ -1,4 +1,4 @@
-export type Category = "top" | "bottom" | "outerwear" | "shoes" | "accessory";
+export type Category = "top" | "bottom" | "outerwear" | "shoes" | "bag" | "accessory";
 export type GarmentStatus = "uploaded" | "extracting" | "tagging" | "pending_review" | "processing" | "ready" | "failed";
 export type Occasion = "work" | "date" | "sport" | "formal" | "casual";
 

@@ -80,6 +80,12 @@ export function uploadGarmentPhoto(token: string, file: File) {
   return request<UploadSession>("/uploads/garment-photo", { method: "POST", body: form }, token);
 }
 
+export function uploadPlainGarment(token: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return request<Garment>("/uploads/plain-garment", { method: "POST", body: form }, token);
+}
+
 export function updateGarment(token: string, id: string, body: Partial<Garment>) {
   return request<Garment>(`/garments/${id}`, { method: "PATCH", body: JSON.stringify(body) }, token);
 }
@@ -110,6 +116,10 @@ export function createManualOutfit(token: string, body: {
 
 export function fetchOutfits(token: string, favorite?: boolean) {
   return request<{ items: Outfit[] }>(`/outfits/history${favorite === undefined ? "" : `?favorite=${favorite}`}`, {}, token);
+}
+
+export function deleteOutfit(token: string, id: string) {
+  return request<void>(`/outfits/${id}`, { method: "DELETE" }, token);
 }
 
 export function setOutfitFavorite(token: string, id: string, isFavorite: boolean) {

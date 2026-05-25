@@ -1,0 +1,440 @@
+{
+  "78": {
+    "inputs": {
+      "image": "e66f8d0471cae329585b03763fad21845d801266dd0813ec95a43812ccde7f77.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "111": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        "114",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ],
+      "image1": [
+        "122",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "113": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "114": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "116": {
+    "inputs": {
+      "unet_name": "qwen_image_edit_2511_bf16.safetensors",
+      "weight_dtype": "fp8_e4m3fn"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "117": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "116",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "LayerUtility: Purge VRAM"
+    }
+  },
+  "118": {
+    "inputs": {
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-fp32.safetensors",
+      "strength_model": 1,
+      "model": [
+        "116",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "120": {
+    "inputs": {
+      "width": [
+        "135",
+        0
+      ],
+      "height": [
+        "131",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "EmptySD3LatentImage"
+    }
+  },
+  "122": {
+    "inputs": {
+      "width": [
+        "131",
+        0
+      ],
+      "height": [
+        "131",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "keep_proportion": "resize",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 16,
+      "device": "cpu",
+      "image": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "126": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFGNorm"
+    }
+  },
+  "127": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "131": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "高度"
+    }
+  },
+  "135": {
+    "inputs": {
+      "value": 720
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "宽度"
+    }
+  },
+  "136": {
+    "inputs": {
+      "text": "仅在白色背景上提取人物的衣服和服装、袜子、鞋子等。分开摆放。产品摄影风格。"
+    },
+    "class_type": "JjkText",
+    "_meta": {
+      "title": "Text"
+    }
+  },
+  "137": {
+    "inputs": {
+      "seed": 786126894679282,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "126",
+        0
+      ],
+      "positive": [
+        "142",
+        0
+      ],
+      "negative": [
+        "111",
+        0
+      ],
+      "latent_image": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "138": {
+    "inputs": {
+      "samples": [
+        "137",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "139": {
+    "inputs": {
+      "filename_prefix": "clothes_top_",
+      "images": [
+        "138",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "140": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "137",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "LayerUtility: Purge VRAM"
+    }
+  },
+  "142": {
+    "inputs": {
+      "prompt": "仅在白色背景上提取人物的上衣，单独摆放。产品摄影风格，高清细节。",
+      "clip": [
+        "114",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ],
+      "image1": [
+        "122",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus (上衣)"
+    }
+  },
+  "148": {
+    "inputs": {
+      "prompt": "仅在白色背景上提取人物的裤子，单独摆放。产品摄影风格，高清细节。",
+      "clip": [
+        "114",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ],
+      "image1": [
+        "122",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus (裤子)"
+    }
+  },
+  "149": {
+    "inputs": {
+      "seed": 1019257793519065,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "126",
+        0
+      ],
+      "positive": [
+        "148",
+        0
+      ],
+      "negative": [
+        "111",
+        0
+      ],
+      "latent_image": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler (裤子)"
+    }
+  },
+  "150": {
+    "inputs": {
+      "samples": [
+        "149",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAEDecode (裤子)"
+    }
+  },
+  "151": {
+    "inputs": {
+      "filename_prefix": "clothes_pants_",
+      "images": [
+        "150",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "153": {
+    "inputs": {
+      "prompt": "仅在白色背景上提取人物的鞋子，单独摆放。产品摄影风格，高清细节。",
+      "clip": [
+        "114",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ],
+      "image1": [
+        "122",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus (鞋子)"
+    }
+  },
+  "154": {
+    "inputs": {
+      "seed": 1071122114827599,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "126",
+        0
+      ],
+      "positive": [
+        "153",
+        0
+      ],
+      "negative": [
+        "111",
+        0
+      ],
+      "latent_image": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler (鞋子)"
+    }
+  },
+  "155": {
+    "inputs": {
+      "samples": [
+        "154",
+        0
+      ],
+      "vae": [
+        "113",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAEDecode (鞋子)"
+    }
+  },
+  "156": {
+    "inputs": {
+      "filename_prefix": "clothes_shoes_",
+      "images": [
+        "155",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

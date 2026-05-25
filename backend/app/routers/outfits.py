@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -152,3 +152,17 @@ def update_fixed(
     db.commit()
     db.refresh(outfit)
     return outfit
+
+
+@router.delete("/{outfit_id}", status_code=204)
+def delete_outfit(
+    outfit_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    outfit = db.get(Outfit, outfit_id)
+    if outfit is None or outfit.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Outfit not found")
+    db.delete(outfit)
+    db.commit()
+    return Response(status_code=204)
