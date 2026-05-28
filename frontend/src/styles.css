@@ -967,3 +967,33 @@ button:disabled {
     width: 100%;
   }
 }
+
+/* === Skeleton Loading === */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-neutral-100) 25%,
+    var(--color-neutral-50) 50%,
+    var(--color-neutral-100) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.5s var(--ease-in-out) infinite;
+}
+
+.skeletonImage {
+  aspect-ratio: 4 / 5;
+  height: auto !important;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+@keyframes skeletonShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--color-neutral-200);
+  }
+}

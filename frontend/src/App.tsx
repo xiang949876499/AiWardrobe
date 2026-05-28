@@ -37,6 +37,7 @@ import {
   uploadPlainGarment
 } from "./api";
 import type { Category, Garment, Occasion, Outfit, UploadSession, Weather } from "./types";
+import { GarmentCardSkeleton } from "./Skeleton";
 
 const categories: Array<{ value: "all" | Category; label: string }> = [
   { value: "all", label: "全部" },
@@ -68,7 +69,7 @@ type View = (typeof navItems)[number]["id"] | "detail";
 
 type UploadItem = {
   name: string;
-  status: "上传中" | "单品拆分中" | "标签识别中" | "待手动确认" | "待确认" | "失败";
+  status: "上传中" | "入库中" | "单品拆分中" | "标签识别中" | "已入库" | "失败";
   session?: UploadSession;
   garments?: Garment[];
   message?: string;
@@ -211,6 +212,7 @@ function App() {
         {activeView === "wardrobe" && (
           <WardrobeView
             garments={garments}
+            loading={loading}
             onSelect={(garment) => {
               setSelectedGarment(garment);
               setActiveView("detail");
@@ -340,7 +342,7 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
       <section className="loginPanel" aria-labelledby="login-title">
         <Brand />
         <h1 id="login-title">用邮箱进入你的云端衣橱</h1>
-        <p>上传常穿单品，确认 AI 识别结果，再生成适合天气和场景的全身搭配。</p>
+        <p>上传常穿单品，查看 AI 识别结果，再生成适合天气和场景的全身搭配。</p>
         <div className="segmented authMode" aria-label="账号操作">
           <button type="button" className={mode === "register" ? "segment active" : "segment"} onClick={() => setMode("register")}>注册</button>
           <button type="button" className={mode === "login" ? "segment active" : "segment"} onClick={() => setMode("login")}>登录</button>
@@ -367,11 +369,12 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
-function WardrobeView({ garments, onSelect, onUpload, onBatchDelete }: {
+function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: {
   garments: Garment[];
   onSelect: (garment: Garment) => void;
   onUpload: () => void;
   onBatchDelete: (ids: string[]) => Promise<boolean>;
+  loading: boolean;
 }) {
   const [category, setCategory] = useState<"all" | Category>("all");
   const [search, setSearch] = useState("");
@@ -409,7 +412,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete }: {
       <div className="pageHeader">
         <div>
           <h1 id="wardrobe-title">我的衣橱</h1>
-          <p>确认后的单品会进入 AI 搭配；待确认单品会单独提示。</p>
+          <p>上传后的单品会直接进入衣橱；你可以随时编辑标签来优化搜索和搭配。</p>
         </div>
         <div className="wardrobeActions">
           {garments.length > 0 && (
@@ -425,8 +428,8 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete }: {
       </div>
       {pending.length > 0 && (
         <div className="reviewBanner">
-          <strong>待确认单品</strong>
-          <span>{pending.length} 件需要确认或修改标签后才能参与搭配。</span>
+          <strong>待编辑单品</strong>
+          <span>{pending.length} 件旧单品需要编辑标签后会自动转为已入库。</span>
         </div>
       )}
       <div className="toolbar">
@@ -455,7 +458,14 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete }: {
           </div>
         </div>
       )}
-      {filtered.length === 0 ? (
+      {loading && (
+        <div className="garmentGrid">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <GarmentCardSkeleton key={i} />
+          ))}
+        </div>
+      )}
+      {!loading && (filtered.length === 0 ? (
         <div className="emptyState">
           <Shirt size={34} aria-hidden="true" />
           <h2>还没有衣服</h2>
@@ -464,7 +474,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete }: {
         </div>
       ) : (
         <>
-          {ready.length === 0 && <div className="hint">当前还没有已确认单品，请先确认标签。</div>}
+          {ready.length === 0 && <div className="hint">当前还没有已入库单品，请先上传衣服。</div>}
           <div className="garmentGrid">
             {filtered.map((garment) => (
               <GarmentCard
@@ -478,7 +488,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete }: {
             ))}
           </div>
         </>
-      )}
+      ))}
     </section>
   );
 }
@@ -506,7 +516,7 @@ function GarmentCard({ garment, onSelect, selectionMode = false, selected = fals
   }
 
   return (
-    <button type="button" className="garmentCard" onClick={() => onSelect(garment)} aria-label={`确认${categoryLabel(garment.category)} ${garment.style || ""}`}>
+    <button type="button" className="garmentCard" onClick={() => onSelect(garment)} aria-label={`编辑${categoryLabel(garment.category)} ${garment.style || ""}`}>
       <img src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} ${garment.category}`} />
       <GarmentCardBody garment={garment} />
     </button>
@@ -539,15 +549,15 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
     const files = Array.from(event.target.files || []);
     setItems(files.map((file) => ({ name: file.name, status: "上传中" })));
     for (const file of files) {
-      setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: mode === "plain" ? "待手动确认" : "单品拆分中" } : item));
+      setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
       try {
         if (mode === "plain") {
           const garment = await uploadPlainGarment(token, file);
-          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "待确认", garments: [garment] } : item));
+          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "已入库", garments: [garment] } : item));
           onPending([garment]);
         } else {
           const session = await uploadGarmentPhoto(token, file);
-          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "待确认", session, garments: session.garments } : item));
+          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "已入库", session, garments: session.garments } : item));
           onPending(session.garments);
         }
       } catch (err) {
@@ -565,7 +575,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
       <div className="pageHeader">
         <div>
           <h1 id="upload-title">上传衣服</h1>
-          <p>{mode === "plain" ? "普通上传不调用识别工作流，请上传单独一件衣服、包或饰品的图片并手动确认分类和标签。" : "自动识别适合整套或多单品照片，会调用 ComfyUI 工作流并预留识别扣费接口。"}</p>
+          <p>{mode === "plain" ? "普通上传不调用拆分工作流，请上传单独一件衣服、包或饰品的图片；系统会直接用 VL 模型打标签。" : "自动识别适合整套或多单品照片，会调用 RunningHub 工作流并预留识别扣费接口。"}</p>
         </div>
       </div>
       <div className="segmented" aria-label="上传模式">
@@ -575,19 +585,19 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
       <label className="uploadBox" htmlFor="garment-upload">
         <UploadCloud size={34} aria-hidden="true" />
         <strong>{mode === "plain" ? "选择单件图片" : "选择整套或多单品照片"}</strong>
-        <span>{mode === "plain" ? "每张图片只放一件衣服、包或饰品；上传后需要你手动补全标签" : "支持多人或多单品照片；单个文件失败不影响其他图片"}</span>
+        <span>{mode === "plain" ? "每张图片只放一件衣服、包或饰品；上传后打标签并直接入库" : "支持多人或多单品照片；单个文件失败不影响其他图片"}</span>
         <input id="garment-upload" aria-label={mode === "plain" ? "选择单件图片" : "选择整套或多单品照片"} type="file" accept="image/*" multiple onChange={handleFiles} />
       </label>
       <div className="uploadList">
         {items.map((item) => (
           <div key={item.name} className="uploadItem">
             <span>{item.name}</span>
-            <strong>{item.status === "待确认" ? (mode === "plain" ? "等待手动确认" : "单品拆分完成") : item.status}</strong>
+            <strong>{item.status === "已入库" ? (mode === "plain" ? "已入库，可编辑标签" : "单品拆分完成") : item.status}</strong>
             {item.message && <small>{item.message}</small>}
             {(item.session || item.garments) && (
               <div className="uploadPreview">
                 <div>
-                  <strong>待确认单品</strong>
+                  <strong>已入库单品</strong>
                   <div className="miniGrid">
                     {(item.garments || item.session?.garments || []).map((garment) => <GarmentCard key={garment.id} garment={garment} onSelect={onConfirm} />)}
                   </div>
@@ -608,12 +618,6 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
   onDeleted: (id: string) => void;
 }) {
   const [form, setForm] = useState({
-    category: garment.category,
-    colors: garment.colors.join(", "),
-    style: garment.style,
-    material: garment.material,
-    season: garment.season.join(", "),
-    fit: garment.fit,
     tags: garment.tags.join(", ")
   });
   const [busy, setBusy] = useState(false);
@@ -625,14 +629,7 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
     setError("");
     try {
       const saved = await updateGarment(token, garment.id, {
-        category: form.category,
-        colors: splitValues(form.colors),
-        style: form.style,
-        material: form.material,
-        season: splitValues(form.season),
-        fit: form.fit,
-        tags: splitValues(form.tags),
-        review_status: "confirmed"
+        tags: splitValues(form.tags)
       } as Partial<Garment>);
       onSaved(saved);
     } catch (err) {
@@ -661,37 +658,29 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
   return (
     <section className="pageSection detailLayout" aria-labelledby="detail-title">
       <div>
-        <img className="detailImage" src={garment.image_url} alt={`${form.style || "服装"} 详情`} />
+        <img className="detailImage" src={garment.image_url} alt={`${garment.style || "服装"} 详情`} />
         <div className="aiBox">
-          <strong>AI 原始建议</strong>
+          <strong>识别信息</strong>
+          <span>类别 {categoryLabel(garment.category)}</span>
+          <span>颜色 {garment.colors.join(" / ") || "未知"}</span>
+          <span>材质 {garment.material || "未知"}</span>
+          <span>风格 {garment.style || "未知"}</span>
+          <span>季节 {garment.season.join(" / ") || "未知"}</span>
+          <span>版型 {garment.fit || "未知"}</span>
           <span>置信度 {Math.round(garment.ai_confidence * 100)}%</span>
           {garment.crop_box && <span>裁剪框 {garment.crop_box.width} × {garment.crop_box.height}</span>}
           <code>{JSON.stringify(garment.ai_result)}</code>
         </div>
       </div>
       <form className="detailForm" onSubmit={handleSubmit}>
-        <h1 id="detail-title">确认服装属性</h1>
-        <p>AI 标签需要你确认。保存后，这件单品才会进入搭配推荐。</p>
-        <label htmlFor="category">类别</label>
-        <select id="category" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value as Category })}>
-          {categories.filter((item) => item.value !== "all").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-        </select>
-        <label htmlFor="colors">颜色</label>
-        <input id="colors" value={form.colors} onChange={(event) => setForm({ ...form, colors: event.target.value })} />
-        <label htmlFor="style">风格</label>
-        <input id="style" value={form.style} onChange={(event) => setForm({ ...form, style: event.target.value })} />
-        <label htmlFor="material">材质</label>
-        <input id="material" value={form.material} onChange={(event) => setForm({ ...form, material: event.target.value })} />
-        <label htmlFor="season">季节</label>
-        <input id="season" value={form.season} onChange={(event) => setForm({ ...form, season: event.target.value })} />
-        <label htmlFor="fit">版型</label>
-        <input id="fit" value={form.fit} onChange={(event) => setForm({ ...form, fit: event.target.value })} />
+        <h1 id="detail-title">编辑单品标签</h1>
+        <p>单品已经入库。这里只保留标签修改，用来影响搜索、筛选和后续搭配偏好。</p>
         <label htmlFor="tags">标签</label>
         <input id="tags" value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} />
         {error && <div className="alert" role="alert">{error}</div>}
         <button type="submit" className="primaryButton stickyAction" disabled={busy}>
           <Check size={18} aria-hidden="true" />
-          确认并入库
+          保存标签
         </button>
         <button type="button" className="dangerButton" disabled={busy} onClick={handleDelete}>
           <Trash2 size={18} aria-hidden="true" />
@@ -710,7 +699,6 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
 }) {
   const [mode, setMode] = useState<"ai" | "manual">("ai");
   const [occasion, setOccasion] = useState<Occasion>("work");
-  const [season, setSeason] = useState("spring");
   const [temperature, setTemperature] = useState(22);
   const [weather, setWeather] = useState<Weather | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<"loading" | "ready" | "failed">("loading");
@@ -756,7 +744,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
     setBusy(true);
     setError("");
     try {
-      const outfit = await generateOutfit(token, { occasion, season, temperature: weather?.temperature ?? temperature, weather });
+      const outfit = await generateOutfit(token, { occasion, temperature: weather?.temperature ?? temperature, weather });
       setCurrentOutfit(outfit);
     } catch (err) {
       setError(errorMessage(err));
@@ -803,7 +791,6 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
         name: manualName,
         garment_ids: selectedIds,
         occasion,
-        season,
         temperature: weather?.temperature ?? temperature,
         is_fixed: true,
         weather
@@ -821,7 +808,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
       <div className="pageHeader">
         <div>
           <h1 id="outfit-title">搭配</h1>
-          <p>使用已确认单品，结合场合与今日天气生成 AI 推荐，也可以自己选择并保存固定搭配。</p>
+          <p>使用已入库单品，结合场合与今日天气生成 AI 推荐，也可以自己选择并保存固定搭配。</p>
         </div>
         <div className="weatherPill"><MapPin size={16} aria-hidden="true" />{weatherMessage}</div>
       </div>
@@ -837,13 +824,8 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
             </button>
           ))}
         </div>
-        <label htmlFor="season">季节</label>
-        <select id="season" value={season} onChange={(event) => setSeason(event.target.value)}>
-          <option value="spring">春季</option>
-          <option value="summer">夏季</option>
-          <option value="autumn">秋季</option>
-          <option value="winter">冬季</option>
-        </select>
+        <div className="fieldLabel">当前季节</div>
+        <div className="readonlyField" aria-label="当前季节">按节气自动判断</div>
         <label htmlFor="temperature">温度：{temperature}°C</label>
         <input id="temperature" type="range" min="-10" max="40" value={temperature} onChange={(event) => setTemperature(Number(event.target.value))} />
         {mode === "ai" ? (
@@ -915,7 +897,7 @@ function ManualPicker({ garments, selectedIds, setSelectedIds, name, setName, on
       <input id="manual-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：周一通勤" />
       <div className="manualGrid">
         {garments.length === 0 ? (
-          <div className="hint">暂无已确认单品。</div>
+          <div className="hint">暂无已入库单品。</div>
         ) : garments.map((garment) => (
           <label key={garment.id} className="manualChoice">
             <input type="checkbox" checked={selectedIds.includes(garment.id)} onChange={() => toggle(garment.id)} />
@@ -1023,9 +1005,9 @@ function statusLabel(status: string) {
     uploaded: "已上传",
     extracting: "拆分中",
     tagging: "打标签中",
-    pending_review: "待确认",
+    pending_review: "待编辑",
     processing: "识别中",
-    ready: "已确认",
+    ready: "已入库",
     failed: "失败"
   }[status] || status;
 }
