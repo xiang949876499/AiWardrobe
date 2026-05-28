@@ -997,3 +997,16 @@ button:disabled {
     background: var(--color-neutral-200);
   }
 }
+
+/* === Blur-up image loading === */
+img.blurUp {
+  filter: blur(10px) saturate(0.8);
+  transform: scale(1.05);
+  transition: filter var(--duration-slow) var(--ease-out),
+              transform var(--duration-slow) var(--ease-out);
+}
+
+img.blurUpLoaded {
+  filter: blur(0) saturate(1);
+  transform: scale(1);
+}

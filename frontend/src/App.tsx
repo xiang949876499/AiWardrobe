@@ -75,6 +75,20 @@ type UploadItem = {
   message?: string;
 };
 
+function BlurImage({ src, alt, className = "" }: { src: string; alt: string; className?: string }) {
+  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={`${className} blurUp${loaded ? " blurUpLoaded" : ""}`}
+      onLoad={() => setLoaded(true)}
+      loading="lazy"
+    />
+  );
+}
+
 function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
   const [activeView, setActiveView] = useState<View>("wardrobe");
@@ -509,7 +523,7 @@ function GarmentCard({ garment, onSelect, selectionMode = false, selected = fals
           aria-label={`选择 ${garment.category} ${garment.id}`}
           onChange={() => onToggleSelection?.(garment.id)}
         />
-        <img src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} ${garment.category}`} />
+        <BlurImage src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} ${garment.category}`} />
         <GarmentCardBody garment={garment} />
       </label>
     );
@@ -517,7 +531,7 @@ function GarmentCard({ garment, onSelect, selectionMode = false, selected = fals
 
   return (
     <button type="button" className="garmentCard" onClick={() => onSelect(garment)} aria-label={`编辑${categoryLabel(garment.category)} ${garment.style || ""}`}>
-      <img src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} ${garment.category}`} />
+      <BlurImage src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} ${garment.category}`} />
       <GarmentCardBody garment={garment} />
     </button>
   );
@@ -658,7 +672,7 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
   return (
     <section className="pageSection detailLayout" aria-labelledby="detail-title">
       <div>
-        <img className="detailImage" src={garment.image_url} alt={`${garment.style || "服装"} 详情`} />
+        <BlurImage className="detailImage" src={garment.image_url} alt={`${garment.style || "服装"} 详情`} />
         <div className="aiBox">
           <strong>识别信息</strong>
           <span>类别 {categoryLabel(garment.category)}</span>
@@ -856,7 +870,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
             </div>
           </div>
           <div className="outfitImages">
-            {currentOutfit.items.map((item) => <img key={item.garment_id} src={item.image_url} alt={`${item.category} 搭配单品`} />)}
+            {currentOutfit.items.map((item) => <BlurImage key={item.garment_id} src={item.image_url} alt={`${item.category} 搭配单品`} />)}
           </div>
           <p>{currentOutfit.explanation}</p>
           <div className="tagRow">
@@ -901,7 +915,7 @@ function ManualPicker({ garments, selectedIds, setSelectedIds, name, setName, on
         ) : garments.map((garment) => (
           <label key={garment.id} className="manualChoice">
             <input type="checkbox" checked={selectedIds.includes(garment.id)} onChange={() => toggle(garment.id)} />
-            <img src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} 选择项`} />
+            <BlurImage src={garment.thumbnail_url || garment.image_url} alt={`${garment.style || categoryLabel(garment.category)} 选择项`} />
             <span>{categoryLabel(garment.category)} · {garment.style || "未设置风格"}</span>
           </label>
         ))}
