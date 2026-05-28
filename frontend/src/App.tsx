@@ -353,32 +353,52 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
 
   return (
     <main className="loginPage">
-      <section className="loginPanel" aria-labelledby="login-title">
-        <Brand />
-        <h1 id="login-title">用邮箱进入你的云端衣橱</h1>
-        <p>上传常穿单品，查看 AI 识别结果，再生成适合天气和场景的全身搭配。</p>
-        <div className="segmented authMode" aria-label="账号操作">
-          <button type="button" className={mode === "register" ? "segment active" : "segment"} onClick={() => setMode("register")}>注册</button>
-          <button type="button" className={mode === "login" ? "segment active" : "segment"} onClick={() => setMode("login")}>登录</button>
-        </div>
-        <form className="formStack" onSubmit={handleSubmit}>
-          <label htmlFor="email">邮箱</label>
-          <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
-          <label htmlFor="password">密码</label>
-          <input
-            id="password"
-            type="password"
-            autoComplete={mode === "register" ? "new-password" : "current-password"}
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-          <div className="hint">密码至少 8 位。注册后会直接进入衣橱。</div>
-          {error && <div className="alert" role="alert">{error}</div>}
-          <button type="submit" className="primaryButton" disabled={!emailValid || !passwordValid || busy}>
-            {mode === "register" ? "注册账号" : "登录账号"}
-          </button>
-        </form>
-      </section>
+      <div className="loginLayout">
+        <section className="loginHero" aria-labelledby="login-hero-title">
+          <Brand />
+          <h1 id="login-hero-title">你的私人<br />AI 衣橱顾问</h1>
+          <ul className="loginFeatures">
+            <li>
+              <Image size={20} aria-hidden="true" />
+              <span>上传常穿单品，AI 自动识别分类与风格标签</span>
+            </li>
+            <li>
+              <Sparkles size={20} aria-hidden="true" />
+              <span>结合天气与场合，智能生成每日搭配推荐</span>
+            </li>
+            <li>
+              <Shirt size={20} aria-hidden="true" />
+              <span>构建你的数字化衣橱，随时编辑与管理</span>
+            </li>
+          </ul>
+        </section>
+
+        <section className="loginPanel" aria-labelledby="login-title">
+          <h1 id="login-title">用邮箱进入你的云端衣橱</h1>
+          <p>上传常穿单品，查看 AI 识别结果，再生成适合天气和场景的全身搭配。</p>
+          <div className="segmented authMode" aria-label="账号操作">
+            <button type="button" className={mode === "register" ? "segment active" : "segment"} onClick={() => setMode("register")}>注册</button>
+            <button type="button" className={mode === "login" ? "segment active" : "segment"} onClick={() => setMode("login")}>登录</button>
+          </div>
+          <form className="formStack" onSubmit={handleSubmit}>
+            <label htmlFor="email">邮箱</label>
+            <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+            <label htmlFor="password">密码</label>
+            <input
+              id="password"
+              type="password"
+              autoComplete={mode === "register" ? "new-password" : "current-password"}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+            <div className="hint">密码至少 8 位。注册后会直接进入衣橱。</div>
+            {error && <div className="alert" role="alert">{error}</div>}
+            <button type="submit" className="primaryButton" disabled={!emailValid || !passwordValid || busy}>
+              {mode === "register" ? "注册账号" : "登录账号"}
+            </button>
+          </form>
+        </section>
+      </div>
     </main>
   );
 }
