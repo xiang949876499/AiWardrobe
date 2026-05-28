@@ -843,7 +843,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
         <label htmlFor="temperature">温度：{temperature}°C</label>
         <input id="temperature" type="range" min="-10" max="40" value={temperature} onChange={(event) => setTemperature(Number(event.target.value))} />
         {mode === "ai" ? (
-          <button type="button" className="primaryButton compact" disabled={busy || weatherStatus === "loading"} onClick={handleGenerate}>
+          <button type="button" className="accentButton compact aiPulse" disabled={busy || weatherStatus === "loading"} onClick={handleGenerate}>
             <Sparkles size={18} aria-hidden="true" />
             {weatherStatus === "loading" ? "获取天气中" : busy ? "生成中" : "生成搭配"}
           </button>
@@ -877,8 +877,13 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
             {currentOutfit.items.map((item) => <span key={item.garment_id}>{item.reason}</span>)}
           </div>
           <div className="buttonRow">
-            <button type="button" className="secondaryButton compact" disabled={busy || currentOutfit.is_favorite} onClick={handleFavorite}>
-              <Heart size={18} aria-hidden="true" />
+            <button
+              type="button"
+              className={`secondaryButton compact heartButton${currentOutfit.is_favorite ? " favorited" : ""}`}
+              disabled={busy || currentOutfit.is_favorite}
+              onClick={handleFavorite}
+            >
+              <Heart size={18} aria-hidden="true" fill={currentOutfit.is_favorite ? "currentColor" : "none"} />
               {currentOutfit.is_favorite ? "已收藏" : "保存喜欢"}
             </button>
             <button type="button" className="secondaryButton compact" disabled={busy} onClick={handleFixed}>

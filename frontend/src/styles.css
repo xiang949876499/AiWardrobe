@@ -758,6 +758,7 @@ button:disabled {
 .outfitResult {
   display: grid;
   gap: 14px;
+  animation: fadeSlideUp var(--duration-slow) var(--ease-out);
 }
 
 .resultHeader {
@@ -1009,4 +1010,63 @@ img.blurUp {
 img.blurUpLoaded {
   filter: blur(0) saturate(1);
   transform: scale(1);
+}
+
+/* === Heart Favorite Animation === */
+.heartButton {
+  position: relative;
+  transition: color var(--duration-normal) var(--ease-out);
+}
+
+.heartButton.favorited {
+  color: var(--color-primary-500);
+  animation: heartPop 0.4s var(--ease-out);
+}
+
+@keyframes heartPop {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.35); }
+  60% { transform: scale(0.9); }
+  100% { transform: scale(1); }
+}
+
+/* === AI Generate Pulse === */
+.aiPulse {
+  position: relative;
+}
+
+.aiPulse::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-500);
+  opacity: 0;
+  z-index: -1;
+  animation: pulseRing 2s var(--ease-in-out) infinite;
+}
+
+@keyframes pulseRing {
+  0% { opacity: 0; transform: scale(0.95); }
+  50% { opacity: 0.15; transform: scale(1.05); }
+  100% { opacity: 0; transform: scale(0.95); }
+}
+
+/* === Outfit Result Entrance === */
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* === Reduced motion overrides === */
+@media (prefers-reduced-motion: reduce) {
+  .aiPulse::after { animation: none; }
+  .heartButton.favorited { animation: none; }
+  .outfitResult { animation: none; }
 }
