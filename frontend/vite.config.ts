@@ -6,12 +6,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/auth": "http://localhost:8000",
-      "/garments": "http://localhost:8000",
-      "/uploads": "http://localhost:8000",
-      "/weather": "http://localhost:8000",
-      "/outfits": "http://localhost:8000",
-      "/static": "http://localhost:8000"
+      "/auth": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/garments": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "^/uploads(?:/|$)": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/weather": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/outfits": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/purchase": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/shopping": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/static": { target: "http://127.0.0.1:8000", changeOrigin: true }
     }
   },
   test: {

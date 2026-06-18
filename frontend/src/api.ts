@@ -1,4 +1,15 @@
-import type { AuthResponse, Garment, Occasion, Outfit, UploadSession, Weather } from "./types";
+import type {
+  AuthResponse,
+  Garment,
+  Occasion,
+  Outfit,
+  PurchaseCandidate,
+  ShoppingRecommendationRun,
+  ShoppingRecommendationTarget,
+  ShoppingRecommendationItem,
+  UploadSession,
+  Weather
+} from "./types";
 
 const TOKEN_KEY = "aiwardrobe_token";
 
@@ -26,9 +37,15 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
   const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body.detail || "请求失败，请稍后重试");
+    throw new Error(errorDetail(body.detail));
   }
   return body as T;
+}
+
+function errorDetail(detail: unknown): string {
+  if (typeof detail === "string" && detail) return detail;
+  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  return "请求失败，请稍后重试";
 }
 
 export function requestEmailCode(email: string) {
@@ -86,6 +103,35 @@ export function uploadPlainGarment(token: string, file: File) {
   return request<Garment>("/uploads/plain-garment", { method: "POST", body: form }, token);
 }
 
+export function analyzePurchaseUrl(token: string, url: string) {
+  return request<PurchaseCandidate>("/purchase/analyze", { method: "POST", body: JSON.stringify({ url }) }, token);
+}
+
+export function analyzePurchaseImage(token: string, file: File, productUrl = "") {
+  const form = new FormData();
+  form.append("file", file);
+  if (productUrl) form.append("product_url", productUrl);
+  return request<PurchaseCandidate>("/purchase/analyze-image", { method: "POST", body: form }, token);
+}
+
+export function savePurchaseCandidate(token: string, id: string) {
+  return request<Garment>(`/purchase/candidates/${id}/save`, { method: "POST" }, token);
+}
+
+export function createShoppingRecommendations(
+  token: string,
+  body: { target: ShoppingRecommendationTarget; refresh: boolean }
+) {
+  return request<ShoppingRecommendationRun>("/shopping/recommendations", {
+    method: "POST",
+    body: JSON.stringify(body)
+  }, token);
+}
+
+export function analyzeShoppingRecommendationItem(token: string, id: string) {
+  return request<ShoppingRecommendationItem>(`/shopping/recommendations/items/${id}/analyze`, { method: "POST" }, token);
+}
+
 export function updateGarment(token: string, id: string, body: Partial<Garment>) {
   return request<Garment>(`/garments/${id}`, { method: "PATCH", body: JSON.stringify(body) }, token);
 }
@@ -98,7 +144,7 @@ export function fetchTodayWeather(token: string, lat: number, lon: number) {
   return request<Weather>(`/weather/today?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, {}, token);
 }
 
-export function generateOutfit(token: string, body: { occasion: Occasion; season: string; temperature: number; weather?: Weather | null }) {
+export function generateOutfit(token: string, body: { occasion: Occasion; season?: string; temperature: number; weather?: Weather | null }) {
   return request<Outfit>("/outfits/generate", { method: "POST", body: JSON.stringify(body) }, token);
 }
 

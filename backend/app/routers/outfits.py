@@ -15,6 +15,7 @@ from app.schemas import (
     OutfitResponse,
 )
 from app.security import get_current_user
+from app.season import current_season
 
 router = APIRouter(prefix="/outfits", tags=["outfits"])
 
@@ -37,17 +38,19 @@ async def generate_outfit(
     if len(garments) < 3 or not {"top", "bottom", "shoes"}.issubset(categories):
         raise HTTPException(status_code=400, detail="Not enough ready garments to generate an outfit")
 
+    season = body.season or current_season(settings)
     items, explanation = await AiService(settings).generate_outfit(
         garments=garments,
         occasion=body.occasion,
-        season=body.season,
+        season=season,
         temperature=body.temperature,
         weather=body.weather,
     )
+    items = _trusted_outfit_items(items, garments)
     outfit = Outfit(
         user_id=current_user.id,
         occasion=body.occasion,
-        season=body.season,
+        season=season,
         temperature=body.temperature,
         items=items,
         explanation=explanation,
@@ -91,11 +94,12 @@ def create_manual_outfit(
         }
         for garment in ordered
     ]
+    season = body.season or current_season(get_settings())
     outfit = Outfit(
         user_id=current_user.id,
         name=body.name,
         occasion=body.occasion,
-        season=body.season,
+        season=season,
         temperature=body.temperature,
         items=items,
         explanation="用户保存的固定搭配" if body.is_fixed else "用户自定义搭配",
@@ -166,3 +170,21 @@ def delete_outfit(
     db.delete(outfit)
     db.commit()
     return Response(status_code=204)
+
+
+def _trusted_outfit_items(items: list[dict[str, object]], garments: list[Garment]) -> list[dict[str, object]]:
+    garments_by_id = {garment.id: garment for garment in garments}
+    trusted: list[dict[str, object]] = []
+    for item in items:
+        garment = garments_by_id.get(str(item.get("garment_id") or ""))
+        if garment is None:
+            continue
+        trusted.append(
+            {
+                "garment_id": garment.id,
+                "category": garment.category,
+                "image_url": garment.image_url,
+                "reason": str(item.get("reason") or "AI 推荐"),
+            }
+        )
+    return trusted

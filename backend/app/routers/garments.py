@@ -136,10 +136,9 @@ def update_garment(
     updates = body.model_dump(exclude_unset=True)
     for key, value in updates.items():
         setattr(garment, key, value)
-    if garment.review_status == "confirmed":
+    if garment.status != "failed":
+        garment.review_status = "confirmed"
         garment.status = "ready"
-    elif garment.review_status == "pending_review":
-        garment.status = "pending_review"
     db.commit()
     db.refresh(garment)
     return garment

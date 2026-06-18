@@ -47,7 +47,7 @@ Services: frontend `:5173`, backend `:8000`, MinIO console `:9001`, Postgres `:5
 ## Configuration
 
 Copy `.env.example` to `.env`. Key env vars:
-- `DATABASE_URL` — defaults to local SQLite; set to Postgres URL for Docker/production
+- `DATABASE_URL` — Postgres URL for app runtime; SQLite is allowed only in tests
 - `AI_DEMO_MODE` — defaults to `true`; set to `false` and configure `AI_BASE_URL`/`AI_API_KEY`/`AI_MODEL` for real AI
 - `STORAGE_DRIVER` — `local` (default) or `s3` (requires `S3_ENDPOINT_URL`, `S3_BUCKET`, AWS credentials)
 - `JWT_SECRET`, `SMTP_*` for email codes

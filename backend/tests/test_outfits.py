@@ -42,6 +42,72 @@ def test_generates_outfit_and_saves_history(client: TestClient) -> None:
     assert history.json()["items"][0]["id"] == outfit["id"]
 
 
+def test_generated_outfit_uses_database_image_urls_even_when_ai_hallucinates(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+    top_id = _create_garment(client, token, "shirt.jpg", "top")
+    _create_garment(client, token, "trousers.jpg", "bottom")
+    _create_garment(client, token, "loafers.jpg", "shoes")
+
+    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None):
+        return [
+            {
+                "garment_id": top_id,
+                "category": "top",
+                "image_url": "http://localhost:9100/aiwardrobe/missing.png",
+                "reason": "AI returned a stale URL",
+            }
+        ], "AI 搭配"
+
+    import app.routers.outfits as outfits_module
+
+    monkeypatch.setattr(outfits_module.AiService, "generate_outfit", fake_generate_outfit)
+
+    generated = client.post(
+        "/outfits/generate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"occasion": "work", "season": "spring", "temperature": 22},
+    )
+
+    assert generated.status_code == 201
+    item = generated.json()["items"][0]
+    assert item["garment_id"] == top_id
+    assert item["image_url"] != "http://localhost:9100/aiwardrobe/missing.png"
+    assert item["image_url"].startswith("/static/uploads/garments/")
+
+
+def test_generating_outfit_derives_season_when_client_omits_it(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+    _create_garment(client, token, "shirt.jpg", "top")
+    _create_garment(client, token, "trousers.jpg", "bottom")
+    _create_garment(client, token, "loafers.jpg", "shoes")
+    seen: dict[str, str] = {}
+
+    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None):
+        seen["season"] = season
+        return [
+            {
+                "garment_id": garments[0].id,
+                "category": garments[0].category,
+                "reason": "ok",
+            }
+        ], "AI 搭配"
+
+    import app.routers.outfits as outfits_module
+
+    monkeypatch.setattr(outfits_module, "current_season", lambda settings: "summer")
+    monkeypatch.setattr(outfits_module.AiService, "generate_outfit", fake_generate_outfit)
+
+    generated = client.post(
+        "/outfits/generate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"occasion": "work", "temperature": 31},
+    )
+
+    assert generated.status_code == 201
+    assert generated.json()["season"] == "summer"
+    assert seen["season"] == "summer"
+
+
 def test_generating_outfit_requires_enough_ready_garments(client: TestClient) -> None:
     token = login(client)
 

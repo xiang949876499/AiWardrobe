@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db
-from app.routers import auth, garments, outfits, uploads, weather
+from app.routers import auth, garments, outfits, purchase, shopping, uploads, weather
 
 
 @asynccontextmanager
@@ -32,6 +32,8 @@ def create_app() -> FastAPI:
     app.include_router(garments.router)
     app.include_router(uploads.router)
     app.include_router(outfits.router)
+    app.include_router(purchase.router)
+    app.include_router(shopping.router)
     app.include_router(weather.router)
 
     @app.get("/health")

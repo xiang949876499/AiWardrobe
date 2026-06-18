@@ -28,6 +28,18 @@ class User(Base):
     garments: Mapped[list["Garment"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     outfits: Mapped[list["Outfit"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     uploads: Mapped[list["UploadSession"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    purchase_candidates: Mapped[list["PurchaseCandidate"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    shopping_recommendation_runs: Mapped[list["ShoppingRecommendationRun"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    shopping_recommendation_items: Mapped[list["ShoppingRecommendationItem"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class EmailCode(Base):
@@ -67,6 +79,102 @@ class Garment(Base):
 
     user: Mapped[User] = relationship(back_populates="garments")
     upload_session: Mapped["UploadSession | None"] = relationship(back_populates="garments")
+
+
+class PurchaseCandidate(Base):
+    __tablename__ = "purchase_candidates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    product_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    image_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(String(240), default="")
+    domain: Mapped[str] = mapped_column(String(240), default="")
+    category: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    colors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    style: Mapped[str] = mapped_column(String(120), default="")
+    material: Mapped[str] = mapped_column(String(120), default="")
+    season: Mapped[list[str]] = mapped_column(JSON, default=list)
+    fit: Mapped[str] = mapped_column(String(120), default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    ai_result: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    ai_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    similar_items: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    recommendation: Mapped[str] = mapped_column(String(32), index=True, default="consider")
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    reason_summary: Mapped[str] = mapped_column(Text, default="")
+    analysis: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="ready")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    user: Mapped[User] = relationship(back_populates="purchase_candidates")
+
+
+class ShoppingRecommendationRun(Base):
+    __tablename__ = "shopping_recommendation_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    target: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="running")
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
+    rate_limit: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    user: Mapped[User] = relationship(back_populates="shopping_recommendation_runs")
+    items: Mapped[list["ShoppingRecommendationItem"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+
+
+class ShoppingRecommendationItem(Base):
+    __tablename__ = "shopping_recommendation_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("shopping_recommendation_runs.id"), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), index=True, default="taobao")
+    platform_item_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(300), default="")
+    image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    price: Mapped[str] = mapped_column(String(40), default="")
+    shop_name: Mapped[str] = mapped_column(String(160), default="")
+    product_url: Mapped[str] = mapped_column(Text, nullable=False)
+    raw: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    analysis_status: Mapped[str] = mapped_column(String(32), index=True, default="pending_analysis")
+    purchase_candidate_id: Mapped[str | None] = mapped_column(ForeignKey("purchase_candidates.id"), nullable=True)
+    recommendation: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    run: Mapped[ShoppingRecommendationRun] = relationship(back_populates="items")
+    user: Mapped[User] = relationship(back_populates="shopping_recommendation_items")
+    purchase_candidate: Mapped[PurchaseCandidate | None] = relationship()
+
+    @property
+    def similar_items(self) -> list[dict[str, object]]:
+        if self.purchase_candidate is None:
+            return []
+        return self.purchase_candidate.similar_items or []
+
+
+class RateLimitEvent(Base):
+    __tablename__ = "rate_limit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scope: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    key: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 class UploadSession(Base):

@@ -1,0 +1,77 @@
+<h2>推荐购买页布局草图</h2>
+<p class="subtitle">方案 B：淘宝候选池 + 前 3 件深度分析。点击你更喜欢的布局方向。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · 仪表盘式</div>
+        <div class="mockup-body">
+          <div class="mock-nav">推荐购买 · 自动缺口 · 通勤 · 夏季 · 基础款</div>
+          <div style="display:grid;grid-template-columns:220px 1fr;gap:12px;margin-top:12px">
+            <div class="mock-sidebar">
+              衣橱缺口<br><br>
+              上衣 8<br>
+              下装 1<br>
+              鞋子 1<br><br>
+              刷新限制<br>
+              还可刷新 2 次
+            </div>
+            <div class="mock-content">
+              <div class="placeholder">推荐商品卡 1 · 已分析 · 推荐 82</div>
+              <div class="placeholder">推荐商品卡 2 · 待分析</div>
+              <div class="placeholder">推荐商品卡 3 · 已分析 · 考虑 68</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 仪表盘式</h3>
+      <p>左侧解释为什么推荐，右侧商品列表。适合强调“补齐衣橱”的理性决策。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · 商品流式</div>
+        <div class="mockup-body">
+          <div class="mock-nav">推荐购买 · 自动为你补齐衣橱</div>
+          <div style="display:flex;gap:8px;margin:12px 0">
+            <button class="mock-button">自动缺口</button>
+            <button class="mock-button">通勤</button>
+            <button class="mock-button">夏季</button>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+            <div class="placeholder" style="height:180px">商品图<br>推荐 82<br>分析这件 / 加入衣橱</div>
+            <div class="placeholder" style="height:180px">商品图<br>待分析<br>分析这件</div>
+            <div class="placeholder" style="height:180px">商品图<br>考虑 68<br>去淘宝查看</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 商品流式</h3>
+      <p>像购物列表，直接看商品。操作最快，移动端也最自然。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · 分步向导式</div>
+        <div class="mockup-body">
+          <div class="placeholder">1. 选择目标：自动缺口 / 通勤 / 夏季</div>
+          <div class="placeholder">2. 搜索淘宝候选</div>
+          <div class="placeholder">3. 深度分析前 3 件</div>
+          <div class="placeholder">4. 保存到衣橱</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 分步向导式</h3>
+      <p>每一步解释清楚，适合新用户，但比商品流慢一点。</p>
+    </div>
+  </div>
+</div>

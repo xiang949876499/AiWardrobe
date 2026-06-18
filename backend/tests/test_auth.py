@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 def test_development_without_smtp_returns_dev_code(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'dev.db'}")
     monkeypatch.setenv("ENVIRONMENT", "development")
-    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setenv("TESTING", "true")
     monkeypatch.setenv("JWT_SECRET", "dev-secret-with-at-least-thirty-two-bytes")
     monkeypatch.delenv("SMTP_HOST", raising=False)
 

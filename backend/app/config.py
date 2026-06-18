@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     app_name: str = "AiWardrobe"
     environment: str = "development"
     testing: bool = False
-    database_url: str = "sqlite:///./aiwardrobe.db"
+    database_url: str = "postgresql+psycopg://aiwardrobe:aiwardrobe@localhost:5432/aiwardrobe"
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 60 * 24 * 7
@@ -49,6 +49,13 @@ class Settings(BaseSettings):
 
     weather_provider: str = "open_meteo"
     open_meteo_base_url: str = "https://api.open-meteo.com"
+    solar_terms_api_url: str = "https://www.hko.gov.hk/en/gts/astronomy/data/files/24SolarTerms_{year}.xml"
+
+    taobao_app_key: str | None = None
+    taobao_app_secret: str | None = None
+    taobao_adzone_id: str | None = None
+    taobao_api_base_url: str = "https://eco.taobao.com/router/rest"
+    shopping_recommendation_demo_mode: bool = True
 
     garment_ai_provider: str = "qwen"
 
@@ -64,9 +71,15 @@ class Settings(BaseSettings):
     runninghub_base_url: str = "https://www.runninghub.cn"
     runninghub_api_key: str | None = None
     runninghub_poll_interval_seconds: float = 2.0
-    runninghub_poll_timeout_seconds: int = 120
+    runninghub_poll_timeout_seconds: int = 600
     runninghub_garment_workflow_file: str = "workflows/garment_recognition.json"
     runninghub_tryon_workflow_file: str = "workflows/ai_tryon.json"
+
+    @model_validator(mode="after")
+    def reject_sqlite_outside_tests(self) -> "Settings":
+        if self.database_url.startswith("sqlite") and not self.testing:
+            raise ValueError("SQLite is only allowed when TESTING=true; set DATABASE_URL to Postgres for app runtime")
+        return self
 
 
 @lru_cache

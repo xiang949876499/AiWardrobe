@@ -12,7 +12,26 @@ AiWardrobe is an AI personal wardrobe MVP with a FastAPI backend and a React + V
 - Outfit generation by occasion, season, and temperature.
 - Current weather lookup through Open-Meteo with same-day location cache.
 - Outfit history and favorite toggling.
+- Purchase analysis from a product URL, including product image extraction, wardrobe similarity scoring, recommendation, manual image fallback, and saving a candidate into the wardrobe.
+- Shopping recommendations that search Taobao/Tmall demo or configured products, auto-analyze top candidates, rate-limit refreshes, and save useful items through the purchase candidate flow.
 - React UI following the agreed `ui-ux-pro-max` direction: flat, mobile-first, rose/pink brand accents, Lucide icons, labeled forms, and accessible focus states.
+
+## Purchase Analysis API
+
+- `POST /purchase/analyze` with `{ "url": "https://example.com/product/123" }` creates a `PurchaseCandidate` after extracting a likely product image and comparing it with ready wardrobe garments.
+- `POST /purchase/analyze-image` accepts multipart `file` plus optional `product_url` when URL image extraction fails.
+- `POST /purchase/candidates/{id}/save` converts a ready candidate into a normal ready `Garment` and marks the candidate as saved.
+
+`PurchaseCandidate` rows are separate from `Garment` rows until the user explicitly saves them.
+
+## Shopping Recommendations API
+
+- `POST /shopping/recommendations` with `{ "target": "auto_gap", "refresh": false }` creates or reuses a recommendation run and returns Taobao/Tmall candidates.
+- Supported targets: `auto_gap`, `work`, `date`, `sport`, `summer`, and `basics`.
+- `POST /shopping/recommendations/items/{id}/analyze` deep-analyzes a pending recommendation item and links it to a `PurchaseCandidate`.
+- Saving still uses `POST /purchase/candidates/{id}/save`.
+
+Recommendation refreshes are limited per user, Taobao searches are limited globally, and item analysis is limited per user.
 
 ## Local Development
 
@@ -57,6 +76,16 @@ DEEPSEEK_MODEL=deepseek-chat
 ```
 
 Garment image analysis can still use another OpenAI-compatible multimodal provider via `AI_BASE_URL`, `AI_API_KEY`, and `AI_MODEL`.
+
+Shopping recommendations run in demo mode by default. To use configured Taobao/Tmall product search, set:
+
+```powershell
+SHOPPING_RECOMMENDATION_DEMO_MODE=false
+TAOBAO_APP_KEY=your-taobao-app-key
+TAOBAO_APP_SECRET=your-taobao-app-secret
+TAOBAO_ADZONE_ID=your-taobao-adzone-id
+TAOBAO_API_BASE_URL=https://eco.taobao.com/router/rest
+```
 
 Weather uses Open-Meteo by default and does not require an API key:
 

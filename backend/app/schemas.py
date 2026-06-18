@@ -5,6 +5,11 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 Category = Literal["top", "bottom", "outerwear", "shoes", "bag", "accessory"]
 GarmentStatus = Literal["uploaded", "extracting", "tagging", "pending_review", "processing", "ready", "failed"]
+PurchaseCandidateStatus = Literal["analyzing", "ready", "failed", "saved"]
+PurchaseRecommendation = Literal["recommend", "consider", "skip"]
+ShoppingRecommendationTarget = Literal["auto_gap", "work", "date", "sport", "summer", "basics"]
+ShoppingRecommendationStatus = Literal["running", "ready", "failed", "rate_limited"]
+ShoppingAnalysisStatus = Literal["pending_analysis", "analyzing", "analyzed", "failed"]
 
 
 class EmailCodeRequest(BaseModel):
@@ -78,6 +83,91 @@ class GarmentUpdate(BaseModel):
     fit: str | None = None
     tags: list[str] | None = None
     review_status: Literal["pending_review", "confirmed"] | None = None
+
+
+class PurchaseAnalyzeRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class SimilarPurchaseItem(BaseModel):
+    garment_id: str
+    image_url: str
+    similarity: float
+    matched_reasons: list[str]
+
+
+class PurchaseCandidateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    product_url: str
+    source_image_url: str
+    image_url: str
+    image_key: str
+    thumbnail_url: str | None = None
+    title: str
+    domain: str
+    category: Category
+    colors: list[str]
+    style: str
+    material: str
+    season: list[str]
+    fit: str
+    tags: list[str]
+    ai_result: dict[str, object]
+    ai_confidence: float
+    similar_items: list[SimilarPurchaseItem]
+    recommendation: PurchaseRecommendation
+    score: int
+    reason_summary: str
+    analysis: dict[str, object]
+    status: PurchaseCandidateStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+class ShoppingRateLimitResponse(BaseModel):
+    remaining_refreshes: int | None = None
+    reset_at: datetime | None = None
+
+
+class ShoppingRecommendationRequest(BaseModel):
+    target: ShoppingRecommendationTarget = "auto_gap"
+    refresh: bool = False
+
+
+class ShoppingRecommendationItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    platform: str
+    platform_item_id: str
+    title: str
+    image_url: str
+    price: str
+    shop_name: str
+    product_url: str
+    analysis_status: ShoppingAnalysisStatus
+    purchase_candidate_id: str | None = None
+    recommendation: PurchaseRecommendation | None = None
+    score: int | None = None
+    reason_summary: str
+    similar_items: list[SimilarPurchaseItem] = []
+
+
+class ShoppingRecommendationRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    target: ShoppingRecommendationTarget
+    keywords: list[str]
+    status: ShoppingRecommendationStatus
+    error_code: str | None = None
+    cache_hit: bool
+    rate_limit: ShoppingRateLimitResponse
+    items: list[ShoppingRecommendationItemResponse]
+    created_at: datetime
+    updated_at: datetime
 
 
 class OutfitGenerateRequest(BaseModel):

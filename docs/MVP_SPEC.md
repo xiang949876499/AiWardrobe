@@ -13,8 +13,10 @@ AiWardrobe is an AI personal wardrobe web app. Users register and log in with em
 - Manual correction with user edits taking priority over AI results.
 - Outfit generation for work, date, sport, formal, and casual occasions.
 - Outfit explanation, history, and favorite state.
+- Purchase analysis from a generic product URL, with product image extraction, AI garment tagging, wardrobe comparison, deterministic recommendation scoring, manual product image fallback, and save-to-wardrobe.
+- Shopping recommendations for Taobao/Tmall through demo data or configured application-level Taobao credentials, with wardrobe gap keywords, cached candidate runs, item analysis, rate limits, and save-to-wardrobe through purchase candidates.
 
-Out of scope for v1: payments, social/community, shopping recommendations, virtual try-on, outfit calendar, shared wardrobes, WeChat mini-program implementation, complex brand recognition, and background removal.
+Out of scope for v1: payments, social/community, automatic purchase, platform-specific shopping scraping outside official/configured APIs, price tracking, virtual try-on, outfit calendar, shared wardrobes, WeChat mini-program implementation, complex brand recognition, and background removal.
 
 ## Architecture
 
@@ -22,6 +24,8 @@ Out of scope for v1: payments, social/community, shopping recommendations, virtu
 - Frontend: React + Vite + TypeScript, mobile-first responsive web.
 - Storage: S3-compatible object storage, with local storage fallback for development and tests.
 - AI: OpenAI-compatible multimodal API, with demo fallback when no API key is configured.
+- Purchase candidates: URL-derived or manually uploaded product images are stored separately as `PurchaseCandidate` records until the user saves them as ready `Garment` records.
+- Shopping recommendations: `ShoppingRecommendationRun` and `ShoppingRecommendationItem` records track target, keywords, cache reuse, analysis status, linked purchase candidates, and per-item failures.
 
 ## UI/UX Direction
 
@@ -40,4 +44,8 @@ Out of scope for v1: payments, social/community, shopping recommendations, virtu
 - A user can upload garment photos, receive AI attributes, and save manual corrections.
 - A user can filter wardrobe items by category, tag, color, or season.
 - A user with enough ready garments can generate an outfit, save it as favorite, and view it in history.
+- A user can submit a product URL, receive a recommend/consider/skip purchase analysis, see similar wardrobe items, and save the candidate into the wardrobe.
+- If URL image extraction fails, the UI offers manual product image upload and continues analysis.
+- A user can open shopping recommendations, choose a target, fetch Taobao/Tmall candidates, analyze pending items, see recommendation scores and similar wardrobe items, and save useful analyzed items into the wardrobe.
+- Recommendation refreshes, Taobao searches, and item analysis are rate-limited with readable UI feedback.
 - The UI works at mobile and desktop widths without horizontal overflow.

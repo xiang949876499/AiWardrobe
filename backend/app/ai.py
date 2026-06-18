@@ -341,7 +341,8 @@ class AiService:
                     "role": "user",
                     "content": (
                         "Generate one full outfit from this wardrobe. Return JSON with "
-                        "items [{garment_id, category, image_url, reason}] and explanation. "
+                        "items [{garment_id, category, reason}] and explanation. "
+                        "Only choose garment_id values from the wardrobe; do not invent or rewrite image URLs. "
                         f"Occasion: {occasion}; season: {season}; temperature: {temperature}; "
                         f"weather: {weather_context}; "
                         f"wardrobe: {json.dumps(wardrobe, ensure_ascii=False)}"

@@ -1,6 +1,9 @@
 export type Category = "top" | "bottom" | "outerwear" | "shoes" | "bag" | "accessory";
 export type GarmentStatus = "uploaded" | "extracting" | "tagging" | "pending_review" | "processing" | "ready" | "failed";
 export type Occasion = "work" | "date" | "sport" | "formal" | "casual";
+export type PurchaseRecommendation = "recommend" | "consider" | "skip";
+export type ShoppingRecommendationTarget = "auto_gap" | "work" | "date" | "sport" | "summer" | "basics";
+export type ShoppingAnalysisStatus = "pending_analysis" | "analyzing" | "analyzed" | "failed";
 
 export type User = {
   id: string;
@@ -73,6 +76,83 @@ export type Outfit = {
   is_fixed: boolean;
   weather_snapshot: Record<string, unknown> | null;
   created_at: string;
+};
+
+export type PurchaseCandidate = {
+  id: string;
+  product_url: string;
+  source_image_url: string;
+  image_url: string;
+  image_key: string;
+  thumbnail_url: string | null;
+  title: string;
+  domain: string;
+  category: Category;
+  colors: string[];
+  style: string;
+  material: string;
+  season: string[];
+  fit: string;
+  tags: string[];
+  ai_result: Record<string, unknown>;
+  ai_confidence: number;
+  similar_items: Array<{
+    garment_id: string;
+    image_url: string;
+    similarity: number;
+    matched_reasons: string[];
+  }>;
+  recommendation: PurchaseRecommendation;
+  score: number;
+  reason_summary: string;
+  analysis: {
+    duplicate_score?: number;
+    wardrobe_gap_score?: number;
+    pairing_score?: number;
+    decision_factors?: string[];
+    [key: string]: unknown;
+  };
+  status: "analyzing" | "ready" | "failed" | "saved";
+  created_at: string;
+  updated_at: string;
+};
+
+export type ShoppingRecommendationItem = {
+  id: string;
+  platform: string;
+  platform_item_id: string;
+  title: string;
+  image_url: string;
+  price: string;
+  shop_name: string;
+  product_url: string;
+  analysis_status: ShoppingAnalysisStatus;
+  purchase_candidate_id: string | null;
+  recommendation: PurchaseRecommendation | null;
+  score: number | null;
+  reason_summary: string;
+  similar_items: Array<{
+    garment_id: string;
+    image_url: string;
+    similarity: number;
+    matched_reasons: string[];
+  }>;
+};
+
+export type ShoppingRecommendationRun = {
+  id: string;
+  target: ShoppingRecommendationTarget;
+  keywords: string[];
+  status: "running" | "ready" | "failed" | "rate_limited";
+  error_code: string | null;
+  cache_hit: boolean;
+  rate_limit: {
+    remaining_refreshes: number | null;
+    reset_at: string | null;
+  };
+  items: ShoppingRecommendationItem[];
+  created_at: string;
+  updated_at: string;
 };
 
 export type AuthResponse = {

@@ -12,6 +12,7 @@ from app.comfyui import ComfyUIClient, ComfyUIError, ComfyUIOutput
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import Garment, UploadSession, User
+from app.runninghub import RunningHubClient, RunningHubOutput
 from app.schemas import GarmentResponse, UploadSessionResponse
 from app.security import get_current_user
 from app.storage import StorageService
@@ -27,24 +28,34 @@ async def upload_plain_garment(
     current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> Garment:
+    data = await file.read()
+    await file.seek(0)
     stored = await StorageService(settings).save_upload(file)
+    analysis = await AiService(settings).analyze_garment(
+        filename=file.filename or "upload.jpg",
+        content_type=file.content_type or "image/jpeg",
+        image_bytes=data,
+    )
+    raw = dict(analysis.raw)
+    raw["source"] = "plain_upload"
+    raw["workflow_provider"] = None
     garment = Garment(
         user_id=current_user.id,
         image_url=stored.url,
         image_key=stored.key,
         thumbnail_url=stored.url,
-        category="top",
-        colors=[],
-        style="",
-        material="",
-        season=[],
-        fit="",
-        tags=[],
+        category=analysis.category,
+        colors=analysis.colors,
+        style=analysis.style,
+        material=analysis.material,
+        season=analysis.season,
+        fit=analysis.fit,
+        tags=analysis.tags,
         crop_box=None,
-        ai_result={"source": "plain_upload", "message": "Manual review required"},
-        ai_confidence=0.0,
-        status="pending_review",
-        review_status="pending_review",
+        ai_result=raw,
+        ai_confidence=analysis.confidence,
+        status="ready",
+        review_status="confirmed",
     )
     db.add(garment)
     db.commit()
@@ -74,6 +85,29 @@ async def upload_garment_photo(
     BillingService().reserve_upload_recognition(current_user.id, upload.id)
 
     ai = AiService(settings)
+    if settings.workflow_provider == "runninghub":
+        try:
+            outputs = await RunningHubClient(settings).run_garment_recognition(
+                filename=file.filename or "upload.jpg",
+                content_type=file.content_type or "image/jpeg",
+                image_bytes=data,
+            )
+            if outputs:
+                upload.status = "tagging"
+                await _create_garments_from_runninghub_outputs(db, upload, current_user, storage, ai, outputs)
+                upload.status = "ready"
+                db.commit()
+                db.refresh(upload)
+                return upload
+            _fail_upload(db, upload, "RunningHub workflow did not return garment images")
+            raise HTTPException(status_code=502, detail="RunningHub workflow did not return garment images")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("RunningHub garment workflow failed")
+            _fail_upload(db, upload, f"RunningHub workflow failed: {exc}")
+            raise HTTPException(status_code=502, detail=f"RunningHub workflow failed: {_public_workflow_error(exc)}") from exc
+
     if settings.workflow_provider == "comfyui":
         try:
             outputs = await ComfyUIClient(settings).run_garment_recognition(
@@ -84,7 +118,7 @@ async def upload_garment_photo(
             if outputs:
                 upload.status = "tagging"
                 await _create_garments_from_comfyui_outputs(db, upload, current_user, storage, ai, outputs)
-                upload.status = "pending_review"
+                upload.status = "ready"
                 db.commit()
                 db.refresh(upload)
                 return upload
@@ -139,12 +173,12 @@ async def upload_garment_photo(
             crop_box=detection.crop_box,
             ai_result=raw,
             ai_confidence=analysis.confidence,
-            status="pending_review",
-            review_status="pending_review",
+            status="ready",
+            review_status="confirmed",
         )
         db.add(garment)
 
-    upload.status = "pending_review"
+    upload.status = "ready"
     db.commit()
     db.refresh(upload)
     return upload
@@ -223,8 +257,53 @@ async def _create_garments_from_comfyui_outputs(
             crop_box=None,
             ai_result=raw,
             ai_confidence=analysis.confidence,
-            status="pending_review",
-            review_status="pending_review",
+            status="ready",
+            review_status="confirmed",
+        )
+        db.add(garment)
+
+
+async def _create_garments_from_runninghub_outputs(
+    db: Session,
+    upload: UploadSession,
+    current_user: User,
+    storage: StorageService,
+    ai: AiService,
+    outputs: list[RunningHubOutput],
+) -> None:
+    for index, output in enumerate(outputs, start=1):
+        suffix = Path(output.filename).suffix or ".png"
+        stored = storage.save_bytes(output.data, suffix=suffix, prefix="garments/crops")
+        analysis = await ai.analyze_garment(
+            filename=f"{index}-{output.filename}",
+            content_type=output.content_type,
+            image_bytes=output.data,
+        )
+        raw = dict(analysis.raw)
+        raw["workflow_provider"] = "runninghub"
+        raw["runninghub_filename"] = output.filename
+        raw["runninghub_file_url"] = output.file_url
+        raw["runninghub_node_id"] = output.node_id
+        raw["detected_category"] = analysis.category
+        raw["crop_box"] = None
+        garment = Garment(
+            user_id=current_user.id,
+            source_upload_id=upload.id,
+            image_url=stored.url,
+            image_key=stored.key,
+            thumbnail_url=stored.url,
+            category=analysis.category,
+            colors=analysis.colors,
+            style=analysis.style,
+            material=analysis.material,
+            season=analysis.season,
+            fit=analysis.fit,
+            tags=analysis.tags,
+            crop_box=None,
+            ai_result=raw,
+            ai_confidence=analysis.confidence,
+            status="ready",
+            review_status="confirmed",
         )
         db.add(garment)
 
@@ -233,3 +312,10 @@ def _fail_upload(db: Session, upload: UploadSession, message: str) -> None:
     upload.status = "failed"
     upload.error_message = message
     db.commit()
+
+
+def _public_workflow_error(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return "unknown error"
+    return message.replace("\n", " ")[:300]

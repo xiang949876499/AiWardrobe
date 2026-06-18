@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
 
+from app.ai import AiAnalysis
 from app.comfyui import ComfyUIOutput
 from app.config import get_settings
+from app.runninghub import RunningHubOutput
 from tests.conftest import login
 
 
@@ -15,7 +17,7 @@ def _jpeg_bytes(width: int = 1000, height: int = 1000) -> bytes:
     return output.getvalue()
 
 
-def test_garment_photo_upload_creates_session_and_pending_review_items(client: TestClient) -> None:
+def test_garment_photo_upload_creates_session_and_ready_items(client: TestClient) -> None:
     token = login(client)
 
     uploaded = client.post(
@@ -26,11 +28,11 @@ def test_garment_photo_upload_creates_session_and_pending_review_items(client: T
 
     assert uploaded.status_code == 201
     body = uploaded.json()
-    assert body["status"] == "pending_review"
+    assert body["status"] == "ready"
     assert body["original_image_url"].startswith("/static/uploads/")
     assert len(body["garments"]) >= 1
-    assert body["garments"][0]["status"] == "pending_review"
-    assert body["garments"][0]["review_status"] == "pending_review"
+    assert body["garments"][0]["status"] == "ready"
+    assert body["garments"][0]["review_status"] == "confirmed"
     assert body["garments"][0]["crop_box"]
 
     fetched = client.get(f"/uploads/{body['id']}", headers={"Authorization": f"Bearer {token}"})
@@ -82,7 +84,7 @@ def test_single_item_upload_without_detection_box_keeps_full_image(client: TestC
         assert image.size == (1400, 1200)
 
 
-def test_confirming_ai_tags_moves_item_into_ready_wardrobe(client: TestClient) -> None:
+def test_editing_tags_keeps_item_in_ready_wardrobe(client: TestClient) -> None:
     token = login(client)
     uploaded = client.post(
         "/uploads/garment-photo",
@@ -94,23 +96,36 @@ def test_confirming_ai_tags_moves_item_into_ready_wardrobe(client: TestClient) -
     confirmed = client.patch(
         f"/garments/{garment_id}",
         headers={"Authorization": f"Bearer {token}"},
-        json={"category": "top", "tags": ["通勤"], "style": "通勤", "review_status": "confirmed"},
+        json={"tags": ["通勤", "常穿"]},
     )
 
     assert confirmed.status_code == 200
     assert confirmed.json()["status"] == "ready"
     assert confirmed.json()["review_status"] == "confirmed"
+    assert confirmed.json()["tags"] == ["通勤", "常穿"]
 
 
-def test_plain_upload_creates_pending_item_without_ai(monkeypatch, client: TestClient) -> None:
+def test_plain_upload_creates_ready_item_with_vl_tags(monkeypatch, client: TestClient) -> None:
     token = login(client)
+    calls: list[tuple[str, str, bytes]] = []
 
-    def fail_analyze(*args, **kwargs):
-        raise AssertionError("plain upload must not call AI analysis")
+    async def analyze(self, filename: str, content_type: str, image_bytes: bytes):
+        calls.append((filename, content_type, image_bytes))
+        return AiAnalysis(
+            category="bag",
+            colors=["黑色"],
+            style="通勤",
+            material="皮革",
+            season=["四季通用"],
+            fit="标准",
+            tags=["托特包", "通勤", "皮革"],
+            confidence=0.91,
+            raw={"category": "包", "sub_category": "托特包", "confidence": 0.91},
+        )
 
     import app.routers.uploads as uploads_module
 
-    monkeypatch.setattr(uploads_module.AiService, "analyze_garment", fail_analyze)
+    monkeypatch.setattr(uploads_module.AiService, "analyze_garment", analyze)
     uploaded = client.post(
         "/uploads/plain-garment",
         headers={"Authorization": f"Bearer {token}"},
@@ -119,14 +134,16 @@ def test_plain_upload_creates_pending_item_without_ai(monkeypatch, client: TestC
 
     assert uploaded.status_code == 201
     body = uploaded.json()
+    assert calls == [("single-shirt.jpg", "image/jpeg", _jpeg_bytes())]
     assert body["image_url"].startswith("/static/uploads/")
-    assert body["category"] == "top"
-    assert body["colors"] == []
-    assert body["tags"] == []
+    assert body["category"] == "bag"
+    assert body["colors"] == ["黑色"]
+    assert body["tags"] == ["托特包", "通勤", "皮革"]
     assert body["ai_result"]["source"] == "plain_upload"
-    assert body["ai_confidence"] == 0
-    assert body["status"] == "pending_review"
-    assert body["review_status"] == "pending_review"
+    assert body["ai_result"]["category"] == "包"
+    assert body["ai_confidence"] == 0.91
+    assert body["status"] == "ready"
+    assert body["review_status"] == "confirmed"
 
 
 def test_auto_recognition_reserves_billing_before_workflow(monkeypatch, client: TestClient) -> None:
@@ -184,6 +201,72 @@ def test_auto_recognition_can_use_comfyui_outputs(monkeypatch, client: TestClien
     assert (tmp_path / "uploads" / body["garments"][0]["image_key"]).read_bytes() == b"top-bytes"
     assert (tmp_path / "uploads" / body["garments"][1]["image_key"]).read_bytes() == b"pants-bytes"
     assert (tmp_path / "uploads" / body["garments"][2]["image_key"]).read_bytes() == b"shoes-bytes"
+
+
+def test_auto_recognition_can_use_runninghub_outputs(monkeypatch, client: TestClient, tmp_path) -> None:
+    token = login(client)
+    monkeypatch.setenv("WORKFLOW_PROVIDER", "runninghub")
+    monkeypatch.setenv("RUNNINGHUB_API_KEY", "rh-key")
+    get_settings.cache_clear()
+
+    import app.routers.uploads as uploads_module
+
+    class FakeRunningHubClient:
+        def __init__(self, settings) -> None:
+            self.settings = settings
+
+        async def run_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes):
+            return [
+                RunningHubOutput("top.png", "image/png", b"top-bytes", file_url="https://example.com/top.png", node_id="139"),
+                RunningHubOutput("pants.png", "image/png", b"pants-bytes", file_url="https://example.com/pants.png", node_id="151"),
+                RunningHubOutput("shoes.png", "image/png", b"shoes-bytes", file_url="https://example.com/shoes.png", node_id="156"),
+            ]
+
+    monkeypatch.setattr(uploads_module, "RunningHubClient", FakeRunningHubClient)
+    uploaded = client.post(
+        "/uploads/garment-photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("look.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 201
+    body = uploaded.json()
+    assert len(body["garments"]) == 3
+    assert body["garments"][0]["ai_result"]["workflow_provider"] == "runninghub"
+    assert body["garments"][0]["ai_result"]["runninghub_filename"] == "top.png"
+    assert body["garments"][0]["ai_result"]["runninghub_file_url"] == "https://example.com/top.png"
+    assert body["garments"][0]["ai_result"]["runninghub_node_id"] == "139"
+    assert (tmp_path / "uploads" / body["garments"][0]["image_key"]).read_bytes() == b"top-bytes"
+    assert (tmp_path / "uploads" / body["garments"][1]["image_key"]).read_bytes() == b"pants-bytes"
+    assert (tmp_path / "uploads" / body["garments"][2]["image_key"]).read_bytes() == b"shoes-bytes"
+
+
+def test_runninghub_auto_recognition_reports_client_error(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+    monkeypatch.setenv("WORKFLOW_PROVIDER", "runninghub")
+    monkeypatch.setenv("RUNNINGHUB_API_KEY", "rh-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    import app.routers.uploads as uploads_module
+
+    class FakeRunningHubClient:
+        def __init__(self, settings) -> None:
+            self.settings = settings
+
+        async def run_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes):
+            raise RuntimeError("workflow app rejected request")
+
+    monkeypatch.setattr(uploads_module, "RunningHubClient", FakeRunningHubClient)
+    uploaded = client.post(
+        "/uploads/garment-photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("look.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 502
+    assert uploaded.json()["detail"] == "RunningHub workflow failed: workflow app rejected request"
 
 
 def test_comfyui_auto_recognition_failure_does_not_fallback_to_original(monkeypatch, client: TestClient) -> None:

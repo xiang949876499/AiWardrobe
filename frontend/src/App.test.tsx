@@ -33,8 +33,8 @@ const pendingGarment = {
   image_url: "/static/uploads/crops/top.jpg",
   image_key: "garments/crops/top.jpg",
   thumbnail_url: "/static/uploads/crops/top.jpg",
-  status: "pending_review",
-  review_status: "pending_review",
+  status: "ready",
+  review_status: "confirmed",
   crop_box: { x: 10, y: 20, width: 300, height: 400 }
 };
 
@@ -50,6 +50,107 @@ const secondGarment = {
   tags: ["休闲"],
   created_at: "2026-05-22T00:00:00Z",
   updated_at: "2026-05-22T00:00:00Z"
+};
+
+const purchaseCandidate = {
+  id: "candidate-1",
+  product_url: "https://shop.example.com/products/black-shirt",
+  source_image_url: "https://shop.example.com/black-shirt.jpg",
+  image_url: "/static/uploads/purchase/black-shirt.jpg",
+  image_key: "purchase/black-shirt.jpg",
+  thumbnail_url: "/static/uploads/purchase/black-shirt.jpg",
+  title: "Black Shirt",
+  domain: "shop.example.com",
+  category: "top",
+  colors: ["black"],
+  style: "casual",
+  material: "cotton",
+  season: ["summer"],
+  fit: "regular",
+  tags: ["T-shirt", "casual"],
+  ai_result: { category: "top" },
+  ai_confidence: 0.88,
+  similar_items: [
+    {
+      garment_id: "garment-1",
+      image_url: "/static/uploads/shirt.jpg",
+      similarity: 86,
+      matched_reasons: ["same category", "similar color"]
+    }
+  ],
+  recommendation: "consider",
+  score: 68,
+  reason_summary: "已有相似黑色上衣，但夏季搭配仍有一定价值。",
+  analysis: {
+    duplicate_score: 86,
+    wardrobe_gap_score: 45,
+    pairing_score: 72,
+    decision_factors: ["somewhat similar item already owned"]
+  },
+  status: "ready",
+  created_at: "2026-06-16T00:00:00Z",
+  updated_at: "2026-06-16T00:00:00Z"
+};
+
+const shoppingRun = {
+  id: "shopping-run-1",
+  target: "auto_gap",
+  keywords: ["work skirt", "black shoes"],
+  status: "ready",
+  error_code: null,
+  cache_hit: false,
+  rate_limit: {
+    remaining_refreshes: 2,
+    reset_at: "2026-06-17T10:10:00Z"
+  },
+  items: [
+    {
+      id: "shopping-item-1",
+      platform: "taobao",
+      platform_item_id: "tb-1",
+      title: "Black Work Skirt",
+      image_url: "https://img.example.com/skirt.jpg",
+      price: "129.00",
+      shop_name: "Demo Taobao Shop",
+      product_url: "https://item.taobao.com/item.htm?id=tb-1",
+      analysis_status: "analyzed",
+      purchase_candidate_id: "candidate-shopping-1",
+      recommendation: "recommend",
+      score: 82,
+      reason_summary: "Fills a work bottom gap.",
+      similar_items: []
+    },
+    {
+      id: "shopping-item-2",
+      platform: "taobao",
+      platform_item_id: "tb-2",
+      title: "Neutral Low Heel Shoes",
+      image_url: "https://img.example.com/shoes.jpg",
+      price: "169.00",
+      shop_name: "Demo Taobao Shop",
+      product_url: "https://item.taobao.com/item.htm?id=tb-2",
+      analysis_status: "pending_analysis",
+      purchase_candidate_id: null,
+      recommendation: null,
+      score: null,
+      reason_summary: "",
+      similar_items: []
+    }
+  ],
+  created_at: "2026-06-17T10:00:00Z",
+  updated_at: "2026-06-17T10:00:00Z"
+};
+
+const savedShoppingGarment = {
+  ...garment,
+  id: "saved-shopping",
+  image_url: "/static/uploads/purchase/skirt.jpg",
+  image_key: "purchase/skirt.jpg",
+  thumbnail_url: "/static/uploads/purchase/skirt.jpg",
+  category: "bottom",
+  colors: ["black"],
+  created_at: "2026-06-17T10:00:00Z",
+  updated_at: "2026-06-17T10:00:00Z"
 };
 
 function mockFetchOnce(body: unknown, status = 200) {
@@ -73,6 +174,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -115,7 +217,7 @@ describe("AiWardrobe app", () => {
       id: "upload-1",
       original_image_url: "/static/uploads/original.jpg",
       original_image_key: "garments/original.jpg",
-      status: "pending_review",
+      status: "ready",
       error_message: null,
       garments: [pendingGarment, secondGarment, { ...garment, id: "garment-shoes", category: "shoes", image_url: "/static/uploads/crops/shoes.jpg", thumbnail_url: "/static/uploads/crops/shoes.jpg", image_key: "garments/crops/shoes.jpg", style: "运动" }],
       created_at: "2026-05-21T00:00:00Z",
@@ -131,15 +233,15 @@ describe("AiWardrobe app", () => {
     await user.upload(screen.getByLabelText("选择整套或多单品照片"), file);
 
     expect(await screen.findByText("单品拆分完成")).toBeInTheDocument();
-    expect(screen.getByText("待确认单品")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /确认上衣/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /确认下装/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /确认鞋子/ })).toBeInTheDocument();
+    expect(screen.getByText("已入库单品")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编辑下装/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编辑鞋子/ })).toBeInTheDocument();
     expect(screen.queryByAltText("multi-look.jpg 原图")).not.toBeInTheDocument();
     expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/uploads/garment-photo");
   });
 
-  test("plain upload creates a manual pending garment without auto recognition", async () => {
+  test("plain upload creates a ready tagged garment without auto split workflow", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
@@ -158,12 +260,12 @@ describe("AiWardrobe app", () => {
 
     await screen.findByText("我的衣橱");
     await user.click(screen.getByRole("button", { name: "上传" }));
-    expect(screen.getByText(/普通上传不调用识别工作流/)).toBeInTheDocument();
+    expect(screen.getByText(/普通上传不调用拆分工作流/)).toBeInTheDocument();
     const file = new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择单件图片"), file);
 
-    expect(await screen.findByText("等待手动确认")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /确认上衣/ })).toBeInTheDocument();
+    expect(await screen.findByText("已入库，可编辑标签")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
     expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/uploads/plain-garment");
   });
 
@@ -275,6 +377,53 @@ describe("AiWardrobe app", () => {
 
     expect(await screen.findByText("用户保存的固定搭配")).toBeInTheDocument();
     expect(screen.getByText("固定搭配")).toBeInTheDocument();
+  });
+
+  test("outfit page derives season from the current date instead of showing a selector", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-05-26T10:00:00+08:00"));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce({
+      date: "2026-05-26",
+      lat_key: "31.23",
+      lon_key: "121.47",
+      city: "当前位置",
+      condition: "Cloudy",
+      temperature: 31,
+      feels_like: 33,
+      precipitation: 0,
+      wind_speed: 8,
+      cached: false
+    });
+    mockFetchOnce({
+      id: "outfit-season",
+      name: "",
+      occasion: "work",
+      season: "summer",
+      temperature: 31,
+      items: [{ garment_id: "garment-1", category: "top", image_url: "/static/uploads/shirt.jpg", reason: "ok" }],
+      explanation: "season aware",
+      source: "ai",
+      is_favorite: false,
+      is_fixed: false,
+      weather_snapshot: { temperature: 31 },
+      created_at: "2026-05-26T00:00:00Z"
+    });
+
+    render(<App />);
+
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByRole("button", { name: "搭配" }));
+
+    expect(await screen.findByText("按节气自动判断")).toBeInTheDocument();
+    expect(screen.queryByLabelText("季节")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "生成搭配" }));
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/outfits/generate"));
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[2][1]?.body));
+    expect(body.season).toBeUndefined();
   });
 
   test("falls back to default city weather when geolocation is unavailable", async () => {
@@ -400,6 +549,100 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText("还没有搭配历史")).toBeInTheDocument();
     expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/outfits/outfit-1");
     expect(vi.mocked(fetch).mock.calls[2][1]).toEqual(expect.objectContaining({ method: "DELETE" }));
+  });
+
+  test("purchase analysis submits a product URL and saves the candidate to wardrobe", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce(purchaseCandidate, 201);
+    mockFetchOnce({
+      ...garment,
+      id: "saved-purchase",
+      image_url: purchaseCandidate.image_url,
+      image_key: purchaseCandidate.image_key,
+      thumbnail_url: purchaseCandidate.thumbnail_url,
+      colors: ["black"],
+      tags: ["T-shirt", "casual"],
+      created_at: "2026-06-16T00:00:00Z",
+      updated_at: "2026-06-16T00:00:00Z"
+    }, 201);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "衣橱" });
+    await user.click(screen.getByRole("button", { name: "购买分析" }));
+    await user.type(screen.getByLabelText("商品链接"), purchaseCandidate.product_url);
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+
+    expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
+    expect(screen.getByText("已有相似黑色上衣，但夏季搭配仍有一定价值。")).toBeInTheDocument();
+    expect(screen.getByText("86%")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "加入衣橱" }));
+
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/candidates/candidate-1/save"));
+  });
+
+  test("purchase analysis offers manual image upload when URL extraction fails", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce({ detail: "product_image_not_found" }, 400);
+    mockFetchOnce({ ...purchaseCandidate, id: "manual-candidate", source_image_url: "manual.jpg" }, 201);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "衣橱" });
+    await user.click(screen.getByRole("button", { name: "购买分析" }));
+    await user.type(screen.getByLabelText("商品链接"), "https://shop.example.com/no-image");
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+
+    expect(await screen.findByText("未能自动找到商品图片，请上传商品图继续分析。")).toBeInTheDocument();
+    const file = new File(["fake product image"], "manual.jpg", { type: "image/jpeg" });
+    await user.upload(screen.getByLabelText("上传商品图片"), file);
+
+    expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/analyze-image");
+  });
+
+  test("shopping recommendations loads products and saves analyzed items", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce(shoppingRun, 201);
+    mockFetchOnce(savedShoppingGarment, 201);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "衣橱" });
+    await user.click(screen.getByRole("button", { name: "推荐购买" }));
+    await user.click(screen.getByRole("button", { name: "获取推荐" }));
+
+    expect(await screen.findByText("Black Work Skirt")).toBeInTheDocument();
+    expect(screen.getByText("Fills a work bottom gap.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "加入衣橱" }));
+
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/candidates/candidate-shopping-1/save"));
+  });
+
+  test("shopping recommendations show a readable rate limit message", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce({
+      detail: {
+        code: "recommendation_rate_limited",
+        reset_at: "2026-06-17T10:10:00Z"
+      }
+    }, 429);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "衣橱" });
+    await user.click(screen.getByRole("button", { name: "推荐购买" }));
+    await user.click(screen.getByRole("button", { name: "获取推荐" }));
+
+    expect(await screen.findByText(/刷新太/)).toBeInTheDocument();
   });
 
   test("AI try-on entry shows unavailable feature cards", async () => {
