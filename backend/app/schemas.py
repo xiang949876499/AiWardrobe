@@ -251,7 +251,7 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
     analysis.setdefault("pros", _legacy_pros(gap_score, pairing_score, duplicate_score))
     analysis.setdefault("cons", _legacy_cons(gap_score, pairing_score, duplicate_score))
     analysis.setdefault("outfit_ideas", [])
-    analysis.setdefault("idle_risk_detail", _legacy_idle_risk_detail(idle_risk))
+    analysis["idle_risk_detail"] = _normalize_idle_risk_detail(analysis.get("idle_risk_detail"), idle_risk)
     analysis.setdefault("next_actions", ["save", "share", "analyze_another", "upload_wardrobe"])
     _set_int_default_or_replace_zero(analysis, "duplicate_score", duplicate_score)
     _set_int_default_or_replace_zero(analysis, "wardrobe_gap_score", gap_score)
@@ -305,6 +305,32 @@ def _set_int_default_or_replace_zero(analysis: dict[str, object], key: str, valu
         return
     if current == 0 and value != 0:
         analysis[key] = value
+
+
+def _normalize_idle_risk_detail(value: object, idle_risk: int) -> dict[str, str]:
+    fallback = _legacy_idle_risk_detail(idle_risk)
+    if not isinstance(value, dict):
+        return fallback
+
+    normalized_level = _normalize_idle_risk_level(value.get("level"))
+    if normalized_level is None:
+        return fallback
+
+    reason = value.get("reason")
+    return {"level": normalized_level, "reason": str(reason) if reason else fallback["reason"]}
+
+
+def _normalize_idle_risk_level(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"low", "低"}:
+        return "低"
+    if normalized in {"medium", "mid", "中"}:
+        return "中"
+    if normalized in {"high", "高"}:
+        return "高"
+    return None
 
 
 def _analysis_str_list(value: object) -> list[str]:

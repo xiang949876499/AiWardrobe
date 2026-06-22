@@ -362,6 +362,7 @@ def test_purchase_candidate_response_prefers_nested_scores_over_zero_alias_place
     assert analysis.dimensions.gap_fill == 58
     assert analysis.dimensions.outfit_potential == 66
     assert analysis.score_breakdown.wardrobe_gap == 58
+    assert analysis.idle_risk_detail["level"] == "低"
 
 
 def test_purchase_candidate_response_prefers_nested_scores_over_zero_top_level_placeholders() -> None:
@@ -410,6 +411,7 @@ def test_purchase_candidate_response_prefers_nested_scores_over_zero_top_level_p
     assert analysis.dimensions.duplicate_risk == 18
     assert analysis.dimensions.scene_match == 81
     assert analysis.score_breakdown.outfit_potential == 73
+    assert analysis.idle_risk_detail["level"] == "低"
 
 
 def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: TestClient) -> None:
