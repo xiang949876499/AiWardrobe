@@ -204,6 +204,20 @@ describe("AiWardrobe app", () => {
     expect(screen.queryByRole("button", { name: "AI 换装" })).not.toBeInTheDocument();
   });
 
+  test("home product image CTA opens purchase analysis with upload immediately available", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "上传商品图" }));
+
+    expect(await screen.findByLabelText("上传商品图片")).toBeInTheDocument();
+    expect(screen.getByLabelText("商品链接")).toBeInTheDocument();
+  });
+
   test("registers with email and password and shows the empty wardrobe state", async () => {
     const user = userEvent.setup();
     mockFetchOnce({

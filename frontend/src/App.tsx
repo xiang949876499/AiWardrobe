@@ -16,7 +16,7 @@ import {
   Trash2,
   UploadCloud
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   analyzeShoppingRecommendationItem,
@@ -83,6 +83,7 @@ const navItems = [
 ] as const;
 
 type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping" | "detail";
+type PurchaseEntryMode = "url" | "image";
 
 type UploadItem = {
   name: string;
@@ -115,6 +116,7 @@ function App() {
   const [currentOutfit, setCurrentOutfit] = useState<Outfit | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [purchaseEntryMode, setPurchaseEntryMode] = useState<PurchaseEntryMode>("url");
 
   useEffect(() => {
     if (token) void refreshGarments(token);
@@ -203,6 +205,11 @@ function App() {
     if (view === "history") void loadHistory();
   }
 
+  function openPurchase(mode: PurchaseEntryMode) {
+    setPurchaseEntryMode(mode);
+    setActiveView("purchase");
+  }
+
   function handleLogout() {
     clearToken();
     setToken(null);
@@ -243,7 +250,8 @@ function App() {
         {activeView === "home" && (
           <HomeView
             readyCount={garments.filter((garment) => garment.status === "ready").length}
-            onPurchase={() => setActiveView("purchase")}
+            onPurchaseImage={() => openPurchase("image")}
+            onPurchaseUrl={() => openPurchase("url")}
             onReport={() => setActiveView("report")}
             onOutfit={() => setActiveView("outfit")}
           />
@@ -276,6 +284,7 @@ function App() {
         {activeView === "purchase" && (
           <PurchaseAnalysisView
             token={token}
+            entryMode={purchaseEntryMode}
             onAuthExpired={handleLogout}
             onSaved={(garment) => {
               setGarments((items) => mergeGarments([garment], items));
@@ -447,9 +456,10 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
-function HomeView({ readyCount, onPurchase, onReport, onOutfit }: {
+function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutfit }: {
   readyCount: number;
-  onPurchase: () => void;
+  onPurchaseImage: () => void;
+  onPurchaseUrl: () => void;
   onReport: () => void;
   onOutfit: () => void;
 }) {
@@ -468,11 +478,11 @@ function HomeView({ readyCount, onPurchase, onReport, onOutfit }: {
 
       <div className="controlPanel">
         <div className="buttonRow">
-          <button type="button" className="primaryButton compact" onClick={onPurchase}>
+          <button type="button" className="primaryButton compact" onClick={onPurchaseImage}>
             <UploadCloud size={18} aria-hidden="true" />
             上传商品图
           </button>
-          <button type="button" className="secondaryButton compact" onClick={onPurchase}>
+          <button type="button" className="secondaryButton compact" onClick={onPurchaseUrl}>
             <ExternalLink size={18} aria-hidden="true" />
             粘贴商品链接
           </button>
@@ -748,8 +758,9 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
   );
 }
 
-function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
+function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
   token: string;
+  entryMode: PurchaseEntryMode;
   onAuthExpired: () => void;
   onSaved: (garment: Garment) => void;
 }) {
@@ -757,16 +768,22 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
   const [candidate, setCandidate] = useState<PurchaseCandidate | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [manualFallback, setManualFallback] = useState(false);
+  const [imageUploadVisible, setImageUploadVisible] = useState(entryMode === "image");
   const [saveMessage, setSaveMessage] = useState("");
+  const urlInputRef = useRef<HTMLInputElement>(null);
   const canAnalyze = /^https?:\/\/\S+\.\S+/.test(url.trim());
+
+  useEffect(() => {
+    setImageUploadVisible(entryMode === "image");
+    if (entryMode === "url") urlInputRef.current?.focus();
+  }, [entryMode]);
 
   async function handleAnalyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
     setError("");
     setSaveMessage("");
-    setManualFallback(false);
+    setImageUploadVisible(false);
     try {
       const result = await analyzePurchaseUrl(token, url.trim());
       setCandidate(result);
@@ -777,7 +794,7 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
       }
       const message = errorMessage(err);
       if (["product_image_not_found", "page_fetch_failed", "image_download_failed", "invalid_url"].includes(message)) {
-        setManualFallback(true);
+        setImageUploadVisible(true);
         setError("未能自动找到商品图片，请上传商品图继续分析。");
       } else {
         setError(message);
@@ -795,7 +812,7 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
     try {
       const result = await analyzePurchaseImage(token, file, url.trim());
       setCandidate(result);
-      setManualFallback(false);
+      setImageUploadVisible(false);
     } catch (err) {
       if (isAuthError(err)) {
         onAuthExpired();
@@ -840,6 +857,7 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
         <input
           id="purchase-url"
           type="url"
+          ref={urlInputRef}
           value={url}
           placeholder="https://example.com/product/123"
           onChange={(event) => setUrl(event.target.value)}
@@ -849,7 +867,7 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
           {busy ? "分析中" : "开始分析"}
         </button>
         {error && <div className="alert" role="alert">{error}</div>}
-        {manualFallback && (
+        {imageUploadVisible && (
           <label className="uploadBox purchaseUploadBox" htmlFor="purchase-image-upload">
             <UploadCloud size={28} aria-hidden="true" />
             <strong>上传商品图片</strong>
