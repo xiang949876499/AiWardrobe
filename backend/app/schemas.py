@@ -181,11 +181,40 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
         return value
 
     analysis = dict(value) if isinstance(value, dict) else {}
-    duplicate_score = _analysis_int(analysis, "duplicate_score")
-    gap_score = _analysis_int(analysis, "wardrobe_gap_score")
-    pairing_score = _analysis_int(analysis, "pairing_score")
-    idle_risk = _analysis_int(analysis, "idle_risk", _legacy_idle_risk(duplicate_score, gap_score, pairing_score))
-    scene_match = _analysis_int(analysis, "scene_match", 68)
+    raw_dimensions = analysis.get("dimensions") if isinstance(analysis.get("dimensions"), dict) else {}
+    raw_breakdown = analysis.get("score_breakdown") if isinstance(analysis.get("score_breakdown"), dict) else {}
+    duplicate_score = _first_analysis_int(
+        analysis,
+        raw_breakdown,
+        raw_dimensions,
+        ("duplicate_score", "duplicate_risk", "duplicate_risk", "duplicate_risk"),
+    )
+    gap_score = _first_analysis_int(
+        analysis,
+        raw_breakdown,
+        raw_dimensions,
+        ("wardrobe_gap_score", "gap_fill", "wardrobe_gap", "gap_fill"),
+    )
+    pairing_score = _first_analysis_int(
+        analysis,
+        raw_breakdown,
+        raw_dimensions,
+        ("pairing_score", "outfit_potential", "outfit_potential", "outfit_potential"),
+    )
+    idle_risk = _first_analysis_int(
+        analysis,
+        raw_breakdown,
+        raw_dimensions,
+        ("idle_risk", "idle_risk", "idle_risk", "idle_risk"),
+        _legacy_idle_risk(duplicate_score, gap_score, pairing_score),
+    )
+    scene_match = _first_analysis_int(
+        analysis,
+        raw_breakdown,
+        raw_dimensions,
+        ("scene_match", "scene_match", "scene_match", "scene_match"),
+        68,
+    )
     score = _analysis_int(analysis, "score", int(response_data.get("score") or 0))
     recommendation = _analysis_recommendation(analysis.get("conclusion") or response_data.get("recommendation"))
     summary = str(analysis.get("summary") or response_data.get("reason_summary") or "")
@@ -198,7 +227,7 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
         "duplicate_risk": duplicate_score,
         "idle_risk": idle_risk,
     }
-    dimensions = {**default_dimensions, **(analysis.get("dimensions") if isinstance(analysis.get("dimensions"), dict) else {})}
+    dimensions = {**default_dimensions, **raw_dimensions}
 
     default_breakdown = {
         "duplicate_risk": duplicate_score,
@@ -207,10 +236,7 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
         "scene_match": scene_match,
         "idle_risk": idle_risk,
     }
-    score_breakdown = {
-        **default_breakdown,
-        **(analysis.get("score_breakdown") if isinstance(analysis.get("score_breakdown"), dict) else {}),
-    }
+    score_breakdown = {**default_breakdown, **raw_breakdown}
 
     analysis.setdefault("conclusion", recommendation)
     analysis.setdefault("score", score)
@@ -240,6 +266,28 @@ def _analysis_int(analysis: dict[str, object], key: str, default: int = 0) -> in
         return int(analysis.get(key, default) or 0)
     except (TypeError, ValueError):
         return default
+
+
+def _first_analysis_int(
+    analysis: dict[str, object],
+    score_breakdown: dict[object, object],
+    dimensions: dict[object, object],
+    keys: tuple[str, str, str, str],
+    default: int = 0,
+) -> int:
+    alias_key, top_level_key, breakdown_key, dimension_key = keys
+    for source, key in (
+        (analysis, alias_key),
+        (analysis, top_level_key),
+        (score_breakdown, breakdown_key),
+        (dimensions, dimension_key),
+    ):
+        if key in source and source[key] is not None:
+            try:
+                return int(source[key] or 0)
+            except (TypeError, ValueError):
+                continue
+    return default
 
 
 def _analysis_str_list(value: object) -> list[str]:

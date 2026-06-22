@@ -205,6 +205,80 @@ def test_purchase_candidate_response_backfills_legacy_analysis_shape() -> None:
     assert "analyze_another" in analysis.next_actions
 
 
+def test_purchase_candidate_response_derives_aliases_from_structured_analysis() -> None:
+    created_at = datetime.now(timezone.utc)
+    response = PurchaseCandidateResponse.model_validate(
+        {
+            "id": "candidate-structured",
+            "product_url": "https://shop.example.com/products/structured",
+            "source_image_url": "https://shop.example.com/structured.jpg",
+            "image_url": "/static/uploads/purchase/structured.jpg",
+            "image_key": "purchase/structured.jpg",
+            "thumbnail_url": None,
+            "title": "Structured Candidate",
+            "domain": "shop.example.com",
+            "category": "top",
+            "colors": ["black"],
+            "style": "casual",
+            "material": "cotton",
+            "season": ["summer"],
+            "fit": "regular",
+            "tags": ["basic"],
+            "ai_result": {},
+            "ai_confidence": 0.9,
+            "similar_items": [],
+            "recommendation": "recommend",
+            "score": 82,
+            "reason_summary": "Structured deterministic summary",
+            "analysis": {
+                "conclusion": "recommend",
+                "score": 82,
+                "summary": "Structured deterministic summary",
+                "dimensions": {
+                    "outfit_potential": 71,
+                    "scene_match": 79,
+                    "gap_fill": 64,
+                    "duplicate_risk": 23,
+                    "idle_risk": 38,
+                },
+                "duplicate_risk": 23,
+                "idle_risk": 38,
+                "outfit_potential": 71,
+                "match_scenes": ["日常", "通勤"],
+                "suggested_price": {"min": 80, "ideal": 138, "max": 220},
+                "score_breakdown": {
+                    "duplicate_risk": 23,
+                    "wardrobe_gap": 64,
+                    "outfit_potential": 71,
+                    "scene_match": 79,
+                    "idle_risk": 38,
+                },
+                "pros": ["补足衣橱缺口"],
+                "cons": ["暂无明显风险"],
+                "outfit_ideas": [],
+                "idle_risk_detail": {"level": "低", "reason": "结构化风险说明"},
+                "next_actions": ["save", "share", "analyze_another", "upload_wardrobe"],
+                "decision_factors": ["structured factor"],
+            },
+            "status": "ready",
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+    )
+
+    analysis = response.analysis
+    assert analysis.duplicate_score == 23
+    assert analysis.wardrobe_gap_score == 64
+    assert analysis.pairing_score == 71
+    assert analysis.dimensions.duplicate_risk == 23
+    assert analysis.dimensions.gap_fill == 64
+    assert analysis.dimensions.outfit_potential == 71
+    assert analysis.dimensions.scene_match == 79
+    assert analysis.score_breakdown.wardrobe_gap == 64
+    assert analysis.idle_risk == 38
+    assert analysis.idle_risk_detail == {"level": "低", "reason": "结构化风险说明"}
+
+
 def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: TestClient) -> None:
     token = login(client)
 
