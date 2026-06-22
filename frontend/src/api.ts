@@ -103,6 +103,12 @@ export function uploadPlainGarment(token: string, file: File) {
   return request<Garment>("/uploads/plain-garment", { method: "POST", body: form }, token);
 }
 
+export function batchUploadGarments(token: string, files: File[]) {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  return request<{ items: Garment[] }>("/garments/batch-upload", { method: "POST", body: form }, token);
+}
+
 export function analyzePurchaseUrl(token: string, url: string) {
   return request<PurchaseCandidate>("/purchase/analyze", { method: "POST", body: JSON.stringify({ url }) }, token);
 }

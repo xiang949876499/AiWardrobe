@@ -22,6 +22,7 @@ import {
   analyzeShoppingRecommendationItem,
   analyzePurchaseImage,
   analyzePurchaseUrl,
+  batchUploadGarments,
   clearToken,
   createShoppingRecommendations,
   createManualOutfit,
@@ -696,6 +697,27 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
   async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
     setItems(files.map((file) => ({ name: file.name, status: "上传中" })));
+    if (mode === "plain" && files.length > 1) {
+      setItems((current) => current.map((item) => ({ ...item, status: "入库中" })));
+      try {
+        const compressedFiles = await Promise.all(files.map((file) => compressImageFile(file)));
+        const response = await batchUploadGarments(token, compressedFiles);
+        setItems((current) => current.map((item, index) => ({
+          ...item,
+          status: "已入库",
+          garments: response.items[index] ? [response.items[index]] : []
+        })));
+        onPending(response.items);
+      } catch (err) {
+        if (isAuthError(err)) {
+          onAuthExpired();
+          return;
+        }
+        const message = errorMessage(err);
+        setItems((current) => current.map((item) => ({ ...item, status: "失败", message })));
+      }
+      return;
+    }
     for (const file of files) {
       setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
       try {
@@ -730,6 +752,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
         <button type="button" className={mode === "plain" ? "segment active" : "segment"} onClick={() => setMode("plain")}>普通上传</button>
         <button type="button" className={mode === "auto" ? "segment active" : "segment"} onClick={() => setMode("auto")}>自动识别</button>
       </div>
+      <p className="uploadHint">上传 3 件常穿衣物即可提升分析准确度。优先选上衣、下装和鞋。</p>
       <label className="uploadBox" htmlFor="garment-upload">
         <UploadCloud size={34} aria-hidden="true" />
         <strong>{mode === "plain" ? "选择单件图片" : "选择整套或多单品照片"}</strong>

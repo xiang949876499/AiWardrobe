@@ -357,6 +357,32 @@ describe("AiWardrobe app", () => {
     expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/uploads/plain-garment");
   });
 
+  test("plain multi-file upload uses the batch upload endpoint", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce({ items: [garment, secondGarment] }, 201);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByRole("button", { name: "上传衣服" }));
+    expect(screen.getByText(/上传 3 件常穿衣物即可提升分析准确度/)).toBeInTheDocument();
+
+    const files = [
+      new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" }),
+      new File(["fake image"], "single-pants.jpg", { type: "image/jpeg" })
+    ];
+    await user.upload(screen.getByLabelText("选择单件图片"), files);
+
+    expect(await screen.findAllByText("已入库，可编辑标签")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编辑下装/ })).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/garments/batch-upload");
+  });
+
   test("clears stale session when auto upload rejects the bearer token", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "stale-token");
