@@ -839,6 +839,8 @@ describe("AiWardrobe app", () => {
 
     await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "报告" }));
+    await user.click(screen.getByRole("button", { name: "查看衣橱缺口商品" }));
+    expect(await screen.findByRole("heading", { name: "衣橱缺口" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看缺口" }));
 
     expect(await screen.findByText("Black Work Skirt")).toBeInTheDocument();
@@ -887,6 +889,8 @@ describe("AiWardrobe app", () => {
 
     await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "报告" }));
+    await user.click(screen.getByRole("button", { name: "查看衣橱缺口商品" }));
+    expect(await screen.findByRole("heading", { name: "衣橱缺口" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看缺口" }));
 
     expect(await screen.findByText(/刷新太/)).toBeInTheDocument();

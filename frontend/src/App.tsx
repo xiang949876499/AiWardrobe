@@ -302,10 +302,7 @@ function App() {
           <ReportView
             token={token}
             onAuthExpired={handleLogout}
-            onSaved={(garment) => {
-              setGarments((items) => mergeGarments([garment], items));
-              setActiveView("wardrobe");
-            }}
+            onOpenShopping={() => setActiveView("shopping")}
           />
         )}
         {activeView === "shopping" && (
@@ -1064,10 +1061,10 @@ const shoppingTargets: Array<{ value: ShoppingRecommendationTarget; label: strin
   { value: "basics", label: "基础款" }
 ];
 
-function ReportView({ token, onAuthExpired, onSaved }: {
+function ReportView({ token, onAuthExpired, onOpenShopping }: {
   token: string;
   onAuthExpired: () => void;
-  onSaved: (garment: Garment) => void;
+  onOpenShopping: () => void;
 }) {
   const [report, setReport] = useState<WardrobeReport | null>(null);
   const [busy, setBusy] = useState(true);
@@ -1105,6 +1102,13 @@ function ReportView({ token, onAuthExpired, onSaved }: {
           <p>{report?.summary || "正在读取你的衣柜结构。"}</p>
         </div>
         {report && <div className="weatherPill"><Archive size={16} aria-hidden="true" />{report.ready_total} / {report.total}</div>}
+      </div>
+
+      <div className="buttonRow">
+        <button type="button" className="primaryButton compact" onClick={onOpenShopping}>
+          <Store size={18} aria-hidden="true" />
+          查看衣橱缺口商品
+        </button>
       </div>
 
       {busy && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在生成报告</div>}
@@ -1150,8 +1154,6 @@ function ReportView({ token, onAuthExpired, onSaved }: {
           </div>
         </>
       )}
-
-      <ShoppingRecommendationsView token={token} onAuthExpired={onAuthExpired} onSaved={onSaved} />
     </section>
   );
 }
