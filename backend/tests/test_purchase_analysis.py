@@ -1,7 +1,10 @@
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
 from app.ai import AiAnalysis
 from app.models import Garment
+from app.schemas import PurchaseCandidateResponse
 from tests.conftest import login
 
 
@@ -147,6 +150,59 @@ def test_purchase_analysis_exposes_score_breakdown() -> None:
     assert decision.analysis["match_scenes"]
     assert decision.analysis["pros"]
     assert decision.analysis["next_actions"] == ["save", "share", "analyze_another", "upload_wardrobe"]
+
+
+def test_purchase_candidate_response_backfills_legacy_analysis_shape() -> None:
+    created_at = datetime.now(timezone.utc)
+    response = PurchaseCandidateResponse.model_validate(
+        {
+            "id": "candidate-legacy",
+            "product_url": "https://shop.example.com/products/legacy",
+            "source_image_url": "https://shop.example.com/legacy.jpg",
+            "image_url": "/static/uploads/purchase/legacy.jpg",
+            "image_key": "purchase/legacy.jpg",
+            "thumbnail_url": None,
+            "title": "Legacy Candidate",
+            "domain": "shop.example.com",
+            "category": "top",
+            "colors": ["black"],
+            "style": "casual",
+            "material": "cotton",
+            "season": ["summer"],
+            "fit": "regular",
+            "tags": ["basic"],
+            "ai_result": {},
+            "ai_confidence": 0.9,
+            "similar_items": [],
+            "recommendation": "consider",
+            "score": 61,
+            "reason_summary": "Legacy deterministic summary",
+            "analysis": {
+                "duplicate_score": 20,
+                "wardrobe_gap_score": 70,
+                "pairing_score": 55,
+                "decision_factors": ["legacy factor"],
+            },
+            "status": "ready",
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+    )
+
+    analysis = response.analysis
+    assert analysis.conclusion == "consider"
+    assert analysis.score == 61
+    assert analysis.summary == "Legacy deterministic summary"
+    assert analysis.dimensions.duplicate_risk == 20
+    assert analysis.dimensions.gap_fill == 70
+    assert analysis.dimensions.outfit_potential == 55
+    assert analysis.score_breakdown.wardrobe_gap == 70
+    assert analysis.duplicate_score == 20
+    assert analysis.wardrobe_gap_score == 70
+    assert analysis.pairing_score == 55
+    assert analysis.decision_factors == ["legacy factor"]
+    assert analysis.suggested_price.ideal > 0
+    assert "analyze_another" in analysis.next_actions
 
 
 def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: TestClient) -> None:

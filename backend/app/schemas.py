@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
 
 Category = Literal["top", "bottom", "outerwear", "shoes", "bag", "accessory"]
 GarmentStatus = Literal["uploaded", "extracting", "tagging", "pending_review", "processing", "ready", "failed"]
@@ -169,6 +169,130 @@ class PurchaseCandidateResponse(BaseModel):
     status: PurchaseCandidateStatus
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("analysis", mode="before")
+    @classmethod
+    def backfill_legacy_analysis(cls, value: object, info: ValidationInfo) -> object:
+        return _normalize_purchase_analysis(value, info.data)
+
+
+def _normalize_purchase_analysis(value: object, response_data: dict[str, object]) -> object:
+    if isinstance(value, PurchaseAnalysisDetail):
+        return value
+
+    analysis = dict(value) if isinstance(value, dict) else {}
+    duplicate_score = _analysis_int(analysis, "duplicate_score")
+    gap_score = _analysis_int(analysis, "wardrobe_gap_score")
+    pairing_score = _analysis_int(analysis, "pairing_score")
+    idle_risk = _analysis_int(analysis, "idle_risk", _legacy_idle_risk(duplicate_score, gap_score, pairing_score))
+    scene_match = _analysis_int(analysis, "scene_match", 68)
+    score = _analysis_int(analysis, "score", int(response_data.get("score") or 0))
+    recommendation = _analysis_recommendation(analysis.get("conclusion") or response_data.get("recommendation"))
+    summary = str(analysis.get("summary") or response_data.get("reason_summary") or "")
+    decision_factors = _analysis_str_list(analysis.get("decision_factors"))
+
+    default_dimensions = {
+        "outfit_potential": pairing_score,
+        "scene_match": scene_match,
+        "gap_fill": gap_score,
+        "duplicate_risk": duplicate_score,
+        "idle_risk": idle_risk,
+    }
+    dimensions = {**default_dimensions, **(analysis.get("dimensions") if isinstance(analysis.get("dimensions"), dict) else {})}
+
+    default_breakdown = {
+        "duplicate_risk": duplicate_score,
+        "wardrobe_gap": gap_score,
+        "outfit_potential": pairing_score,
+        "scene_match": scene_match,
+        "idle_risk": idle_risk,
+    }
+    score_breakdown = {
+        **default_breakdown,
+        **(analysis.get("score_breakdown") if isinstance(analysis.get("score_breakdown"), dict) else {}),
+    }
+
+    analysis.setdefault("conclusion", recommendation)
+    analysis.setdefault("score", score)
+    analysis.setdefault("summary", summary)
+    analysis["dimensions"] = dimensions
+    analysis.setdefault("duplicate_risk", duplicate_score)
+    analysis.setdefault("idle_risk", idle_risk)
+    analysis.setdefault("outfit_potential", pairing_score)
+    analysis.setdefault("match_scenes", ["日常"])
+    analysis.setdefault("suggested_price", _legacy_suggested_price(response_data.get("category"), score))
+    analysis["score_breakdown"] = score_breakdown
+    analysis.setdefault("pros", _legacy_pros(gap_score, pairing_score, duplicate_score))
+    analysis.setdefault("cons", _legacy_cons(gap_score, pairing_score, duplicate_score))
+    analysis.setdefault("outfit_ideas", [])
+    analysis.setdefault("idle_risk_detail", _legacy_idle_risk_detail(idle_risk))
+    analysis.setdefault("next_actions", ["save", "share", "analyze_another", "upload_wardrobe"])
+    analysis.setdefault("duplicate_score", duplicate_score)
+    analysis.setdefault("wardrobe_gap_score", gap_score)
+    analysis.setdefault("pairing_score", pairing_score)
+    analysis.setdefault("decision_factors", decision_factors)
+    analysis.setdefault("similar_items", response_data.get("similar_items") or [])
+    return analysis
+
+
+def _analysis_int(analysis: dict[str, object], key: str, default: int = 0) -> int:
+    try:
+        return int(analysis.get(key, default) or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _analysis_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _analysis_recommendation(value: object) -> PurchaseRecommendation:
+    if value in {"recommend", "consider", "skip"}:
+        return value
+    return "consider"
+
+
+def _legacy_idle_risk(duplicate_score: int, gap_score: int, pairing_score: int) -> int:
+    risk = round(duplicate_score * 0.45 + (100 - gap_score) * 0.3 + (100 - pairing_score) * 0.25)
+    return max(0, min(100, risk))
+
+
+def _legacy_suggested_price(category: object, score: int) -> dict[str, int]:
+    base = 180 if category in {"outerwear", "shoes", "bag"} else 120
+    ideal = round(base * (0.75 + score / 200))
+    return {"min": max(49, ideal - 70), "ideal": max(1, ideal), "max": ideal + 100}
+
+
+def _legacy_pros(gap_score: int, pairing_score: int, duplicate_score: int) -> list[str]:
+    pros: list[str] = []
+    if gap_score >= 65:
+        pros.append("补足衣橱缺口")
+    if pairing_score >= 70:
+        pros.append("搭配潜力高")
+    if duplicate_score < 70:
+        pros.append("与现有衣橱区分明显")
+    return pros or ["可继续观察"]
+
+
+def _legacy_cons(gap_score: int, pairing_score: int, duplicate_score: int) -> list[str]:
+    cons: list[str] = []
+    if gap_score < 65:
+        cons.append("新增覆盖有限")
+    if pairing_score < 70:
+        cons.append("可搭配方案偏少")
+    if duplicate_score >= 70:
+        cons.append("已有相似单品")
+    return cons or ["暂无明显风险"]
+
+
+def _legacy_idle_risk_detail(idle_risk: int) -> dict[str, str]:
+    if idle_risk >= 70:
+        return {"level": "高", "reason": "重复或不好搭的概率偏高，建议冷静后再买。"}
+    if idle_risk >= 45:
+        return {"level": "中", "reason": "有一定使用场景，但需要确认价格和搭配。"}
+    return {"level": "低", "reason": "与衣橱互补度较好，闲置风险可控。"}
 
 
 class ShoppingRateLimitResponse(BaseModel):
