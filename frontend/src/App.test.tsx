@@ -196,6 +196,21 @@ const savedShoppingGarment = {
   updated_at: "2026-06-17T10:00:00Z"
 };
 
+const wardrobeReport = {
+  total: 1,
+  ready_total: 1,
+  summary: "最值得补充的是鞋。",
+  category_distribution: [{ key: "top", label: "上衣", count: 1, ratio: 1 }],
+  color_distribution: [{ key: "white", label: "white", count: 1, ratio: 1 }],
+  style_distribution: [{ key: "通勤", label: "通勤", count: 1, ratio: 1 }],
+  scene_coverage: { work: 20, casual: 20, sport: 0, date: 0 },
+  duplicate_risks: [],
+  low_use_items: [],
+  wardrobe_gaps: [{ category: "shoes", label: "鞋", score: 90, reason: "当前只有 0 件。" }],
+  avoid_categories: ["白色上衣"],
+  suggested_categories: ["鞋"]
+};
+
 function mockFetchOnce(body: unknown, status = 200) {
   vi.mocked(fetch).mockResolvedValueOnce({
     ok: status >= 200 && status < 300,
@@ -791,6 +806,7 @@ describe("AiWardrobe app", () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [garment] });
+    mockFetchOnce(wardrobeReport);
     mockFetchOnce(shoppingRun, 201);
     mockFetchOnce(savedShoppingGarment, 201);
 
@@ -804,13 +820,30 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText("Fills a work bottom gap.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "加入衣橱" }));
 
-    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/candidates/candidate-shopping-1/save"));
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/purchase/candidates/candidate-shopping-1/save"));
+  });
+
+  test("report page shows wardrobe gaps and avoid categories", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce(wardrobeReport);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "报告" });
+    await user.click(screen.getByRole("button", { name: "报告" }));
+
+    expect(await screen.findByText("衣柜体检报告")).toBeInTheDocument();
+    expect(screen.getByText("最值得补充的是鞋。")).toBeInTheDocument();
+    expect(screen.getByText("最近不建议再买")).toBeInTheDocument();
   });
 
   test("shopping recommendations show a readable rate limit message", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [garment] });
+    mockFetchOnce(wardrobeReport);
     mockFetchOnce({
       detail: {
         code: "recommendation_rate_limited",

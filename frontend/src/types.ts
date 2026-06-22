@@ -191,6 +191,21 @@ export type ShoppingRecommendationRun = {
   updated_at: string;
 };
 
+export type WardrobeReport = {
+  total: number;
+  ready_total: number;
+  summary: string;
+  category_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
+  color_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
+  style_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
+  scene_coverage: Record<string, number>;
+  duplicate_risks: Array<{ category: string; label: string; count: number; garment_ids: string[] }>;
+  low_use_items: Array<Record<string, unknown>>;
+  wardrobe_gaps: Array<{ category: Category; label: string; score: number; reason: string }>;
+  avoid_categories: string[];
+  suggested_categories: string[];
+};
+
 export type AuthResponse = {
   access_token: string;
   token_type: string;

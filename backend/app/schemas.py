@@ -85,6 +85,35 @@ class GarmentUpdate(BaseModel):
     review_status: Literal["pending_review", "confirmed"] | None = None
 
 
+class DistributionItem(BaseModel):
+    key: str
+    label: str
+    count: int
+    ratio: float
+
+
+class WardrobeGapResponse(BaseModel):
+    category: Category
+    label: str
+    score: int
+    reason: str
+
+
+class WardrobeReportResponse(BaseModel):
+    total: int
+    ready_total: int
+    summary: str
+    category_distribution: list[DistributionItem]
+    color_distribution: list[DistributionItem]
+    style_distribution: list[DistributionItem]
+    scene_coverage: dict[str, int]
+    duplicate_risks: list[dict[str, object]]
+    low_use_items: list[dict[str, object]]
+    wardrobe_gaps: list[WardrobeGapResponse]
+    avoid_categories: list[str]
+    suggested_categories: list[str]
+
+
 class PurchaseAnalyzeRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
 

@@ -31,6 +31,7 @@ import {
   fetchGarments,
   fetchOutfits,
   fetchTodayWeather,
+  fetchWardrobeReport,
   generateOutfit,
   getStoredToken,
   loginWithPassword,
@@ -53,6 +54,7 @@ import type {
   ShoppingRecommendationRun,
   ShoppingRecommendationTarget,
   UploadSession,
+  WardrobeReport,
   Weather
 } from "./types";
 import { GarmentCardSkeleton } from "./Skeleton";
@@ -296,7 +298,17 @@ function App() {
             }}
           />
         )}
-        {(activeView === "report" || activeView === "shopping") && (
+        {activeView === "report" && (
+          <ReportView
+            token={token}
+            onAuthExpired={handleLogout}
+            onSaved={(garment) => {
+              setGarments((items) => mergeGarments([garment], items));
+              setActiveView("wardrobe");
+            }}
+          />
+        )}
+        {activeView === "shopping" && (
           <ShoppingRecommendationsView
             token={token}
             onAuthExpired={handleLogout}
@@ -1051,6 +1063,113 @@ const shoppingTargets: Array<{ value: ShoppingRecommendationTarget; label: strin
   { value: "summer", label: "夏季" },
   { value: "basics", label: "基础款" }
 ];
+
+function ReportView({ token, onAuthExpired, onSaved }: {
+  token: string;
+  onAuthExpired: () => void;
+  onSaved: (garment: Garment) => void;
+}) {
+  const [report, setReport] = useState<WardrobeReport | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadReport() {
+      setBusy(true);
+      setError("");
+      try {
+        const result = await fetchWardrobeReport(token);
+        if (!cancelled) setReport(result);
+      } catch (err) {
+        if (isAuthError(err)) {
+          onAuthExpired();
+          return;
+        }
+        if (!cancelled) setError(errorMessage(err));
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    }
+    void loadReport();
+    return () => {
+      cancelled = true;
+    };
+  }, [onAuthExpired, token]);
+
+  return (
+    <section className="pageSection" aria-labelledby="report-title">
+      <div className="pageHeader">
+        <div>
+          <h1 id="report-title">衣柜体检报告</h1>
+          <p>{report?.summary || "正在读取你的衣柜结构。"}</p>
+        </div>
+        {report && <div className="weatherPill"><Archive size={16} aria-hidden="true" />{report.ready_total} / {report.total}</div>}
+      </div>
+
+      {busy && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在生成报告</div>}
+      {error && <div className="alert" role="alert">{error}</div>}
+
+      {report && (
+        <>
+          <div className="controlPanel">
+            <h2>衣橱缺口</h2>
+            {report.wardrobe_gaps.length === 0 ? (
+              <p className="hint">当前基础品类覆盖较均衡。</p>
+            ) : (
+              <div className="analysisStats">
+                {report.wardrobe_gaps.slice(0, 5).map((gap) => (
+                  <span key={gap.category}>{gap.label} {gap.score}</span>
+                ))}
+              </div>
+            )}
+            <div className="tagRow">
+              {report.wardrobe_gaps.slice(0, 3).map((gap) => <span key={gap.category}>{gap.reason}</span>)}
+            </div>
+          </div>
+
+          <div className="controlPanel">
+            <h2>最近不建议再买</h2>
+            {report.avoid_categories.length === 0 ? (
+              <p className="hint">暂时没有明显重复风险。</p>
+            ) : (
+              <div className="tagRow">
+                {report.avoid_categories.map((category) => <span key={category}>{category}</span>)}
+              </div>
+            )}
+          </div>
+
+          <div className="controlPanel">
+            <h2>品类分布</h2>
+            <DistributionList items={report.category_distribution} />
+          </div>
+
+          <div className="controlPanel">
+            <h2>颜色分布</h2>
+            <DistributionList items={report.color_distribution} />
+          </div>
+        </>
+      )}
+
+      <ShoppingRecommendationsView token={token} onAuthExpired={onAuthExpired} onSaved={onSaved} />
+    </section>
+  );
+}
+
+function DistributionList({ items }: {
+  items: Array<{ key: string; label: string; count: number; ratio: number }>;
+}) {
+  if (items.length === 0) {
+    return <p className="hint">暂无数据。</p>;
+  }
+  return (
+    <div className="tagRow">
+      {items.map((item) => (
+        <span key={item.key}>{item.label} {item.count} ({Math.round(item.ratio * 100)}%)</span>
+      ))}
+    </div>
+  );
+}
 
 function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
   token: string;

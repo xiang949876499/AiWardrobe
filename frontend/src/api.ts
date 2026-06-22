@@ -8,6 +8,7 @@ import type {
   ShoppingRecommendationTarget,
   ShoppingRecommendationItem,
   UploadSession,
+  WardrobeReport,
   Weather
 } from "./types";
 
@@ -168,6 +169,10 @@ export function createManualOutfit(token: string, body: {
 
 export function fetchOutfits(token: string, favorite?: boolean) {
   return request<{ items: Outfit[] }>(`/outfits/history${favorite === undefined ? "" : `?favorite=${favorite}`}`, {}, token);
+}
+
+export function fetchWardrobeReport(token: string) {
+  return request<WardrobeReport>("/reports/wardrobe", {}, token);
 }
 
 export function deleteOutfit(token: string, id: string) {
