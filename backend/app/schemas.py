@@ -96,6 +96,51 @@ class SimilarPurchaseItem(BaseModel):
     matched_reasons: list[str]
 
 
+class PurchaseScoreBreakdown(BaseModel):
+    duplicate_risk: int
+    wardrobe_gap: int
+    outfit_potential: int
+    scene_match: int
+    idle_risk: int
+
+
+class PurchaseAnalysisDimensions(BaseModel):
+    outfit_potential: int
+    scene_match: int
+    gap_fill: int
+    duplicate_risk: int
+    idle_risk: int
+
+
+class PurchaseSuggestedPrice(BaseModel):
+    min: int
+    ideal: int
+    max: int
+
+
+class PurchaseAnalysisDetail(BaseModel):
+    conclusion: PurchaseRecommendation
+    score: int
+    summary: str
+    dimensions: PurchaseAnalysisDimensions
+    duplicate_risk: int
+    idle_risk: int
+    outfit_potential: int
+    match_scenes: list[str]
+    suggested_price: PurchaseSuggestedPrice
+    score_breakdown: PurchaseScoreBreakdown
+    pros: list[str]
+    cons: list[str]
+    outfit_ideas: list[dict[str, object]]
+    idle_risk_detail: dict[str, str]
+    next_actions: list[str]
+    duplicate_score: int
+    wardrobe_gap_score: int
+    pairing_score: int
+    decision_factors: list[str]
+    similar_items: list[SimilarPurchaseItem] = Field(default_factory=list)
+
+
 class PurchaseCandidateResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -120,7 +165,7 @@ class PurchaseCandidateResponse(BaseModel):
     recommendation: PurchaseRecommendation
     score: int
     reason_summary: str
-    analysis: dict[str, object]
+    analysis: PurchaseAnalysisDetail
     status: PurchaseCandidateStatus
     created_at: datetime
     updated_at: datetime

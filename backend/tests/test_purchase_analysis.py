@@ -112,9 +112,41 @@ def test_purchase_analysis_creates_candidate_without_creating_garment(monkeypatc
     assert body["image_url"].startswith("/static/uploads/purchase/")
     assert body["recommendation"] in ["recommend", "consider", "skip"]
     assert body["similar_items"]
+    analysis = body["analysis"]
+    assert analysis["conclusion"] in ["recommend", "consider", "skip"]
+    assert analysis["score"] == body["score"]
+    assert analysis["dimensions"]["duplicate_risk"] >= 0
+    assert analysis["dimensions"]["outfit_potential"] >= 0
+    assert analysis["idle_risk_detail"]["level"] in ["低", "中", "高"]
+    assert analysis["suggested_price"]["ideal"] > 0
+    assert "analyze_another" in analysis["next_actions"]
 
     listed = client.get("/garments", headers={"Authorization": f"Bearer {token}"})
     assert len(listed.json()["items"]) == 1
+
+
+def test_purchase_analysis_exposes_score_breakdown() -> None:
+    from app.purchase_analysis import analyze_purchase
+
+    candidate = AiAnalysis(
+        category="top",
+        colors=["black"],
+        style="casual",
+        material="cotton",
+        season=["summer"],
+        fit="regular",
+        tags=["basic"],
+        confidence=0.9,
+        raw={},
+    )
+
+    decision = analyze_purchase(candidate, [])
+
+    assert decision.analysis["dimensions"]["gap_fill"] == decision.analysis["wardrobe_gap_score"]
+    assert decision.analysis["score_breakdown"]["wardrobe_gap"] >= 0
+    assert decision.analysis["match_scenes"]
+    assert decision.analysis["pros"]
+    assert decision.analysis["next_actions"] == ["save", "share", "analyze_another", "upload_wardrobe"]
 
 
 def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: TestClient) -> None:

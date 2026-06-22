@@ -106,11 +106,47 @@ export type PurchaseCandidate = {
   score: number;
   reason_summary: string;
   analysis: {
-    duplicate_score?: number;
-    wardrobe_gap_score?: number;
-    pairing_score?: number;
-    decision_factors?: string[];
-    [key: string]: unknown;
+    conclusion: PurchaseRecommendation;
+    score: number;
+    summary: string;
+    dimensions: {
+      outfit_potential: number;
+      scene_match: number;
+      gap_fill: number;
+      duplicate_risk: number;
+      idle_risk: number;
+    };
+    duplicate_risk: number;
+    idle_risk: number;
+    outfit_potential: number;
+    match_scenes: string[];
+    suggested_price: { min: number; ideal: number; max: number };
+    score_breakdown: {
+      duplicate_risk: number;
+      wardrobe_gap: number;
+      outfit_potential: number;
+      scene_match: number;
+      idle_risk: number;
+    };
+    pros: string[];
+    cons: string[];
+    outfit_ideas: Array<{
+      scene: string;
+      items: Array<{ category: string; image_url: string; reason: string }>;
+      reason: string;
+    }>;
+    idle_risk_detail: { level: "低" | "中" | "高"; reason: string };
+    next_actions: string[];
+    duplicate_score: number;
+    wardrobe_gap_score: number;
+    pairing_score: number;
+    decision_factors: string[];
+    similar_items: Array<{
+      garment_id: string;
+      image_url: string;
+      similarity: number;
+      matched_reasons: string[];
+    }>;
   };
   status: "analyzing" | "ready" | "failed" | "saved";
   created_at: string;
