@@ -199,8 +199,8 @@ export type WardrobeReport = {
   color_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
   style_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
   scene_coverage: Record<string, number>;
-  duplicate_risks: Array<{ category: string; label: string; count: number; garment_ids: string[] }>;
-  low_use_items: Array<Record<string, unknown>>;
+  duplicate_risks: Array<{ category: Category; label: string; colors: string[]; count: number; garment_ids: string[] }>;
+  low_use_items: Array<{ garment_id: string; category: Category; label: string; reason: string; score: number }>;
   wardrobe_gaps: Array<{ category: Category; label: string; score: number; reason: string }>;
   avoid_categories: string[];
   suggested_categories: string[];

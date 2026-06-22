@@ -99,6 +99,22 @@ class WardrobeGapResponse(BaseModel):
     reason: str
 
 
+class DuplicateRiskResponse(BaseModel):
+    category: Category
+    label: str
+    colors: list[str]
+    count: int
+    garment_ids: list[str]
+
+
+class LowUseItemResponse(BaseModel):
+    garment_id: str
+    category: Category
+    label: str
+    reason: str
+    score: int
+
+
 class WardrobeReportResponse(BaseModel):
     total: int
     ready_total: int
@@ -107,8 +123,8 @@ class WardrobeReportResponse(BaseModel):
     color_distribution: list[DistributionItem]
     style_distribution: list[DistributionItem]
     scene_coverage: dict[str, int]
-    duplicate_risks: list[dict[str, object]]
-    low_use_items: list[dict[str, object]]
+    duplicate_risks: list[DuplicateRiskResponse]
+    low_use_items: list[LowUseItemResponse]
     wardrobe_gaps: list[WardrobeGapResponse]
     avoid_categories: list[str]
     suggested_categories: list[str]

@@ -15,7 +15,7 @@ CATEGORY_LABELS = {
 def build_wardrobe_report(garments: list[Garment]) -> dict[str, object]:
     ready = [garment for garment in garments if garment.status == "ready"]
     category_counts = Counter(garment.category for garment in ready)
-    color_counts = Counter(color for garment in ready for color in garment.colors)
+    color_counts = Counter(color for garment in ready for color in _normalized_colors(garment.colors))
     style_counts = Counter(garment.style for garment in ready if garment.style)
     gaps = _wardrobe_gaps(category_counts)
     duplicates = _duplicate_risks(ready)
@@ -23,7 +23,7 @@ def build_wardrobe_report(garments: list[Garment]) -> dict[str, object]:
     return {
         "total": len(garments),
         "ready_total": len(ready),
-        "summary": _summary(len(ready), gaps, duplicates),
+        "summary": _summary(len(garments), len(ready), gaps, duplicates),
         "category_distribution": _distribution(category_counts, len(ready), CATEGORY_LABELS),
         "color_distribution": _distribution(color_counts, len(ready)),
         "style_distribution": _distribution(style_counts, len(ready)),
@@ -64,23 +64,29 @@ def _wardrobe_gaps(category_counts: Counter[str]) -> list[dict[str, object]]:
 
 
 def _duplicate_risks(garments: list[Garment]) -> list[dict[str, object]]:
-    groups: dict[tuple[str, str], list[Garment]] = defaultdict(list)
+    groups: dict[tuple[str, tuple[str, ...]], list[Garment]] = defaultdict(list)
     for garment in garments:
-        first_color = garment.colors[0] if garment.colors else "未设置颜色"
-        groups[(garment.category, first_color)].append(garment)
+        colors = tuple(_normalized_colors(garment.colors) or ["未设置颜色"])
+        groups[(garment.category, colors)].append(garment)
 
     risks: list[dict[str, object]] = []
-    for (category, color), items in groups.items():
+    for (category, colors), items in groups.items():
         if len(items) >= 2:
+            color_label = " / ".join(colors)
             risks.append(
                 {
                     "category": category,
-                    "label": f"{color}{CATEGORY_LABELS.get(category, category)}",
+                    "label": f"{color_label}{CATEGORY_LABELS.get(category, category)}",
+                    "colors": list(colors),
                     "count": len(items),
                     "garment_ids": [item.id for item in items],
                 }
             )
     return sorted(risks, key=lambda item: int(item["count"]), reverse=True)
+
+
+def _normalized_colors(colors: list[str] | None) -> list[str]:
+    return sorted({color.strip().lower() for color in colors or [] if color.strip()})
 
 
 def _scene_coverage(garments: list[Garment]) -> dict[str, int]:
@@ -93,11 +99,17 @@ def _scene_coverage(garments: list[Garment]) -> dict[str, int]:
     }
 
 
-def _summary(total: int, gaps: list[dict[str, object]], duplicates: list[dict[str, object]]) -> str:
-    if total == 0:
+def _summary(
+    total: int,
+    ready_total: int,
+    gaps: list[dict[str, object]],
+    duplicates: list[dict[str, object]],
+) -> str:
+    if ready_total == 0:
         return "先上传 3 件常穿衣物，就能看到重复风险和衣橱缺口。"
+    total_note = f"（全部 {total} 件）" if total != ready_total else ""
     if duplicates:
-        return f"当前衣柜已有 {total} 件，{duplicates[0]['label']} 有重复风险。"
+        return f"当前已入库衣橱已有 {ready_total} 件{total_note}，{duplicates[0]['label']} 有重复风险。"
     if gaps:
-        return f"当前衣柜已有 {total} 件，最值得补充的是{gaps[0]['label']}。"
-    return f"当前衣柜已有 {total} 件，基础结构较均衡。"
+        return f"当前已入库衣橱已有 {ready_total} 件{total_note}，最值得补充的是{gaps[0]['label']}。"
+    return f"当前已入库衣橱已有 {ready_total} 件{total_note}，基础结构较均衡。"
