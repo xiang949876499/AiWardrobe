@@ -11,12 +11,10 @@ import {
   Plus,
   Search,
   Shirt,
-  ShoppingBag,
   Sparkles,
   Store,
   Trash2,
-  UploadCloud,
-  Wand2
+  UploadCloud
 } from "lucide-react";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
@@ -77,16 +75,14 @@ const occasions: Array<{ value: Occasion; label: string }> = [
 ];
 
 const navItems = [
-  { id: "wardrobe", label: "衣橱", icon: Home },
-  { id: "upload", label: "上传", icon: UploadCloud },
-  { id: "purchase", label: "购买分析", icon: ShoppingBag },
-  { id: "shopping", label: "推荐购买", icon: Store },
+  { id: "home", label: "首页", icon: Home },
+  { id: "wardrobe", label: "衣橱", icon: Shirt },
   { id: "outfit", label: "搭配", icon: Sparkles },
-  { id: "history", label: "历史", icon: Archive },
-  { id: "tryon", label: "AI 换装", icon: Wand2 }
+  { id: "report", label: "报告", icon: Archive },
+  { id: "history", label: "历史", icon: Archive }
 ] as const;
 
-type View = (typeof navItems)[number]["id"] | "detail";
+type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping" | "detail";
 
 type UploadItem = {
   name: string;
@@ -112,7 +108,7 @@ function BlurImage({ src, alt, className = "" }: { src: string; alt: string; cla
 
 function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
-  const [activeView, setActiveView] = useState<View>("wardrobe");
+  const [activeView, setActiveView] = useState<View>("home");
   const [garments, setGarments] = useState<Garment[]>([]);
   const [selectedGarment, setSelectedGarment] = useState<Garment | null>(null);
   const [outfits, setOutfits] = useState<Outfit[]>([]);
@@ -213,7 +209,7 @@ function App() {
     setGarments([]);
     setOutfits([]);
     setCurrentOutfit(null);
-    setActiveView("wardrobe");
+    setActiveView("home");
   }
 
   if (!token) {
@@ -244,6 +240,14 @@ function App() {
         <a className="skipLink" href="#main">跳到主要内容</a>
         {error && <div className="alert" role="alert">{error}</div>}
         {loading && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在同步云端衣橱</div>}
+        {activeView === "home" && (
+          <HomeView
+            readyCount={garments.filter((garment) => garment.status === "ready").length}
+            onPurchase={() => setActiveView("purchase")}
+            onReport={() => setActiveView("report")}
+            onOutfit={() => setActiveView("outfit")}
+          />
+        )}
         {activeView === "wardrobe" && (
           <WardrobeView
             garments={garments}
@@ -279,7 +283,7 @@ function App() {
             }}
           />
         )}
-        {activeView === "shopping" && (
+        {(activeView === "report" || activeView === "shopping") && (
           <ShoppingRecommendationsView
             token={token}
             onAuthExpired={handleLogout}
@@ -325,7 +329,6 @@ function App() {
             onDelete={(id) => void handleDeleteOutfit(id)}
           />
         )}
-        {activeView === "tryon" && <TryOnView />}
       </main>
 
       <nav className="bottomNav" aria-label="移动端主导航">
@@ -441,6 +444,65 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
         </section>
       </div>
     </main>
+  );
+}
+
+function HomeView({ readyCount, onPurchase, onReport, onOutfit }: {
+  readyCount: number;
+  onPurchase: () => void;
+  onReport: () => void;
+  onOutfit: () => void;
+}) {
+  return (
+    <section className="pageSection" aria-labelledby="home-title">
+      <div className="pageHeader">
+        <div>
+          <h1 id="home-title">买衣服前，先让 AI 帮你看看值不值得买</h1>
+          <p>上传商品图或粘贴商品链接，AI 会先识别单品，再和你的衣橱对比重复度、缺口和搭配空间。</p>
+        </div>
+        <div className="weatherPill">
+          <Shirt size={16} aria-hidden="true" />
+          已入库 {readyCount} 件
+        </div>
+      </div>
+
+      <div className="controlPanel">
+        <div className="buttonRow">
+          <button type="button" className="primaryButton compact" onClick={onPurchase}>
+            <UploadCloud size={18} aria-hidden="true" />
+            上传商品图
+          </button>
+          <button type="button" className="secondaryButton compact" onClick={onPurchase}>
+            <ExternalLink size={18} aria-hidden="true" />
+            粘贴商品链接
+          </button>
+        </div>
+        <div className="hint">适合下单前快速判断：衣橱里有没有类似款、能搭几套、是不是刚好补齐缺口。</div>
+      </div>
+
+      <article className="outfitResult recommendation-consider">
+        <div className="resultHeader">
+          <strong>示例分析：黑色短袖衬衫</strong>
+          <span className="status recommendationBadge consider">考虑 · 68</span>
+        </div>
+        <p>衣橱里已有一件相近上衣，重复度偏高；如果你缺少夏季通勤内搭，可以作为候选，否则建议先跳过。</p>
+        <div className="analysisStats">
+          <span>重复度 86</span>
+          <span>缺口 45</span>
+          <span>搭配 72</span>
+        </div>
+        <div className="buttonRow">
+          <button type="button" className="secondaryButton compact" onClick={onReport}>
+            <Archive size={18} aria-hidden="true" />
+            衣柜缺什么
+          </button>
+          <button type="button" className="accentButton compact" onClick={onOutfit}>
+            <Sparkles size={18} aria-hidden="true" />
+            今天怎么搭
+          </button>
+        </div>
+      </article>
+    </section>
   );
 }
 
@@ -783,7 +845,7 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
           onChange={(event) => setUrl(event.target.value)}
         />
         <button type="submit" className="primaryButton compact" disabled={!canAnalyze || busy}>
-          {busy ? <Loader2 size={18} aria-hidden="true" /> : <ShoppingBag size={18} aria-hidden="true" />}
+          {busy ? <Loader2 size={18} aria-hidden="true" /> : <Store size={18} aria-hidden="true" />}
           {busy ? "分析中" : "开始分析"}
         </button>
         {error && <div className="alert" role="alert">{error}</div>}
@@ -1394,36 +1456,6 @@ function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete }: {
           ))}
         </div>
       )}
-    </section>
-  );
-}
-
-function TryOnView() {
-  return (
-    <section className="pageSection" aria-labelledby="tryon-title">
-      <div className="pageHeader">
-        <div>
-          <h1 id="tryon-title">AI 换装</h1>
-          <p>这里预留形象生成能力入口，当前版本只展示未开放状态。</p>
-        </div>
-      </div>
-      <div className="tryonGrid">
-        {[
-          { title: "换装", description: "上传人体照并替换服装的能力入口。", icon: Wand2 },
-          { title: "换发型", description: "预留发型风格变换入口。", icon: Sparkles },
-          { title: "换背景", description: "预留背景替换入口。", icon: Image }
-        ].map((item) => {
-          const Icon = item.icon;
-          return (
-            <article key={item.title} className="tryonCard" aria-disabled="true">
-              <Icon size={24} aria-hidden="true" />
-              <strong>{item.title}</strong>
-              <p>{item.description}</p>
-              <span className="status">未开放</span>
-            </article>
-          );
-        })}
-      </div>
     </section>
   );
 }
