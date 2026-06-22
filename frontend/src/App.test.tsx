@@ -82,10 +82,53 @@ const purchaseCandidate = {
   score: 68,
   reason_summary: "已有相似黑色上衣，但夏季搭配仍有一定价值。",
   analysis: {
+    conclusion: "consider",
+    score: 68,
+    summary: "夏季搭配空间不错，但与衣橱里的黑色上衣有重复。",
+    dimensions: {
+      outfit_potential: 72,
+      scene_match: 66,
+      gap_fill: 45,
+      duplicate_risk: 86,
+      idle_risk: 38
+    },
+    duplicate_risk: 86,
+    idle_risk: 38,
+    outfit_potential: 72,
+    match_scenes: ["通勤", "周末"],
+    suggested_price: { min: 99, ideal: 150, max: 199 },
+    score_breakdown: {
+      duplicate_risk: 86,
+      wardrobe_gap: 45,
+      outfit_potential: 72,
+      scene_match: 66,
+      idle_risk: 38
+    },
+    pros: ["已有下装可以直接搭配", "适合夏季高频场景"],
+    cons: ["颜色和已有单品接近", "材质信息仍需确认"],
+    outfit_ideas: [
+      {
+        scene: "周末咖啡",
+        items: [
+          { category: "bottom", image_url: "/static/uploads/pants.jpg", reason: "黑白配色稳定" }
+        ],
+        reason: "用现有黑色下装压住休闲感。"
+      }
+    ],
+    idle_risk_detail: { level: "中", reason: "相似黑色上衣较多，可能降低穿着频率。" },
+    next_actions: ["如果低于建议价再入手", "优先确认面料厚度"],
     duplicate_score: 86,
     wardrobe_gap_score: 45,
     pairing_score: 72,
-    decision_factors: ["somewhat similar item already owned"]
+    decision_factors: ["somewhat similar item already owned"],
+    similar_items: [
+      {
+        garment_id: "garment-1",
+        image_url: "/static/uploads/shirt.jpg",
+        similarity: 86,
+        matched_reasons: ["same category", "similar color"]
+      }
+    ]
   },
   status: "ready",
   created_at: "2026-06-16T00:00:00Z",
@@ -654,6 +697,37 @@ describe("AiWardrobe app", () => {
 
     expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
     expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/analyze-image");
+  });
+
+  test("home product image upload analyzes immediately and shows the full purchase result", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce(purchaseCandidate, 201);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "上传商品图" }));
+    const file = new File(["fake product image"], "purchase.jpg", { type: "image/jpeg" });
+    await user.upload(await screen.findByLabelText("上传商品图片"), file);
+
+    expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
+    for (const heading of [
+      "购买结论",
+      "分项评分",
+      "推荐与风险理由",
+      "相似衣橱单品",
+      "可搭配方案",
+      "闲置风险",
+      "价格建议"
+    ]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+    }
+    expect(screen.getByText("建议价 ¥150")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "加入衣橱" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "再分析一件" })).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/purchase/analyze-image");
   });
 
   test("shopping recommendations loads products and saves analyzed items", async () => {

@@ -55,6 +55,7 @@ import type {
   Weather
 } from "./types";
 import { GarmentCardSkeleton } from "./Skeleton";
+import { compressImageFile } from "./imageCompression";
 
 const categories: Array<{ value: "all" | Category; label: string }> = [
   { value: "all", label: "全部" },
@@ -772,6 +773,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
   const [saveMessage, setSaveMessage] = useState("");
   const urlInputRef = useRef<HTMLInputElement>(null);
   const canAnalyze = /^https?:\/\/\S+\.\S+/.test(url.trim());
+  const showImageUpload = entryMode === "image" || imageUploadVisible;
 
   useEffect(() => {
     setImageUploadVisible(entryMode === "image");
@@ -810,9 +812,10 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
     setBusy(true);
     setError("");
     try {
-      const result = await analyzePurchaseImage(token, file, url.trim());
+      const compressedFile = await compressImageFile(file);
+      const result = await analyzePurchaseImage(token, compressedFile, url.trim());
       setCandidate(result);
-      setImageUploadVisible(false);
+      setImageUploadVisible(entryMode === "image");
     } catch (err) {
       if (isAuthError(err)) {
         onAuthExpired();
@@ -823,6 +826,14 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
       setBusy(false);
       event.target.value = "";
     }
+  }
+
+  function handleReset() {
+    setCandidate(null);
+    setError("");
+    setSaveMessage("");
+    setImageUploadVisible(entryMode === "image");
+    if (entryMode === "url") urlInputRef.current?.focus();
   }
 
   async function handleSave() {
@@ -867,7 +878,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
           {busy ? "分析中" : "开始分析"}
         </button>
         {error && <div className="alert" role="alert">{error}</div>}
-        {imageUploadVisible && (
+        {showImageUpload && (
           <label className="uploadBox purchaseUploadBox" htmlFor="purchase-image-upload">
             <UploadCloud size={28} aria-hidden="true" />
             <strong>上传商品图片</strong>
@@ -887,37 +898,91 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
                   {recommendationLabel(candidate.recommendation)} · {candidate.score}
                 </span>
               </div>
-              <p>{candidate.reason_summary}</p>
+              <section aria-labelledby="purchase-conclusion">
+                <h2 id="purchase-conclusion">购买结论</h2>
+                <p>{candidate.analysis.summary || candidate.reason_summary}</p>
+              </section>
               <div className="tagRow">
                 <span>{categoryLabel(candidate.category)}</span>
                 {candidate.colors.map((color) => <span key={color}>{color}</span>)}
                 {candidate.tags.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
               </div>
-              <div className="analysisStats">
-                <span>重复度 {Math.round(Number(candidate.analysis.duplicate_score || 0))}</span>
-                <span>缺口 {Math.round(Number(candidate.analysis.wardrobe_gap_score || 0))}</span>
-                <span>搭配 {Math.round(Number(candidate.analysis.pairing_score || 0))}</span>
-              </div>
-              <div className="buttonRow">
-                <button type="button" className="primaryButton compact" disabled={busy || candidate.status === "saved"} onClick={handleSave}>
-                  <Check size={18} aria-hidden="true" />
-                  加入衣橱
-                </button>
-                {saveMessage && <span className="favoritePill">{saveMessage}</span>}
-              </div>
             </div>
           </div>
-          {candidate.similar_items.length > 0 && (
-            <div className="similarStrip" aria-label="相似衣橱单品">
-              {candidate.similar_items.map((item) => (
-                <div key={item.garment_id} className="similarItem">
-                  <BlurImage src={item.image_url} alt="相似衣橱单品" />
-                  <strong>{Math.round(item.similarity)}%</strong>
-                  <span>{item.matched_reasons.slice(0, 2).join(" / ")}</span>
-                </div>
-              ))}
+          <section aria-labelledby="purchase-scores">
+            <h2 id="purchase-scores">分项评分</h2>
+            <div className="analysisStats">
+              <span>重复风险 {Math.round(Number(candidate.analysis.score_breakdown.duplicate_risk || candidate.analysis.duplicate_score || 0))}</span>
+              <span>衣橱缺口 {Math.round(Number(candidate.analysis.score_breakdown.wardrobe_gap || candidate.analysis.wardrobe_gap_score || 0))}</span>
+              <span>搭配潜力 {Math.round(Number(candidate.analysis.score_breakdown.outfit_potential || candidate.analysis.pairing_score || 0))}</span>
+              <span>场景匹配 {Math.round(Number(candidate.analysis.score_breakdown.scene_match || 0))}</span>
+              <span>闲置风险 {Math.round(Number(candidate.analysis.score_breakdown.idle_risk || candidate.analysis.idle_risk || 0))}</span>
             </div>
-          )}
+          </section>
+          <section aria-labelledby="purchase-reasons">
+            <h2 id="purchase-reasons">推荐与风险理由</h2>
+            <p>{candidate.reason_summary}</p>
+            <div className="tagRow">
+              {candidate.analysis.pros.map((reason) => <span key={`pro-${reason}`}>优点：{reason}</span>)}
+              {candidate.analysis.cons.map((reason) => <span key={`con-${reason}`}>风险：{reason}</span>)}
+            </div>
+          </section>
+          <section aria-labelledby="purchase-similar">
+            <h2 id="purchase-similar">相似衣橱单品</h2>
+            {candidate.similar_items.length > 0 ? (
+              <div className="similarStrip" aria-label="相似衣橱单品">
+                {candidate.similar_items.map((item) => (
+                  <div key={item.garment_id} className="similarItem">
+                    <BlurImage src={item.image_url} alt="相似衣橱单品" />
+                    <strong>{Math.round(item.similarity)}%</strong>
+                    <span>{item.matched_reasons.slice(0, 2).join(" / ")}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p>暂未发现高度相似单品。</p>
+            )}
+          </section>
+          <section aria-labelledby="purchase-outfits">
+            <h2 id="purchase-outfits">可搭配方案</h2>
+            {candidate.analysis.outfit_ideas.length > 0 ? (
+              <div className="miniGrid">
+                {candidate.analysis.outfit_ideas.map((idea) => (
+                  <div key={idea.scene} className="similarItem">
+                    <strong>{idea.scene}</strong>
+                    <span>{idea.reason}</span>
+                    {idea.items.map((item) => (
+                      <span key={`${idea.scene}-${item.category}-${item.image_url}`}>{categoryLabel(item.category)}：{item.reason}</span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p>暂无明确搭配方案。</p>
+            )}
+          </section>
+          <section aria-labelledby="purchase-idle-risk">
+            <h2 id="purchase-idle-risk">闲置风险</h2>
+            <p>{candidate.analysis.idle_risk_detail.level}：{candidate.analysis.idle_risk_detail.reason}</p>
+          </section>
+          <section aria-labelledby="purchase-price">
+            <h2 id="purchase-price">价格建议</h2>
+            <div className="analysisStats">
+              <span>建议价 ¥{candidate.analysis.suggested_price.ideal}</span>
+              <span>可入手区间 ¥{candidate.analysis.suggested_price.min} - ¥{candidate.analysis.suggested_price.max}</span>
+            </div>
+          </section>
+          <div className="buttonRow">
+            <button type="button" className="primaryButton compact" disabled={busy || candidate.status === "saved"} onClick={handleSave}>
+              <Check size={18} aria-hidden="true" />
+              加入衣橱
+            </button>
+            <button type="button" className="ghostButton compact" disabled={busy} onClick={handleReset}>
+              <Plus size={18} aria-hidden="true" />
+              再分析一件
+            </button>
+            {saveMessage && <span className="favoritePill">{saveMessage}</span>}
+          </div>
         </article>
       )}
     </section>
