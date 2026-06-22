@@ -146,6 +146,15 @@ const shoppingRun = {
     remaining_refreshes: 2,
     reset_at: "2026-06-17T10:10:00Z"
   },
+  wardrobe_gaps: [{ category: "shoes", label: "鞋", score: 90, reason: "当前只有 0 件。" }],
+  avoid_categories: ["white上衣"],
+  recommendation_groups: [
+    {
+      title: "优先补齐缺口",
+      reason: "这些商品已经通过分析，和当前衣橱缺口的匹配度最高。",
+      item_ids: ["shopping-item-1"]
+    }
+  ],
   items: [
     {
       id: "shopping-item-1",
@@ -830,9 +839,13 @@ describe("AiWardrobe app", () => {
 
     await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "报告" }));
-    await user.click(screen.getByRole("button", { name: "获取推荐" }));
+    await user.click(screen.getByRole("button", { name: "查看缺口" }));
 
     expect(await screen.findByText("Black Work Skirt")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "你的衣橱当前缺口" })).toBeInTheDocument();
+    expect(screen.getByText("鞋 90%")).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { name: "最近不建议再买" }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("white上衣").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Fills a work bottom gap.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "加入衣橱" }));
 
@@ -874,7 +887,7 @@ describe("AiWardrobe app", () => {
 
     await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "报告" }));
-    await user.click(screen.getByRole("button", { name: "获取推荐" }));
+    await user.click(screen.getByRole("button", { name: "查看缺口" }));
 
     expect(await screen.findByText(/刷新太/)).toBeInTheDocument();
   });

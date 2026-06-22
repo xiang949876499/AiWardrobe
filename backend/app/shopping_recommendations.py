@@ -17,6 +17,7 @@ from app.purchase_analysis import analyze_purchase, explain_purchase
 from app.rate_limit import RateLimitResult, check_rate_limit
 from app.storage import StorageService
 from app.taobao_client import TaobaoClientError, get_taobao_client
+from app.wardrobe_report import build_wardrobe_report
 
 SHOPPING_TARGETS = {"auto_gap", "work", "date", "sport", "summer", "basics"}
 READY_CATEGORIES = ["top", "bottom", "outerwear", "shoes", "bag", "accessory"]
@@ -309,7 +310,40 @@ def _load_run(db: Session, run_id: str) -> ShoppingRecommendationRun:
         .where(ShoppingRecommendationRun.id == run_id)
     ).scalar_one()
     run.items.sort(key=lambda item: item.created_at)
+    _attach_wardrobe_gap_context(db, run)
     return run
+
+
+def _attach_wardrobe_gap_context(db: Session, run: ShoppingRecommendationRun) -> None:
+    ready_garments = list(
+        db.execute(
+            select(Garment).where(Garment.user_id == run.user_id, Garment.status == "ready")
+        ).scalars()
+    )
+    report = build_wardrobe_report(ready_garments)
+    run.wardrobe_gaps = report["wardrobe_gaps"]
+    run.avoid_categories = report["avoid_categories"]
+    run.recommendation_groups = _recommendation_groups(run.items)
+
+
+def _recommendation_groups(items: list[ShoppingRecommendationItem]) -> list[dict[str, object]]:
+    group_defs = [
+        ("recommend", "优先补齐缺口", "这些商品已经通过分析，和当前衣橱缺口的匹配度最高。"),
+        ("consider", "可以继续比较", "这些商品有一定搭配价值，但建议结合价格和重复度再决定。"),
+        ("skip", "暂时跳过", "这些商品与现有衣橱重复或闲置风险偏高。"),
+        ("pending_analysis", "待分析商品", "这些商品还没有完成衣橱匹配分析。"),
+        ("failed", "分析失败", "这些商品暂时没有拿到稳定的分析结果，可以稍后重试。"),
+    ]
+    groups: list[dict[str, object]] = []
+    for key, title, reason in group_defs:
+        item_ids = [
+            item.id
+            for item in items
+            if (item.recommendation == key or (item.recommendation is None and item.analysis_status == key))
+        ]
+        if item_ids:
+            groups.append({"title": title, "reason": reason, "item_ids": item_ids})
+    return groups
 
 
 def _rate_limit_payload(limit: RateLimitResult) -> dict[str, object]:

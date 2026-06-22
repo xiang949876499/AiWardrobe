@@ -1242,14 +1242,14 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
     <section className="pageSection" aria-labelledby="shopping-title">
       <div className="pageHeader">
         <div>
-          <h1 id="shopping-title">推荐购买</h1>
+          <h1 id="shopping-title">衣橱缺口</h1>
           <p>按衣橱缺口或场景目标获取淘宝 / 天猫候选单品，先分析再决定是否加入衣橱。</p>
         </div>
       </div>
 
       <div className="controlPanel">
-        <div className="fieldLabel">推荐目标</div>
-        <div className="segmented" aria-label="推荐目标">
+        <div className="fieldLabel">分析目标</div>
+        <div className="segmented" aria-label="分析目标">
           {shoppingTargets.map((item) => (
             <button
               key={item.value}
@@ -1264,7 +1264,7 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
         <div className="buttonRow">
           <button type="button" className="primaryButton compact" disabled={busy} onClick={() => handleFetch(false)}>
             {busy ? <Loader2 size={18} aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
-            获取推荐
+            查看缺口
           </button>
           <button type="button" className="secondaryButton compact" disabled={busy} onClick={() => handleFetch(true)}>
             <Search size={18} aria-hidden="true" />
@@ -1284,7 +1284,7 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
       {!run && (
         <div className="emptyState">
           <Store size={34} aria-hidden="true" />
-          <h2>选择目标后获取推荐</h2>
+          <h2>先看衣橱真正缺什么</h2>
           <p>系统会从当前衣橱出发，优先补齐缺少的品类和适合场景的单品。</p>
         </div>
       )}
@@ -1294,6 +1294,27 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
           <Search size={34} aria-hidden="true" />
           <h2>没有找到合适商品</h2>
           <p>换一个目标或稍后重新搜索。</p>
+        </div>
+      )}
+
+      {run && (
+        <div className="controlPanel">
+          <h2>你的衣橱当前缺口</h2>
+          {run.wardrobe_gaps.length > 0 ? (
+            <div className="tagRow">
+              {run.wardrobe_gaps.map((gap) => <span key={gap.category}>{gap.label} {gap.score}%</span>)}
+            </div>
+          ) : (
+            <p className="hint">暂无明显衣橱缺口</p>
+          )}
+          <h2>最近不建议再买</h2>
+          {run.avoid_categories.length > 0 ? (
+            <div className="tagRow">
+              {run.avoid_categories.map((category) => <span key={category}>{category}</span>)}
+            </div>
+          ) : (
+            <p className="hint">暂无明显重复品类</p>
+          )}
         </div>
       )}
 

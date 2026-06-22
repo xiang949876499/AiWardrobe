@@ -460,6 +460,12 @@ class ShoppingRecommendationItemResponse(BaseModel):
     similar_items: list[SimilarPurchaseItem] = []
 
 
+class RecommendationGroupResponse(BaseModel):
+    title: str
+    reason: str
+    item_ids: list[str]
+
+
 class ShoppingRecommendationRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -470,6 +476,9 @@ class ShoppingRecommendationRunResponse(BaseModel):
     error_code: str | None = None
     cache_hit: bool
     rate_limit: ShoppingRateLimitResponse
+    wardrobe_gaps: list[WardrobeGapResponse] = []
+    avoid_categories: list[str] = []
+    recommendation_groups: list[RecommendationGroupResponse] = []
     items: list[ShoppingRecommendationItemResponse]
     created_at: datetime
     updated_at: datetime

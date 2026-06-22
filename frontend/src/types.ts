@@ -186,6 +186,9 @@ export type ShoppingRecommendationRun = {
     remaining_refreshes: number | null;
     reset_at: string | null;
   };
+  wardrobe_gaps: Array<{ category: Category; label: string; score: number; reason: string }>;
+  avoid_categories: string[];
+  recommendation_groups: Array<{ title: string; reason: string; item_ids: string[] }>;
   items: ShoppingRecommendationItem[];
   created_at: string;
   updated_at: string;
