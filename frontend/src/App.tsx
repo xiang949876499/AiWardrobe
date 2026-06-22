@@ -88,6 +88,8 @@ type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping"
 type PurchaseEntryMode = "url" | "image";
 
 type UploadItem = {
+  id: string;
+  requestId: number;
   name: string;
   status: "上传中" | "入库中" | "单品拆分中" | "标签识别中" | "已入库" | "失败";
   session?: UploadSession;
@@ -693,49 +695,76 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
 }) {
   const [mode, setMode] = useState<"plain" | "auto">("plain");
   const [items, setItems] = useState<UploadItem[]>([]);
+  const uploadRequestCounter = useRef(0);
+  const activeUploadRequestId = useRef(0);
 
   async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
-    setItems(files.map((file) => ({ name: file.name, status: "上传中" })));
+    const requestId = uploadRequestCounter.current + 1;
+    uploadRequestCounter.current = requestId;
+    activeUploadRequestId.current = requestId;
+    const selectedItems = files.map((file, index) => ({
+      id: `${requestId}-${index}-${file.name}`,
+      requestId,
+      name: file.name,
+      status: "上传中" as const
+    }));
+    setItems(selectedItems);
     if (mode === "plain" && files.length > 1) {
-      setItems((current) => current.map((item) => ({ ...item, status: "入库中" })));
+      const selectedItemIds = new Set(selectedItems.map((item) => item.id));
+      setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? { ...item, status: "入库中" } : item));
       try {
         const compressedFiles = await Promise.all(files.map((file) => compressImageFile(file)));
         const response = await batchUploadGarments(token, compressedFiles);
-        setItems((current) => current.map((item, index) => ({
-          ...item,
-          status: "已入库",
-          garments: response.items[index] ? [response.items[index]] : []
-        })));
+        if (activeUploadRequestId.current !== requestId) return;
+        setItems((current) => current.map((item) => {
+          if (!selectedItemIds.has(item.id) || item.requestId !== requestId) return item;
+          const index = selectedItems.findIndex((selectedItem) => selectedItem.id === item.id);
+          const garment = response.items[index];
+          if (!garment) {
+            return {
+              ...item,
+              status: "失败",
+              garments: undefined,
+              message: "批量上传未返回该文件的入库结果，请重试。"
+            };
+          }
+          return { ...item, status: "已入库", garments: [garment], message: undefined };
+        }));
         onPending(response.items);
       } catch (err) {
+        if (activeUploadRequestId.current !== requestId) return;
         if (isAuthError(err)) {
           onAuthExpired();
           return;
         }
         const message = errorMessage(err);
-        setItems((current) => current.map((item) => ({ ...item, status: "失败", message })));
+        setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? { ...item, status: "失败", message } : item));
       }
       return;
     }
-    for (const file of files) {
-      setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
+    for (const [index, file] of files.entries()) {
+      const uploadItem = selectedItems[index];
+      setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
       try {
         if (mode === "plain") {
           const garment = await uploadPlainGarment(token, file);
-          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "已入库", garments: [garment] } : item));
+          if (activeUploadRequestId.current !== requestId) return;
+          setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "已入库", garments: [garment] } : item));
           onPending([garment]);
         } else {
           const session = await uploadGarmentPhoto(token, file);
-          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "已入库", session, garments: session.garments } : item));
+          if (activeUploadRequestId.current !== requestId) return;
+          setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "已入库", session, garments: session.garments } : item));
           onPending(session.garments);
         }
       } catch (err) {
+        if (activeUploadRequestId.current !== requestId) return;
         if (isAuthError(err)) {
           onAuthExpired();
           return;
         }
-        setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "失败", message: errorMessage(err) } : item));
+        setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "失败", message: errorMessage(err) } : item));
       }
     }
   }
@@ -761,7 +790,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
       </label>
       <div className="uploadList">
         {items.map((item) => (
-          <div key={item.name} className="uploadItem">
+          <div key={item.id} className="uploadItem">
             <span>{item.name}</span>
             <strong>{item.status === "已入库" ? (mode === "plain" ? "已入库，可编辑标签" : "单品拆分完成") : item.status}</strong>
             {item.message && <small>{item.message}</small>}
