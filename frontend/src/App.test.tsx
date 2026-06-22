@@ -197,17 +197,33 @@ const savedShoppingGarment = {
 };
 
 const wardrobeReport = {
-  total: 1,
+  total: 2,
   ready_total: 1,
   summary: "最值得补充的是鞋。",
   category_distribution: [{ key: "top", label: "上衣", count: 1, ratio: 1 }],
   color_distribution: [{ key: "white", label: "white", count: 1, ratio: 1 }],
   style_distribution: [{ key: "通勤", label: "通勤", count: 1, ratio: 1 }],
   scene_coverage: { work: 20, casual: 20, sport: 0, date: 0 },
-  duplicate_risks: [],
-  low_use_items: [],
+  duplicate_risks: [
+    {
+      category: "top",
+      label: "white上衣",
+      colors: ["white"],
+      count: 2,
+      garment_ids: ["garment-1", "garment-2"]
+    }
+  ],
+  low_use_items: [
+    {
+      garment_id: "garment-1",
+      category: "top",
+      label: "白色上衣",
+      reason: "近期搭配频率偏低",
+      score: 35
+    }
+  ],
   wardrobe_gaps: [{ category: "shoes", label: "鞋", score: 90, reason: "当前只有 0 件。" }],
-  avoid_categories: ["白色上衣"],
+  avoid_categories: ["white上衣"],
   suggested_categories: ["鞋"]
 };
 
@@ -836,7 +852,10 @@ describe("AiWardrobe app", () => {
 
     expect(await screen.findByText("衣柜体检报告")).toBeInTheDocument();
     expect(screen.getByText("最值得补充的是鞋。")).toBeInTheDocument();
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
     expect(screen.getByText("最近不建议再买")).toBeInTheDocument();
+    expect(screen.getByText("white 1 (100%)")).toBeInTheDocument();
+    expect(screen.getByText("white上衣")).toBeInTheDocument();
   });
 
   test("shopping recommendations show a readable rate limit message", async () => {

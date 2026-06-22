@@ -105,8 +105,10 @@ def _summary(
     gaps: list[dict[str, object]],
     duplicates: list[dict[str, object]],
 ) -> str:
-    if ready_total == 0:
+    if total == 0:
         return "先上传 3 件常穿衣物，就能看到重复风险和衣橱缺口。"
+    if ready_total == 0:
+        return f"已有 {total} 件上传记录，待入库完成后即可生成衣橱缺口。"
     total_note = f"（全部 {total} 件）" if total != ready_total else ""
     if duplicates:
         return f"当前已入库衣橱已有 {ready_total} 件{total_note}，{duplicates[0]['label']} 有重复风险。"

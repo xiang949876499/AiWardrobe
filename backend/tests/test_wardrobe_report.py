@@ -107,3 +107,17 @@ def test_wardrobe_report_summary_uses_ready_total_for_mixed_status_items() -> No
     assert report["ready_total"] == 1
     assert "已入库" in str(report["summary"])
     assert "1 件" in str(report["summary"])
+
+
+def test_wardrobe_report_summary_distinguishes_uploaded_but_not_ready_items() -> None:
+    report = build_wardrobe_report(
+        [
+            _garment("processing-1", status="processing"),
+            _garment("uploaded-1", status="uploaded"),
+        ]
+    )
+
+    assert report["total"] == 2
+    assert report["ready_total"] == 0
+    assert "已有 2 件上传记录" in str(report["summary"])
+    assert "待入库完成后" in str(report["summary"])
