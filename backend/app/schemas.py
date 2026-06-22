@@ -242,9 +242,9 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
     analysis.setdefault("score", score)
     analysis.setdefault("summary", summary)
     analysis["dimensions"] = dimensions
-    analysis.setdefault("duplicate_risk", duplicate_score)
-    analysis.setdefault("idle_risk", idle_risk)
-    analysis.setdefault("outfit_potential", pairing_score)
+    _set_int_default_or_replace_zero(analysis, "duplicate_risk", duplicate_score)
+    _set_int_default_or_replace_zero(analysis, "idle_risk", idle_risk)
+    _set_int_default_or_replace_zero(analysis, "outfit_potential", pairing_score)
     analysis.setdefault("match_scenes", ["日常"])
     analysis.setdefault("suggested_price", _legacy_suggested_price(response_data.get("category"), score))
     analysis["score_breakdown"] = score_breakdown
@@ -253,9 +253,9 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
     analysis.setdefault("outfit_ideas", [])
     analysis.setdefault("idle_risk_detail", _legacy_idle_risk_detail(idle_risk))
     analysis.setdefault("next_actions", ["save", "share", "analyze_another", "upload_wardrobe"])
-    analysis.setdefault("duplicate_score", duplicate_score)
-    analysis.setdefault("wardrobe_gap_score", gap_score)
-    analysis.setdefault("pairing_score", pairing_score)
+    _set_int_default_or_replace_zero(analysis, "duplicate_score", duplicate_score)
+    _set_int_default_or_replace_zero(analysis, "wardrobe_gap_score", gap_score)
+    _set_int_default_or_replace_zero(analysis, "pairing_score", pairing_score)
     analysis.setdefault("decision_factors", decision_factors)
     analysis.setdefault("similar_items", response_data.get("similar_items") or [])
     return analysis
@@ -276,6 +276,7 @@ def _first_analysis_int(
     default: int = 0,
 ) -> int:
     alias_key, top_level_key, breakdown_key, dimension_key = keys
+    first_zero: int | None = None
     for source, key in (
         (analysis, alias_key),
         (analysis, top_level_key),
@@ -284,10 +285,26 @@ def _first_analysis_int(
     ):
         if key in source and source[key] is not None:
             try:
-                return int(source[key] or 0)
+                value = int(source[key] or 0)
             except (TypeError, ValueError):
                 continue
-    return default
+            if value != 0:
+                return value
+            if first_zero is None:
+                first_zero = value
+    return first_zero if first_zero is not None else default
+
+
+def _set_int_default_or_replace_zero(analysis: dict[str, object], key: str, value: int) -> None:
+    if key not in analysis or analysis[key] is None:
+        analysis[key] = value
+        return
+    try:
+        current = int(analysis[key] or 0)
+    except (TypeError, ValueError):
+        return
+    if current == 0 and value != 0:
+        analysis[key] = value
 
 
 def _analysis_str_list(value: object) -> list[str]:

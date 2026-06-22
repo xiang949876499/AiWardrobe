@@ -8,6 +8,39 @@ from app.schemas import PurchaseCandidateResponse
 from tests.conftest import login
 
 
+def _purchase_candidate_payload(analysis: dict[str, object], **overrides: object) -> dict[str, object]:
+    created_at = datetime.now(timezone.utc)
+    payload: dict[str, object] = {
+        "id": "candidate-normalized",
+        "product_url": "https://shop.example.com/products/normalized",
+        "source_image_url": "https://shop.example.com/normalized.jpg",
+        "image_url": "/static/uploads/purchase/normalized.jpg",
+        "image_key": "purchase/normalized.jpg",
+        "thumbnail_url": None,
+        "title": "Normalized Candidate",
+        "domain": "shop.example.com",
+        "category": "top",
+        "colors": ["black"],
+        "style": "casual",
+        "material": "cotton",
+        "season": ["summer"],
+        "fit": "regular",
+        "tags": ["basic"],
+        "ai_result": {},
+        "ai_confidence": 0.9,
+        "similar_items": [],
+        "recommendation": "consider",
+        "score": 72,
+        "reason_summary": "Normalized deterministic summary",
+        "analysis": analysis,
+        "status": "ready",
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_product_image_extraction_prefers_og_image_and_resolves_relative_url() -> None:
     from app.product_extraction import select_product_metadata
 
@@ -277,6 +310,106 @@ def test_purchase_candidate_response_derives_aliases_from_structured_analysis() 
     assert analysis.score_breakdown.wardrobe_gap == 64
     assert analysis.idle_risk == 38
     assert analysis.idle_risk_detail == {"level": "低", "reason": "结构化风险说明"}
+
+
+def test_purchase_candidate_response_prefers_nested_scores_over_zero_alias_placeholders() -> None:
+    response = PurchaseCandidateResponse.model_validate(
+        _purchase_candidate_payload(
+            {
+                "conclusion": "consider",
+                "score": 72,
+                "summary": "Mixed alias payload",
+                "dimensions": {
+                    "outfit_potential": 66,
+                    "scene_match": 78,
+                    "gap_fill": 58,
+                    "duplicate_risk": 21,
+                    "idle_risk": 36,
+                },
+                "duplicate_risk": 0,
+                "idle_risk": 0,
+                "outfit_potential": 0,
+                "match_scenes": ["daily"],
+                "suggested_price": {"min": 80, "ideal": 130, "max": 200},
+                "score_breakdown": {
+                    "duplicate_risk": 21,
+                    "wardrobe_gap": 58,
+                    "outfit_potential": 66,
+                    "scene_match": 78,
+                    "idle_risk": 36,
+                },
+                "pros": ["structured pro"],
+                "cons": ["structured con"],
+                "outfit_ideas": [],
+                "idle_risk_detail": {"level": "low", "reason": "structured risk"},
+                "next_actions": ["save", "share", "analyze_another", "upload_wardrobe"],
+                "duplicate_score": 0,
+                "wardrobe_gap_score": 0,
+                "pairing_score": 0,
+                "decision_factors": ["mixed factor"],
+            }
+        )
+    )
+
+    analysis = response.analysis
+    assert analysis.duplicate_score == 21
+    assert analysis.wardrobe_gap_score == 58
+    assert analysis.pairing_score == 66
+    assert analysis.duplicate_risk == 21
+    assert analysis.idle_risk == 36
+    assert analysis.outfit_potential == 66
+    assert analysis.dimensions.duplicate_risk == 21
+    assert analysis.dimensions.gap_fill == 58
+    assert analysis.dimensions.outfit_potential == 66
+    assert analysis.score_breakdown.wardrobe_gap == 58
+
+
+def test_purchase_candidate_response_prefers_nested_scores_over_zero_top_level_placeholders() -> None:
+    response = PurchaseCandidateResponse.model_validate(
+        _purchase_candidate_payload(
+            {
+                "conclusion": "consider",
+                "score": 72,
+                "summary": "Mixed top-level payload",
+                "dimensions": {
+                    "outfit_potential": 73,
+                    "scene_match": 81,
+                    "gap_fill": 62,
+                    "duplicate_risk": 18,
+                    "idle_risk": 34,
+                },
+                "duplicate_risk": 0,
+                "idle_risk": 0,
+                "outfit_potential": 0,
+                "match_scenes": ["daily"],
+                "suggested_price": {"min": 80, "ideal": 130, "max": 200},
+                "score_breakdown": {
+                    "duplicate_risk": 18,
+                    "wardrobe_gap": 62,
+                    "outfit_potential": 73,
+                    "scene_match": 81,
+                    "idle_risk": 34,
+                },
+                "pros": ["structured pro"],
+                "cons": ["structured con"],
+                "outfit_ideas": [],
+                "idle_risk_detail": {"level": "low", "reason": "structured risk"},
+                "next_actions": ["save", "share", "analyze_another", "upload_wardrobe"],
+                "decision_factors": ["mixed factor"],
+            }
+        )
+    )
+
+    analysis = response.analysis
+    assert analysis.duplicate_score == 18
+    assert analysis.wardrobe_gap_score == 62
+    assert analysis.pairing_score == 73
+    assert analysis.duplicate_risk == 18
+    assert analysis.idle_risk == 34
+    assert analysis.outfit_potential == 73
+    assert analysis.dimensions.duplicate_risk == 18
+    assert analysis.dimensions.scene_match == 81
+    assert analysis.score_breakdown.outfit_potential == 73
 
 
 def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: TestClient) -> None:
