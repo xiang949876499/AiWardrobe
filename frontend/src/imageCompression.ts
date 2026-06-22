@@ -1,5 +1,5 @@
 export async function compressImageFile(file: File, maxBytes = 2 * 1024 * 1024): Promise<File> {
-  if (!file.type.startsWith("image/") || file.size <= maxBytes) return file;
+  if (!file.type.startsWith("image/") || file.size <= maxBytes || file.type !== "image/jpeg") return file;
 
   try {
     const bitmap = await createImageBitmap(file);
