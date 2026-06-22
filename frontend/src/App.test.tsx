@@ -386,7 +386,7 @@ describe("AiWardrobe app", () => {
     expect((requestBody as FormData).getAll("files")).toEqual(files);
   });
 
-  test("plain batch upload marks unmatched rows failed when the backend returns fewer garments", async () => {
+  test("plain batch upload fails every row when the backend returns a mismatched item count", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
@@ -405,11 +405,12 @@ describe("AiWardrobe app", () => {
     ];
     await user.upload(screen.getByLabelText("选择单件图片"), files);
 
-    expect(await screen.findAllByText("已入库，可编辑标签")).toHaveLength(1);
+    expect(await screen.findAllByText("失败")).toHaveLength(2);
+    expect(screen.queryByText("已入库，可编辑标签")).not.toBeInTheDocument();
+    expect(screen.getByText("single-shirt.jpg")).toBeInTheDocument();
     expect(screen.getByText("single-pants.jpg")).toBeInTheDocument();
-    expect(screen.getByText("失败")).toBeInTheDocument();
-    expect(screen.getByText("批量上传未返回该文件的入库结果，请重试。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
+    expect(screen.getAllByText("批量上传返回数量不一致，请重试。")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /编辑上衣/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /编辑下装/ })).not.toBeInTheDocument();
   });
 

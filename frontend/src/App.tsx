@@ -717,18 +717,20 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
         const compressedFiles = await Promise.all(files.map((file) => compressImageFile(file)));
         const response = await batchUploadGarments(token, compressedFiles);
         if (activeUploadRequestId.current !== requestId) return;
+        if (response.items.length !== files.length) {
+          setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? {
+            ...item,
+            status: "失败",
+            session: undefined,
+            garments: undefined,
+            message: "批量上传返回数量不一致，请重试。"
+          } : item));
+          return;
+        }
         setItems((current) => current.map((item) => {
           if (!selectedItemIds.has(item.id) || item.requestId !== requestId) return item;
           const index = selectedItems.findIndex((selectedItem) => selectedItem.id === item.id);
           const garment = response.items[index];
-          if (!garment) {
-            return {
-              ...item,
-              status: "失败",
-              garments: undefined,
-              message: "批量上传未返回该文件的入库结果，请重试。"
-            };
-          }
           return { ...item, status: "已入库", garments: [garment], message: undefined };
         }));
         onPending(response.items);
