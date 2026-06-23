@@ -37,6 +37,7 @@ async def generate_outfit(
     categories = {garment.category for garment in garments}
     if len(garments) < 3 or not {"top", "bottom", "shoes"}.issubset(categories):
         raise HTTPException(status_code=400, detail="Not enough ready garments to generate an outfit")
+    target_garment = _target_garment(body.garment_id, garments)
 
     season = body.season or current_season(settings)
     items, explanation = await AiService(settings).generate_outfit(
@@ -47,6 +48,7 @@ async def generate_outfit(
         weather=body.weather,
     )
     items = _trusted_outfit_items(items, garments)
+    items = _ensure_target_item(items, target_garment)
     outfit = Outfit(
         user_id=current_user.id,
         occasion=body.occasion,
@@ -188,3 +190,24 @@ def _trusted_outfit_items(items: list[dict[str, object]], garments: list[Garment
             }
         )
     return trusted
+
+
+def _target_garment(garment_id: str | None, garments: list[Garment]) -> Garment | None:
+    if not garment_id:
+        return None
+    for garment in garments:
+        if garment.id == garment_id:
+            return garment
+    raise HTTPException(status_code=404, detail="Target garment not found")
+
+
+def _ensure_target_item(items: list[dict[str, object]], target: Garment | None) -> list[dict[str, object]]:
+    if target is None or any(item.get("garment_id") == target.id for item in items):
+        return items
+    target_item = {
+        "garment_id": target.id,
+        "category": target.category,
+        "image_url": target.image_url,
+        "reason": "围绕指定单品生成",
+    }
+    return [target_item, *items]

@@ -1477,6 +1477,10 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   const [weatherMessage, setWeatherMessage] = useState("正在获取天气");
   const [manualName, setManualName] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [targetEnabled, setTargetEnabled] = useState(false);
+  const [targetGarmentId, setTargetGarmentId] = useState("");
+  const [dislikeReason, setDislikeReason] = useState("");
+  const [feedbackMessage, setFeedbackMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const readyGarments = garments.filter((garment) => garment.status === "ready");
@@ -1515,8 +1519,14 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   async function handleGenerate() {
     setBusy(true);
     setError("");
+    setFeedbackMessage("");
     try {
-      const outfit = await generateOutfit(token, { occasion, temperature: weather?.temperature ?? temperature, weather });
+      const outfit = await generateOutfit(token, {
+        occasion,
+        temperature: weather?.temperature ?? temperature,
+        weather,
+        garment_id: targetEnabled && targetGarmentId ? targetGarmentId : null
+      });
       setCurrentOutfit(outfit);
     } catch (err) {
       setError(errorMessage(err));
@@ -1528,14 +1538,24 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   async function handleFavorite() {
     if (!currentOutfit) return;
     setBusy(true);
+    setFeedbackMessage("");
     try {
       const updated = await setOutfitFavorite(token, currentOutfit.id, true);
       setCurrentOutfit(updated);
+      setFeedbackMessage("已记录反馈");
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleDislike() {
+    if (!dislikeReason) {
+      setFeedbackMessage("请选择不喜欢原因");
+      return;
+    }
+    setFeedbackMessage("已记录反馈");
   }
 
   async function handleFixed() {
@@ -1601,10 +1621,37 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
         <label htmlFor="temperature">温度：{temperature}°C</label>
         <input id="temperature" type="range" min="-10" max="40" value={temperature} onChange={(event) => setTemperature(Number(event.target.value))} />
         {mode === "ai" ? (
-          <button type="button" className="accentButton compact aiPulse" disabled={busy || weatherStatus === "loading"} onClick={handleGenerate}>
-            <Sparkles size={18} aria-hidden="true" />
-            {weatherStatus === "loading" ? "获取天气中" : busy ? "生成中" : "生成搭配"}
-          </button>
+          <>
+            <label className="manualChoice compactChoice">
+              <input
+                type="checkbox"
+                checked={targetEnabled}
+                onChange={(event) => {
+                  setTargetEnabled(event.target.checked);
+                  if (event.target.checked && !targetGarmentId && readyGarments[0]) {
+                    setTargetGarmentId(readyGarments[0].id);
+                  }
+                }}
+              />
+              <span>想把某件衣服搭出来</span>
+            </label>
+            {targetEnabled && (
+              <>
+                <label htmlFor="target-garment">指定单品</label>
+                <select id="target-garment" value={targetGarmentId} onChange={(event) => setTargetGarmentId(event.target.value)}>
+                  {readyGarments.map((garment) => (
+                    <option key={garment.id} value={garment.id}>
+                      {categoryLabel(garment.category)} · {garment.style || garment.colors.join("/")}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button type="button" className="accentButton compact aiPulse" disabled={busy || weatherStatus === "loading"} onClick={handleGenerate}>
+              <Sparkles size={18} aria-hidden="true" />
+              {weatherStatus === "loading" ? "获取天气中" : busy ? "生成中" : "生成搭配"}
+            </button>
+          </>
         ) : (
           <ManualPicker
             garments={readyGarments}
@@ -1642,13 +1689,24 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
               onClick={handleFavorite}
             >
               <Heart size={18} aria-hidden="true" fill={currentOutfit.is_favorite ? "currentColor" : "none"} />
-              {currentOutfit.is_favorite ? "已收藏" : "保存喜欢"}
+              {currentOutfit.is_favorite ? "已收藏" : "喜欢"}
+            </button>
+            <button type="button" className="secondaryButton compact" disabled={busy} onClick={handleDislike}>
+              不喜欢
             </button>
             <button type="button" className="secondaryButton compact" disabled={busy} onClick={handleFixed}>
               <Check size={18} aria-hidden="true" />
               {currentOutfit.is_fixed ? "取消固定" : "保存固定搭配"}
             </button>
           </div>
+          <label htmlFor="dislike-reason">不喜欢原因</label>
+          <select id="dislike-reason" value={dislikeReason} onChange={(event) => setDislikeReason(event.target.value)}>
+            <option value="">选择原因</option>
+            <option value="风格不适合">风格不适合</option>
+            <option value="颜色不合适">颜色不合适</option>
+            <option value="场景不匹配">场景不匹配</option>
+          </select>
+          {feedbackMessage && <p className="hint">{feedbackMessage}</p>}
         </article>
       )}
     </section>

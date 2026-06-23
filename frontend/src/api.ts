@@ -151,7 +151,14 @@ export function fetchTodayWeather(token: string, lat: number, lon: number) {
   return request<Weather>(`/weather/today?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, {}, token);
 }
 
-export function generateOutfit(token: string, body: { occasion: Occasion; season?: string; temperature: number; weather?: Weather | null }) {
+export function generateOutfit(token: string, body: {
+  occasion: Occasion;
+  season?: string;
+  temperature: number;
+  weather?: Weather | null;
+  garment_id?: string | null;
+  purchase_candidate_id?: string | null;
+}) {
   return request<Outfit>("/outfits/generate", { method: "POST", body: JSON.stringify(body) }, token);
 }
 

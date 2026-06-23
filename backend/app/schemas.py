@@ -489,6 +489,8 @@ class OutfitGenerateRequest(BaseModel):
     season: str = ""
     temperature: int | None = None
     weather: dict[str, object] | None = None
+    garment_id: str | None = None
+    purchase_candidate_id: str | None = None
 
 
 class OutfitItemResponse(BaseModel):
