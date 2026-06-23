@@ -131,13 +131,14 @@ class AiService:
         season: str,
         temperature: int | None,
         weather: dict[str, object] | None = None,
+        preferences: dict[str, object] | None = None,
     ) -> tuple[list[dict[str, object]], str]:
         if self.settings.ai_demo_mode or not self._outfit_api_key():
-            return self._demo_outfit(garments, occasion, season, temperature, weather)
+            return self._demo_outfit(garments, occasion, season, temperature, weather, preferences)
         try:
-            return await self._remote_outfit(garments, occasion, season, temperature, weather)
+            return await self._remote_outfit(garments, occasion, season, temperature, weather, preferences)
         except Exception:
-            return self._demo_outfit(garments, occasion, season, temperature, weather)
+            return self._demo_outfit(garments, occasion, season, temperature, weather, preferences)
 
     def _demo_analysis(self, filename: str) -> AiAnalysis:
         name = filename.lower()
@@ -284,6 +285,7 @@ class AiService:
         season: str,
         temperature: int | None,
         weather: dict[str, object] | None = None,
+        preferences: dict[str, object] | None = None,
     ) -> tuple[list[dict[str, object]], str]:
         selected: list[Garment] = []
         for category in ["top", "bottom", "shoes", "outerwear", "bag", "accessory"]:
@@ -307,7 +309,16 @@ class AiService:
             weather_text = f"，参考天气：{weather.get('condition', '未知')}，{weather.get('temperature', temperature or '--')}度"
         else:
             weather_text = f"，适配{temperature}度" if temperature is not None else f"，适配{season or '当前天气'}"
-        explanation = f"这套搭配适合{_occasion_label(occasion)}。整体以利落基础款为主{weather_text}，兼顾舒适度和完整度。"
+        preference_parts: list[str] = []
+        if preferences:
+            if preferences.get("primary_goal"):
+                preference_parts.append(f"目标：{preferences['primary_goal']}")
+            if preferences.get("scenes"):
+                preference_parts.append(f"场景：{'/'.join(preferences['scenes'][:3])}")
+            if preferences.get("styles"):
+                preference_parts.append(f"风格：{'/'.join(preferences['styles'][:3])}")
+        preference_text = f"，参考你的偏好：{'；'.join(preference_parts)}" if preference_parts else ""
+        explanation = f"这套搭配适合{_occasion_label(occasion)}。整体以利落基础款为主{weather_text}{preference_text}，兼顾舒适度和完整度。"
         return items, explanation
 
     async def _remote_outfit(
@@ -317,6 +328,7 @@ class AiService:
         season: str,
         temperature: int | None,
         weather: dict[str, object] | None = None,
+        preferences: dict[str, object] | None = None,
     ) -> tuple[list[dict[str, object]], str]:
         wardrobe = [
             {
@@ -333,6 +345,7 @@ class AiService:
             for garment in garments
         ]
         weather_context = json.dumps(weather or {}, ensure_ascii=False)
+        preference_context = json.dumps(preferences or {}, ensure_ascii=False)
         payload = {
             "model": self._outfit_model(),
             "response_format": {"type": "json_object"},
@@ -345,6 +358,7 @@ class AiService:
                         "Only choose garment_id values from the wardrobe; do not invent or rewrite image URLs. "
                         f"Occasion: {occasion}; season: {season}; temperature: {temperature}; "
                         f"weather: {weather_context}; "
+                        f"user_preferences: {preference_context}; "
                         f"wardrobe: {json.dumps(wardrobe, ensure_ascii=False)}"
                     ),
                 }

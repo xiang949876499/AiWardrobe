@@ -8,6 +8,8 @@ import type {
   ShoppingRecommendationTarget,
   ShoppingRecommendationItem,
   UploadSession,
+  UserPreference,
+  WardrobeReport,
   Weather
 } from "./types";
 
@@ -76,6 +78,14 @@ export function loginWithPassword(email: string, password: string) {
   });
 }
 
+export function fetchUserPreference(token: string) {
+  return request<UserPreference>("/preferences/me", {}, token);
+}
+
+export function updateUserPreference(token: string, body: UserPreference) {
+  return request<UserPreference>("/preferences/me", { method: "PUT", body: JSON.stringify(body) }, token);
+}
+
 export function fetchGarments(token: string, filters: { category?: string; tag?: string; color?: string; season?: string } = {}) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
@@ -101,6 +111,12 @@ export function uploadPlainGarment(token: string, file: File) {
   const form = new FormData();
   form.append("file", file);
   return request<Garment>("/uploads/plain-garment", { method: "POST", body: form }, token);
+}
+
+export function batchUploadGarments(token: string, files: File[]) {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  return request<{ items: Garment[] }>("/garments/batch-upload", { method: "POST", body: form }, token);
 }
 
 export function analyzePurchaseUrl(token: string, url: string) {
@@ -144,7 +160,14 @@ export function fetchTodayWeather(token: string, lat: number, lon: number) {
   return request<Weather>(`/weather/today?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, {}, token);
 }
 
-export function generateOutfit(token: string, body: { occasion: Occasion; season?: string; temperature: number; weather?: Weather | null }) {
+export function generateOutfit(token: string, body: {
+  occasion: Occasion;
+  season?: string;
+  temperature: number;
+  weather?: Weather | null;
+  garment_id?: string | null;
+  purchase_candidate_id?: string | null;
+}) {
   return request<Outfit>("/outfits/generate", { method: "POST", body: JSON.stringify(body) }, token);
 }
 
@@ -162,6 +185,10 @@ export function createManualOutfit(token: string, body: {
 
 export function fetchOutfits(token: string, favorite?: boolean) {
   return request<{ items: Outfit[] }>(`/outfits/history${favorite === undefined ? "" : `?favorite=${favorite}`}`, {}, token);
+}
+
+export function fetchWardrobeReport(token: string) {
+  return request<WardrobeReport>("/reports/wardrobe", {}, token);
 }
 
 export function deleteOutfit(token: string, id: string) {

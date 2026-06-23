@@ -76,9 +76,9 @@ class Settings(BaseSettings):
     runninghub_tryon_workflow_file: str = "workflows/ai_tryon.json"
 
     @model_validator(mode="after")
-    def reject_sqlite_outside_tests(self) -> "Settings":
-        if self.database_url.startswith("sqlite") and not self.testing:
-            raise ValueError("SQLite is only allowed when TESTING=true; set DATABASE_URL to Postgres for app runtime")
+    def reject_sqlite_in_production(self) -> "Settings":
+        if self.database_url.startswith("sqlite") and self.environment == "production" and not self.testing:
+            raise ValueError("SQLite is only allowed for development or tests; set DATABASE_URL to Postgres in production")
         return self
 
 

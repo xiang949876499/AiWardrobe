@@ -60,7 +60,11 @@ def score_similarity(candidate: AiAnalysis, garment: Garment) -> SimilarityResul
     )
 
 
-def analyze_purchase(candidate: AiAnalysis, garments: list[Garment]) -> PurchaseDecision:
+def analyze_purchase(
+    candidate: AiAnalysis,
+    garments: list[Garment],
+    preferences: dict[str, object] | None = None,
+) -> PurchaseDecision:
     ready = [garment for garment in garments if garment.status == "ready"]
     similar_items = sorted(
         (score_similarity(candidate, garment) for garment in ready),
@@ -80,18 +84,24 @@ def analyze_purchase(candidate: AiAnalysis, garments: list[Garment]) -> Purchase
         recommendation = "consider"
 
     decision_factors = _decision_factors(candidate, duplicate_score, gap_score, pairing_score)
+    if preferences:
+        decision_factors.append(f"user_preferences:{json.dumps(preferences, ensure_ascii=False)}")
     reason_summary = _reason_summary(recommendation, duplicate_score, gap_score, pairing_score)
     return PurchaseDecision(
         similar_items=similar_items,
         recommendation=recommendation,
         score=score,
         reason_summary=reason_summary,
-        analysis={
-            "duplicate_score": duplicate_score,
-            "wardrobe_gap_score": gap_score,
-            "pairing_score": pairing_score,
-            "decision_factors": decision_factors,
-        },
+        analysis=_structured_analysis(
+            candidate=candidate,
+            recommendation=recommendation,
+            score=score,
+            duplicate_score=duplicate_score,
+            gap_score=gap_score,
+            pairing_score=pairing_score,
+            decision_factors=decision_factors,
+            similar_items=similar_items,
+        ),
     )
 
 
@@ -200,6 +210,143 @@ def _decision_factors(candidate: AiAnalysis, duplicate_score: int, gap_score: in
     elif pairing_score < 35:
         factors.append("limited pairing support")
     return factors
+
+
+def _structured_analysis(
+    candidate: AiAnalysis,
+    recommendation: str,
+    score: int,
+    duplicate_score: int,
+    gap_score: int,
+    pairing_score: int,
+    decision_factors: list[str],
+    similar_items: list[SimilarityResult],
+) -> dict[str, object]:
+    idle_risk = _idle_risk(duplicate_score, gap_score, pairing_score)
+    scene_match = _scene_match_score(candidate)
+    match_scenes = _match_scenes(candidate)
+    pros, cons = _pros_cons(recommendation, duplicate_score, gap_score, pairing_score)
+    summary = _reason_summary(recommendation, duplicate_score, gap_score, pairing_score)
+    return {
+        "conclusion": recommendation,
+        "score": score,
+        "summary": summary,
+        "dimensions": {
+            "outfit_potential": pairing_score,
+            "scene_match": scene_match,
+            "gap_fill": gap_score,
+            "duplicate_risk": duplicate_score,
+            "idle_risk": idle_risk,
+        },
+        "duplicate_risk": duplicate_score,
+        "idle_risk": idle_risk,
+        "outfit_potential": pairing_score,
+        "match_scenes": match_scenes,
+        "suggested_price": _suggested_price(candidate, score),
+        "score_breakdown": {
+            "duplicate_risk": duplicate_score,
+            "wardrobe_gap": gap_score,
+            "outfit_potential": pairing_score,
+            "scene_match": scene_match,
+            "idle_risk": idle_risk,
+        },
+        "pros": pros,
+        "cons": cons,
+        "similar_items": [item.__dict__ for item in similar_items],
+        "outfit_ideas": _outfit_ideas(candidate, match_scenes),
+        "idle_risk_detail": _idle_risk_detail(idle_risk),
+        "next_actions": ["save", "share", "analyze_another", "upload_wardrobe"],
+        "duplicate_score": duplicate_score,
+        "wardrobe_gap_score": gap_score,
+        "pairing_score": pairing_score,
+        "decision_factors": decision_factors,
+    }
+
+
+def _idle_risk(duplicate_score: int, gap_score: int, pairing_score: int) -> int:
+    risk = round(duplicate_score * 0.45 + (100 - gap_score) * 0.3 + (100 - pairing_score) * 0.25)
+    return max(0, min(100, risk))
+
+
+def _scene_match_score(candidate: AiAnalysis) -> int:
+    tags = " ".join([candidate.style, *candidate.tags]).lower()
+    if any(word in tags for word in ["work", "commute", "通勤", "office"]):
+        return 82
+    if any(word in tags for word in ["sport", "运动", "outdoor"]):
+        return 76
+    if any(word in tags for word in ["date", "约会", "elegant"]):
+        return 78
+    return 68
+
+
+def _match_scenes(candidate: AiAnalysis) -> list[str]:
+    tags = " ".join([candidate.style, *candidate.tags]).lower()
+    scenes = ["日常"]
+    if any(word in tags for word in ["work", "commute", "通勤", "office"]):
+        scenes.append("通勤")
+    if any(word in tags for word in ["date", "约会", "elegant"]):
+        scenes.append("约会")
+    if any(word in tags for word in ["sport", "运动", "outdoor"]):
+        scenes.append("运动")
+    if candidate.category in {"bag", "accessory", "shoes"}:
+        scenes.append("搭配补充")
+    return scenes[:3]
+
+
+def _suggested_price(candidate: AiAnalysis, score: int) -> dict[str, int]:
+    base = 180 if candidate.category in {"outerwear", "shoes", "bag"} else 120
+    ideal = round(base * (0.75 + score / 200))
+    return {"min": max(49, ideal - 70), "ideal": max(1, ideal), "max": ideal + 100}
+
+
+def _pros_cons(
+    recommendation: str,
+    duplicate_score: int,
+    gap_score: int,
+    pairing_score: int,
+) -> tuple[list[str], list[str]]:
+    pros: list[str] = []
+    cons: list[str] = []
+    if gap_score >= 65:
+        pros.append("补足衣橱缺口")
+    else:
+        cons.append("新增覆盖有限")
+    if pairing_score >= 70:
+        pros.append("搭配潜力高")
+    else:
+        cons.append("可搭配方案偏少")
+    if duplicate_score >= 70:
+        cons.append("已有相似单品")
+    else:
+        pros.append("与现有衣橱区分明显")
+    if recommendation == "skip":
+        cons.append("建议先跳过")
+    return pros or ["可继续观察"], cons or ["暂无明显风险"]
+
+
+def _outfit_ideas(candidate: AiAnalysis, scenes: list[str]) -> list[dict[str, object]]:
+    return [
+        {
+            "scene": scene,
+            "items": [
+                {
+                    "category": candidate.category,
+                    "image_url": "",
+                    "reason": "围绕这件单品建立搭配",
+                }
+            ],
+            "reason": f"适合{scene}场景，建议优先使用衣橱已有基础款组合。",
+        }
+        for scene in scenes
+    ]
+
+
+def _idle_risk_detail(idle_risk: int) -> dict[str, str]:
+    if idle_risk >= 70:
+        return {"level": "高", "reason": "重复或不好搭的概率偏高，建议冷静后再买。"}
+    if idle_risk >= 45:
+        return {"level": "中", "reason": "有一定使用场景，但需要确认价格和搭配。"}
+    return {"level": "低", "reason": "与衣橱互补度较好，闲置风险可控。"}
 
 
 def _reason_summary(recommendation: str, duplicate_score: int, gap_score: int, pairing_score: int) -> str:

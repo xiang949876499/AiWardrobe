@@ -104,6 +104,10 @@ def test_demo_recommendations_create_run_and_items(client: TestClient) -> None:
     assert body["keywords"]
     assert body["rate_limit"]["remaining_refreshes"] == 2
     assert body["rate_limit"]["reset_at"]
+    assert body["wardrobe_gaps"]
+    assert body["avoid_categories"] is not None
+    assert body["recommendation_groups"]
+    assert body["recommendation_groups"][0]["title"]
     assert len(body["items"]) >= 3
     assert body["items"][0]["platform"] == "taobao"
     assert body["items"][0]["analysis_status"] == "analyzed"

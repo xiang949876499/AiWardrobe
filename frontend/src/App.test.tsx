@@ -52,6 +52,20 @@ const secondGarment = {
   updated_at: "2026-05-22T00:00:00Z"
 };
 
+const shoesGarment = {
+  ...garment,
+  id: "garment-3",
+  image_url: "/static/uploads/shoes.jpg",
+  image_key: "garments/shoes.jpg",
+  thumbnail_url: "/static/uploads/shoes.jpg",
+  category: "shoes",
+  colors: ["black"],
+  style: "通勤",
+  tags: ["通勤"],
+  created_at: "2026-05-23T00:00:00Z",
+  updated_at: "2026-05-23T00:00:00Z"
+};
+
 const purchaseCandidate = {
   id: "candidate-1",
   product_url: "https://shop.example.com/products/black-shirt",
@@ -82,10 +96,54 @@ const purchaseCandidate = {
   score: 68,
   reason_summary: "已有相似黑色上衣，但夏季搭配仍有一定价值。",
   analysis: {
+    conclusion: "consider",
+    score: 68,
+    summary: "夏季搭配空间不错，但与衣橱里的黑色上衣有重复。",
+    dimensions: {
+      outfit_potential: 72,
+      scene_match: 66,
+      gap_fill: 45,
+      duplicate_risk: 86,
+      idle_risk: 38
+    },
+    duplicate_risk: 86,
+    idle_risk: 38,
+    outfit_potential: 72,
+    match_scenes: ["通勤", "周末"],
+    suggested_price: { min: 99, ideal: 150, max: 199 },
+    product_price: { current: "129.00", currency: "CNY", source: "product_page" },
+    score_breakdown: {
+      duplicate_risk: 86,
+      wardrobe_gap: 45,
+      outfit_potential: 72,
+      scene_match: 66,
+      idle_risk: 38
+    },
+    pros: ["已有下装可以直接搭配", "适合夏季高频场景"],
+    cons: ["颜色和已有单品接近", "材质信息仍需确认"],
+    outfit_ideas: [
+      {
+        scene: "周末咖啡",
+        items: [
+          { category: "bottom", image_url: "/static/uploads/pants.jpg", reason: "黑白配色稳定" }
+        ],
+        reason: "用现有黑色下装压住休闲感。"
+      }
+    ],
+    idle_risk_detail: { level: "中", reason: "相似黑色上衣较多，可能降低穿着频率。" },
+    next_actions: ["如果低于建议价再入手", "优先确认面料厚度"],
     duplicate_score: 86,
     wardrobe_gap_score: 45,
     pairing_score: 72,
-    decision_factors: ["somewhat similar item already owned"]
+    decision_factors: ["somewhat similar item already owned"],
+    similar_items: [
+      {
+        garment_id: "garment-1",
+        image_url: "/static/uploads/shirt.jpg",
+        similarity: 86,
+        matched_reasons: ["same category", "similar color"]
+      }
+    ]
   },
   status: "ready",
   created_at: "2026-06-16T00:00:00Z",
@@ -103,6 +161,15 @@ const shoppingRun = {
     remaining_refreshes: 2,
     reset_at: "2026-06-17T10:10:00Z"
   },
+  wardrobe_gaps: [{ category: "shoes", label: "鞋", score: 90, reason: "当前只有 0 件。" }],
+  avoid_categories: ["white上衣"],
+  recommendation_groups: [
+    {
+      title: "优先补齐缺口",
+      reason: "这些商品已经通过分析，和当前衣橱缺口的匹配度最高。",
+      item_ids: ["shopping-item-1"]
+    }
+  ],
   items: [
     {
       id: "shopping-item-1",
@@ -153,6 +220,37 @@ const savedShoppingGarment = {
   updated_at: "2026-06-17T10:00:00Z"
 };
 
+const wardrobeReport = {
+  total: 2,
+  ready_total: 1,
+  summary: "最值得补充的是鞋。",
+  category_distribution: [{ key: "top", label: "上衣", count: 1, ratio: 1 }],
+  color_distribution: [{ key: "white", label: "white", count: 1, ratio: 1 }],
+  style_distribution: [{ key: "通勤", label: "通勤", count: 1, ratio: 1 }],
+  scene_coverage: { work: 20, casual: 20, sport: 0, date: 0 },
+  duplicate_risks: [
+    {
+      category: "top",
+      label: "white上衣",
+      colors: ["white"],
+      count: 2,
+      garment_ids: ["garment-1", "garment-2"]
+    }
+  ],
+  low_use_items: [
+    {
+      garment_id: "garment-1",
+      category: "top",
+      label: "白色上衣",
+      reason: "近期搭配频率偏低",
+      score: 35
+    }
+  ],
+  wardrobe_gaps: [{ category: "shoes", label: "鞋", score: 90, reason: "当前只有 0 件。" }],
+  avoid_categories: ["white上衣"],
+  suggested_categories: ["鞋"]
+};
+
 function mockFetchOnce(body: unknown, status = 200) {
   vi.mocked(fetch).mockResolvedValueOnce({
     ok: status >= 200 && status < 300,
@@ -179,6 +277,81 @@ afterEach(() => {
 });
 
 describe("AiWardrobe app", () => {
+  test("logged-in app opens on the buy-before home screen", async () => {
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment, secondGarment] });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上传商品图" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "粘贴商品链接" })).toBeInTheDocument();
+  });
+
+  test("main navigation exposes the five core entries without AI try-on", async () => {
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+
+    for (const label of ["首页", "衣橱", "搭配", "报告", "历史"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: "AI 换装" })).not.toBeInTheDocument();
+  });
+
+  test("shows a skippable preference panel after three ready garments and saves it", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment, secondGarment, shoesGarment] });
+    mockFetchOnce({
+      primary_goal: "",
+      scenes: [],
+      styles: [],
+      avoid_types: [],
+      budget_range: ""
+    });
+    mockFetchOnce({
+      primary_goal: "少买闲置",
+      scenes: ["通勤"],
+      styles: ["简约"],
+      avoid_types: ["低质感针织"],
+      budget_range: "100-300"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("个性化偏好")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("主要目标"), "少买闲置");
+    await user.type(screen.getByLabelText("常用场景"), "通勤");
+    await user.type(screen.getByLabelText("喜欢风格"), "简约");
+    await user.type(screen.getByLabelText("避雷类型"), "低质感针织");
+    await user.type(screen.getByLabelText("预算区间"), "100-300");
+    await user.click(screen.getByRole("button", { name: "保存偏好" }));
+
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/preferences/me"));
+    expect(vi.mocked(fetch).mock.calls[2][1]).toEqual(expect.objectContaining({ method: "PUT" }));
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[2][1]?.body));
+    expect(body.scenes).toEqual(["通勤"]);
+    expect(screen.queryByText("个性化偏好")).not.toBeInTheDocument();
+  });
+
+  test("home product image CTA opens purchase analysis with upload immediately available", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "上传商品图" }));
+
+    expect(await screen.findByLabelText("上传商品图片")).toBeInTheDocument();
+    expect(screen.getByLabelText("商品链接")).toBeInTheDocument();
+  });
+
   test("registers with email and password and shows the empty wardrobe state", async () => {
     const user = userEvent.setup();
     mockFetchOnce({
@@ -195,6 +368,8 @@ describe("AiWardrobe app", () => {
     await user.type(screen.getByLabelText("密码"), "correct-horse-123");
     await user.click(screen.getByRole("button", { name: "注册账号" }));
 
+    expect(await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
     expect(await screen.findByText("还没有衣服")).toBeInTheDocument();
     expect(screen.getByText("上传几件常穿单品，AI 才能开始帮你搭配。")).toBeInTheDocument();
   });
@@ -226,8 +401,10 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
     await screen.findByText("我的衣橱");
-    await user.click(screen.getByRole("button", { name: "上传" }));
+    await user.click(screen.getByRole("button", { name: "上传衣服" }));
     await user.click(screen.getByRole("button", { name: "自动识别" }));
     const file = new File(["fake image"], "multi-look.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择整套或多单品照片"), file);
@@ -258,8 +435,10 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
     await screen.findByText("我的衣橱");
-    await user.click(screen.getByRole("button", { name: "上传" }));
+    await user.click(screen.getByRole("button", { name: "上传衣服" }));
     expect(screen.getByText(/普通上传不调用拆分工作流/)).toBeInTheDocument();
     const file = new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择单件图片"), file);
@@ -267,6 +446,63 @@ describe("AiWardrobe app", () => {
     expect(await screen.findByText("已入库，可编辑标签")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
     expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/uploads/plain-garment");
+  });
+
+  test("plain multi-file upload uses the batch upload endpoint", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce({ items: [garment, secondGarment] }, 201);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByRole("button", { name: "上传衣服" }));
+    expect(screen.getByText(/上传 3 件常穿衣物即可提升分析准确度/)).toBeInTheDocument();
+
+    const files = [
+      new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" }),
+      new File(["fake image"], "single-pants.jpg", { type: "image/jpeg" })
+    ];
+    await user.upload(screen.getByLabelText("选择单件图片"), files);
+
+    expect(await screen.findAllByText("已入库，可编辑标签")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编辑下装/ })).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/garments/batch-upload");
+    const requestBody = vi.mocked(fetch).mock.calls[1][1]?.body;
+    expect(requestBody).toBeInstanceOf(FormData);
+    expect((requestBody as FormData).getAll("files")).toEqual(files);
+  });
+
+  test("plain batch upload fails every row when the backend returns a mismatched item count", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce({ items: [garment] }, 201);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByRole("button", { name: "上传衣服" }));
+
+    const files = [
+      new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" }),
+      new File(["fake image"], "single-pants.jpg", { type: "image/jpeg" })
+    ];
+    await user.upload(screen.getByLabelText("选择单件图片"), files);
+
+    expect(await screen.findAllByText("失败")).toHaveLength(2);
+    expect(screen.queryByText("已入库，可编辑标签")).not.toBeInTheDocument();
+    expect(screen.getByText("single-shirt.jpg")).toBeInTheDocument();
+    expect(screen.getByText("single-pants.jpg")).toBeInTheDocument();
+    expect(screen.getAllByText("批量上传返回数量不一致，请重试。")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /编辑上衣/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /编辑下装/ })).not.toBeInTheDocument();
   });
 
   test("clears stale session when auto upload rejects the bearer token", async () => {
@@ -277,8 +513,10 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
     await screen.findByText("我的衣橱");
-    await user.click(screen.getByRole("button", { name: "上传" }));
+    await user.click(screen.getByRole("button", { name: "上传衣服" }));
     await user.click(screen.getByRole("button", { name: "自动识别" }));
     const file = new File(["fake image"], "multi-look.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择整套或多单品照片"), file);
@@ -296,6 +534,8 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
     await screen.findByText("我的衣橱");
     await user.click(screen.getByText(/white/));
     await user.click(screen.getByRole("button", { name: "删除衣服" }));
@@ -319,6 +559,8 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
     await screen.findByText("我的衣橱");
     await user.click(screen.getByRole("button", { name: "批量管理" }));
     await user.click(screen.getByRole("checkbox", { name: /选择.*top/i }));
@@ -366,7 +608,7 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findByText("我的衣橱");
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "搭配" }));
     expect(await screen.findByText(/当前位置 · Cloudy/)).toBeInTheDocument();
 
@@ -414,7 +656,7 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findByText("我的衣橱");
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "搭配" }));
 
     expect(await screen.findByText("按节气自动判断")).toBeInTheDocument();
@@ -424,6 +666,63 @@ describe("AiWardrobe app", () => {
     await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/outfits/generate"));
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[2][1]?.body));
     expect(body.season).toBeUndefined();
+  });
+
+  test("outfit page generates around a selected garment and requires dislike reason", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment, secondGarment] });
+    mockFetchOnce({
+      date: "2026-05-27",
+      lat_key: "31.23",
+      lon_key: "121.47",
+      city: "褰撳墠浣嶇疆",
+      condition: "Cloudy",
+      temperature: 23,
+      feels_like: 23,
+      precipitation: 0,
+      wind_speed: 8,
+      cached: false
+    });
+    mockFetchOnce({
+      id: "outfit-targeted",
+      name: "",
+      occasion: "work",
+      season: "spring",
+      temperature: 23,
+      items: [
+        { garment_id: "garment-2", category: "bottom", image_url: "/static/uploads/pants.jpg", reason: "围绕指定单品" },
+        { garment_id: "garment-1", category: "top", image_url: "/static/uploads/shirt.jpg", reason: "补齐上衣" }
+      ],
+      explanation: "围绕这件衣服生成通勤搭配",
+      source: "ai",
+      is_favorite: false,
+      is_fixed: false,
+      weather_snapshot: { temperature: 23 },
+      created_at: "2026-05-27T00:00:00Z"
+    });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "搭配" }));
+    expect(await screen.findByRole("button", { name: "生成搭配" })).toBeEnabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "想把某件衣服搭出来" }));
+    await user.selectOptions(screen.getByLabelText("指定单品"), "garment-2");
+    await user.click(screen.getByRole("button", { name: "生成搭配" }));
+
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/outfits/generate"));
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[2][1]?.body));
+    expect(body.garment_id).toBe("garment-2");
+    expect(await screen.findByText("围绕这件衣服生成通勤搭配")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "不喜欢" }));
+    expect(screen.getByText("请选择不喜欢原因")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("不喜欢原因"), "颜色不合适");
+    await user.click(screen.getByRole("button", { name: "不喜欢" }));
+    expect(screen.getByText("已记录反馈（本次会话有效）")).toBeInTheDocument();
   });
 
   test("falls back to default city weather when geolocation is unavailable", async () => {
@@ -446,7 +745,7 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findByText("我的衣橱");
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "搭配" }));
 
     expect(await screen.findByText(/默认城市 · Cloudy/)).toBeInTheDocument();
@@ -479,7 +778,7 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findAllByText("衣橱");
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "搭配" }));
     const loadingButton = screen.getByRole("button", { name: "获取天气中" });
     expect(loadingButton).toBeDisabled();
@@ -539,7 +838,7 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findAllByText("衣橱");
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
     await user.click(screen.getByRole("button", { name: "历史" }));
     expect(await screen.findByText("周一通勤 · 31°C")).toBeInTheDocument();
 
@@ -557,6 +856,13 @@ describe("AiWardrobe app", () => {
     mockFetchOnce({ items: [garment] });
     mockFetchOnce(purchaseCandidate, 201);
     mockFetchOnce({
+      primary_goal: "",
+      scenes: [],
+      styles: [],
+      avoid_types: [],
+      budget_range: ""
+    });
+    mockFetchOnce({
       ...garment,
       id: "saved-purchase",
       image_url: purchaseCandidate.image_url,
@@ -570,17 +876,18 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findByRole("button", { name: "衣橱" });
-    await user.click(screen.getByRole("button", { name: "购买分析" }));
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "粘贴商品链接" }));
     await user.type(screen.getByLabelText("商品链接"), purchaseCandidate.product_url);
     await user.click(screen.getByRole("button", { name: "开始分析" }));
 
     expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
     expect(screen.getByText("已有相似黑色上衣，但夏季搭配仍有一定价值。")).toBeInTheDocument();
+    expect(screen.getByText("页面价格 ¥129.00")).toBeInTheDocument();
     expect(screen.getByText("86%")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "加入衣橱" }));
 
-    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/candidates/candidate-1/save"));
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/purchase/candidates/candidate-1/save"));
   });
 
   test("purchase analysis offers manual image upload when URL extraction fails", async () => {
@@ -592,8 +899,8 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findByRole("button", { name: "衣橱" });
-    await user.click(screen.getByRole("button", { name: "购买分析" }));
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "粘贴商品链接" }));
     await user.type(screen.getByLabelText("商品链接"), "https://shop.example.com/no-image");
     await user.click(screen.getByRole("button", { name: "开始分析" }));
 
@@ -605,30 +912,88 @@ describe("AiWardrobe app", () => {
     expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/analyze-image");
   });
 
+  test("home product image upload analyzes immediately and shows the full purchase result", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce(purchaseCandidate, 201);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "上传商品图" }));
+    const file = new File(["fake product image"], "purchase.jpg", { type: "image/jpeg" });
+    await user.upload(await screen.findByLabelText("上传商品图片"), file);
+
+    expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
+    for (const heading of [
+      "购买结论",
+      "分项评分",
+      "推荐与风险理由",
+      "相似衣橱单品",
+      "可搭配方案",
+      "闲置风险",
+      "价格建议"
+    ]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+    }
+    expect(screen.getByText("建议价 ¥150")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "加入衣橱" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "再分析一件" })).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/purchase/analyze-image");
+  });
+
   test("shopping recommendations loads products and saves analyzed items", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [garment] });
+    mockFetchOnce(wardrobeReport);
     mockFetchOnce(shoppingRun, 201);
     mockFetchOnce(savedShoppingGarment, 201);
 
     render(<App />);
 
-    await screen.findByRole("button", { name: "衣橱" });
-    await user.click(screen.getByRole("button", { name: "推荐购买" }));
-    await user.click(screen.getByRole("button", { name: "获取推荐" }));
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "报告" }));
+    await user.click(screen.getByRole("button", { name: "查看衣橱缺口商品" }));
+    expect(await screen.findByRole("heading", { name: "衣橱缺口" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看缺口" }));
 
     expect(await screen.findByText("Black Work Skirt")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "你的衣橱当前缺口" })).toBeInTheDocument();
+    expect(screen.getByText("鞋 90%")).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { name: "最近不建议再买" }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("white上衣").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Fills a work bottom gap.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "加入衣橱" }));
 
-    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/candidates/candidate-shopping-1/save"));
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/purchase/candidates/candidate-shopping-1/save"));
+  });
+
+  test("report page shows wardrobe gaps and avoid categories", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment] });
+    mockFetchOnce(wardrobeReport);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "报告" });
+    await user.click(screen.getByRole("button", { name: "报告" }));
+
+    expect(await screen.findByText("衣柜体检报告")).toBeInTheDocument();
+    expect(screen.getByText("最值得补充的是鞋。")).toBeInTheDocument();
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(screen.getByText("最近不建议再买")).toBeInTheDocument();
+    expect(screen.getByText("white 1 (100%)")).toBeInTheDocument();
+    expect(screen.getByText("white上衣")).toBeInTheDocument();
   });
 
   test("shopping recommendations show a readable rate limit message", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [garment] });
+    mockFetchOnce(wardrobeReport);
     mockFetchOnce({
       detail: {
         code: "recommendation_rate_limited",
@@ -638,26 +1003,13 @@ describe("AiWardrobe app", () => {
 
     render(<App />);
 
-    await screen.findByRole("button", { name: "衣橱" });
-    await user.click(screen.getByRole("button", { name: "推荐购买" }));
-    await user.click(screen.getByRole("button", { name: "获取推荐" }));
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "报告" }));
+    await user.click(screen.getByRole("button", { name: "查看衣橱缺口商品" }));
+    expect(await screen.findByRole("heading", { name: "衣橱缺口" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看缺口" }));
 
     expect(await screen.findByText(/刷新太/)).toBeInTheDocument();
   });
 
-  test("AI try-on entry shows unavailable feature cards", async () => {
-    const user = userEvent.setup();
-    localStorage.setItem("aiwardrobe_token", "token");
-    mockFetchOnce({ items: [] });
-
-    render(<App />);
-
-    await screen.findByText("我的衣橱");
-    await user.click(screen.getByRole("button", { name: "AI 换装" }));
-
-    expect(screen.getByText("换装")).toBeInTheDocument();
-    expect(screen.getByText("换发型")).toBeInTheDocument();
-    expect(screen.getByText("换背景")).toBeInTheDocument();
-    expect(screen.getAllByText("未开放")).toHaveLength(3);
-  });
 });

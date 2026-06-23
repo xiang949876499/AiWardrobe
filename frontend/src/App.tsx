@@ -10,20 +10,20 @@ import {
   MapPin,
   Plus,
   Search,
+  Settings,
   Shirt,
-  ShoppingBag,
   Sparkles,
   Store,
   Trash2,
-  UploadCloud,
-  Wand2
+  UploadCloud
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   analyzeShoppingRecommendationItem,
   analyzePurchaseImage,
   analyzePurchaseUrl,
+  batchUploadGarments,
   clearToken,
   createShoppingRecommendations,
   createManualOutfit,
@@ -32,6 +32,8 @@ import {
   fetchGarments,
   fetchOutfits,
   fetchTodayWeather,
+  fetchUserPreference,
+  fetchWardrobeReport,
   generateOutfit,
   getStoredToken,
   loginWithPassword,
@@ -41,6 +43,7 @@ import {
   setOutfitFixed,
   storeToken,
   updateGarment,
+  updateUserPreference,
   uploadGarmentPhoto,
   uploadPlainGarment
 } from "./api";
@@ -54,9 +57,12 @@ import type {
   ShoppingRecommendationRun,
   ShoppingRecommendationTarget,
   UploadSession,
+  UserPreference,
+  WardrobeReport,
   Weather
 } from "./types";
 import { GarmentCardSkeleton } from "./Skeleton";
+import { compressImageFile } from "./imageCompression";
 
 const categories: Array<{ value: "all" | Category; label: string }> = [
   { value: "all", label: "全部" },
@@ -77,18 +83,19 @@ const occasions: Array<{ value: Occasion; label: string }> = [
 ];
 
 const navItems = [
-  { id: "wardrobe", label: "衣橱", icon: Home },
-  { id: "upload", label: "上传", icon: UploadCloud },
-  { id: "purchase", label: "购买分析", icon: ShoppingBag },
-  { id: "shopping", label: "推荐购买", icon: Store },
+  { id: "home", label: "首页", icon: Home },
+  { id: "wardrobe", label: "衣橱", icon: Shirt },
   { id: "outfit", label: "搭配", icon: Sparkles },
-  { id: "history", label: "历史", icon: Archive },
-  { id: "tryon", label: "AI 换装", icon: Wand2 }
+  { id: "report", label: "报告", icon: Archive },
+  { id: "history", label: "历史", icon: Archive }
 ] as const;
 
-type View = (typeof navItems)[number]["id"] | "detail";
+type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping" | "detail";
+type PurchaseEntryMode = "url" | "image";
 
 type UploadItem = {
+  id: string;
+  requestId: number;
   name: string;
   status: "上传中" | "入库中" | "单品拆分中" | "标签识别中" | "已入库" | "失败";
   session?: UploadSession;
@@ -112,13 +119,20 @@ function BlurImage({ src, alt, className = "" }: { src: string; alt: string; cla
 
 function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
-  const [activeView, setActiveView] = useState<View>("wardrobe");
+  const [activeView, setActiveView] = useState<View>("home");
   const [garments, setGarments] = useState<Garment[]>([]);
   const [selectedGarment, setSelectedGarment] = useState<Garment | null>(null);
   const [outfits, setOutfits] = useState<Outfit[]>([]);
   const [currentOutfit, setCurrentOutfit] = useState<Outfit | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [purchaseEntryMode, setPurchaseEntryMode] = useState<PurchaseEntryMode>("url");
+  const [preferenceDismissed, setPreferenceDismissed] = useState(false);
+  const [preferenceCompleted, setPreferenceCompleted] = useState(false);
+  const [preferenceSettingsOpen, setPreferenceSettingsOpen] = useState(false);
+  const [purchaseAnalysisDone, setPurchaseAnalysisDone] = useState(false);
+  const readyGarmentCount = garments.filter((garment) => garment.status === "ready").length;
+  const showPreferencePrompt = preferenceSettingsOpen || (!preferenceDismissed && !preferenceCompleted && (purchaseAnalysisDone || readyGarmentCount >= 3));
 
   useEffect(() => {
     if (token) void refreshGarments(token);
@@ -207,14 +221,23 @@ function App() {
     if (view === "history") void loadHistory();
   }
 
-  function handleLogout() {
+  function openPurchase(mode: PurchaseEntryMode) {
+    setPurchaseEntryMode(mode);
+    setActiveView("purchase");
+  }
+
+  const handleLogout = useCallback(() => {
     clearToken();
     setToken(null);
     setGarments([]);
     setOutfits([]);
     setCurrentOutfit(null);
-    setActiveView("wardrobe");
-  }
+    setPreferenceDismissed(false);
+    setPreferenceCompleted(false);
+    setPreferenceSettingsOpen(false);
+    setPurchaseAnalysisDone(false);
+    setActiveView("home");
+  }, []);
 
   if (!token) {
     return (
@@ -244,6 +267,25 @@ function App() {
         <a className="skipLink" href="#main">跳到主要内容</a>
         {error && <div className="alert" role="alert">{error}</div>}
         {loading && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在同步云端衣橱</div>}
+        {showPreferencePrompt && (
+          <PreferencePrompt
+            token={token}
+            onAuthExpired={handleLogout}
+            isSettings={preferenceSettingsOpen}
+            onSaved={() => { setPreferenceCompleted(true); setPreferenceSettingsOpen(false); }}
+            onSkip={() => preferenceSettingsOpen ? setPreferenceSettingsOpen(false) : setPreferenceDismissed(true)}
+          />
+        )}
+        {activeView === "home" && (
+          <HomeView
+            readyCount={readyGarmentCount}
+            onPurchaseImage={() => openPurchase("image")}
+            onPurchaseUrl={() => openPurchase("url")}
+            onReport={() => setActiveView("report")}
+            onOutfit={() => setActiveView("outfit")}
+            onOpenPreferences={() => setPreferenceSettingsOpen(true)}
+          />
+        )}
         {activeView === "wardrobe" && (
           <WardrobeView
             garments={garments}
@@ -272,11 +314,20 @@ function App() {
         {activeView === "purchase" && (
           <PurchaseAnalysisView
             token={token}
+            entryMode={purchaseEntryMode}
             onAuthExpired={handleLogout}
+            onAnalyzed={() => setPurchaseAnalysisDone(true)}
             onSaved={(garment) => {
               setGarments((items) => mergeGarments([garment], items));
               setActiveView("wardrobe");
             }}
+          />
+        )}
+        {activeView === "report" && (
+          <ReportView
+            token={token}
+            onAuthExpired={handleLogout}
+            onOpenShopping={() => setActiveView("shopping")}
           />
         )}
         {activeView === "shopping" && (
@@ -311,6 +362,7 @@ function App() {
             garments={garments}
             currentOutfit={currentOutfit}
             setCurrentOutfit={setCurrentOutfit}
+            onHistoryChanged={() => void loadHistory()}
           />
         )}
         {activeView === "history" && (
@@ -325,7 +377,6 @@ function App() {
             onDelete={(id) => void handleDeleteOutfit(id)}
           />
         )}
-        {activeView === "tryon" && <TryOnView />}
       </main>
 
       <nav className="bottomNav" aria-label="移动端主导航">
@@ -441,6 +492,161 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
         </section>
       </div>
     </main>
+  );
+}
+
+function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip, isSettings }: {
+  token: string;
+  onAuthExpired: () => void;
+  onSaved: () => void;
+  onSkip: () => void;
+  isSettings?: boolean;
+}) {
+  const [form, setForm] = useState<UserPreference>({
+    primary_goal: "",
+    scenes: [],
+    styles: [],
+    avoid_types: [],
+    budget_range: ""
+  });
+  const [scenesText, setScenesText] = useState("");
+  const [stylesText, setStylesText] = useState("");
+  const [avoidText, setAvoidText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetchUserPreference(token).then((pref) => {
+      setForm({
+        primary_goal: pref.primary_goal || "",
+        scenes: pref.scenes || [],
+        styles: pref.styles || [],
+        avoid_types: pref.avoid_types || [],
+        budget_range: pref.budget_range || ""
+      });
+      setScenesText((pref.scenes || []).join("，"));
+      setStylesText((pref.styles || []).join("，"));
+      setAvoidText((pref.avoid_types || []).join("，"));
+    }).catch(() => { /* ignore fetch errors; form starts empty */ });
+  }, [token]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await updateUserPreference(token, {
+        primary_goal: form.primary_goal,
+        scenes: splitPreferenceList(scenesText),
+        styles: splitPreferenceList(stylesText),
+        avoid_types: splitPreferenceList(avoidText),
+        budget_range: form.budget_range
+      });
+      onSaved();
+    } catch (err) {
+      if (isAuthError(err)) {
+        onAuthExpired();
+        return;
+      }
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="controlPanel" aria-label="个性化偏好">
+      <div className="resultHeader">
+        <strong>个性化偏好</strong>
+        <button type="button" className="ghostButton compact" onClick={onSkip}>{isSettings ? "关闭" : "跳过"}</button>
+      </div>
+      <form className="formStack" onSubmit={handleSubmit}>
+        <label htmlFor="preference-goal">主要目标</label>
+        <input id="preference-goal" value={form.primary_goal} onChange={(event) => setForm({ ...form, primary_goal: event.target.value })} />
+        <label htmlFor="preference-scenes">常用场景</label>
+        <input id="preference-scenes" value={scenesText} onChange={(event) => setScenesText(event.target.value)} />
+        <label htmlFor="preference-styles">喜欢风格</label>
+        <input id="preference-styles" value={stylesText} onChange={(event) => setStylesText(event.target.value)} />
+        <label htmlFor="preference-avoid">避雷类型</label>
+        <input id="preference-avoid" value={avoidText} onChange={(event) => setAvoidText(event.target.value)} />
+        <label htmlFor="preference-budget">预算区间</label>
+        <input id="preference-budget" value={form.budget_range} onChange={(event) => setForm({ ...form, budget_range: event.target.value })} />
+        {error && <div className="alert" role="alert">{error}</div>}
+        <button type="submit" className="primaryButton compact" disabled={busy}>保存偏好</button>
+      </form>
+    </section>
+  );
+}
+
+function splitPreferenceList(value: string): string[] {
+  return value
+    .split(/[，,、\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutfit, onOpenPreferences }: {
+  readyCount: number;
+  onPurchaseImage: () => void;
+  onPurchaseUrl: () => void;
+  onReport: () => void;
+  onOutfit: () => void;
+  onOpenPreferences: () => void;
+}) {
+  return (
+    <section className="pageSection" aria-labelledby="home-title">
+      <div className="pageHeader">
+        <div>
+          <h1 id="home-title">买衣服前，先让 AI 帮你看看值不值得买</h1>
+          <p>上传商品图或粘贴商品链接，AI 会先识别单品，再和你的衣橱对比重复度、缺口和搭配空间。</p>
+        </div>
+        <div className="weatherPill">
+          <Shirt size={16} aria-hidden="true" />
+          已入库 {readyCount} 件
+        </div>
+      </div>
+
+      <div className="controlPanel">
+        <div className="buttonRow">
+          <button type="button" className="primaryButton compact" onClick={onPurchaseImage}>
+            <UploadCloud size={18} aria-hidden="true" />
+            上传商品图
+          </button>
+          <button type="button" className="secondaryButton compact" onClick={onPurchaseUrl}>
+            <ExternalLink size={18} aria-hidden="true" />
+            粘贴商品链接
+          </button>
+        </div>
+        <div className="hint">适合下单前快速判断：衣橱里有没有类似款、能搭几套、是不是刚好补齐缺口。</div>
+        <button type="button" className="ghostButton compact" style={{ marginTop: 8 }} onClick={onOpenPreferences}>
+          <Settings size={14} aria-hidden="true" />
+          设置偏好
+        </button>
+      </div>
+
+      <article className="outfitResult recommendation-consider">
+        <div className="resultHeader">
+          <strong>示例分析：黑色短袖衬衫</strong>
+          <span className="status recommendationBadge consider">考虑 · 68</span>
+        </div>
+        <p>衣橱里已有一件相近上衣，重复度偏高；如果你缺少夏季通勤内搭，可以作为候选，否则建议先跳过。</p>
+        <div className="analysisStats">
+          <span>重复度 86</span>
+          <span>缺口 45</span>
+          <span>搭配 72</span>
+        </div>
+        <div className="buttonRow">
+          <button type="button" className="secondaryButton compact" onClick={onReport}>
+            <Archive size={18} aria-hidden="true" />
+            衣柜缺什么
+          </button>
+          <button type="button" className="accentButton compact" onClick={onOutfit}>
+            <Sparkles size={18} aria-hidden="true" />
+            今天怎么搭
+          </button>
+        </div>
+      </article>
+    </section>
   );
 }
 
@@ -619,28 +825,79 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
 }) {
   const [mode, setMode] = useState<"plain" | "auto">("plain");
   const [items, setItems] = useState<UploadItem[]>([]);
+  const uploadRequestCounter = useRef(0);
+  const activeUploadRequestId = useRef(0);
 
   async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
-    setItems(files.map((file) => ({ name: file.name, status: "上传中" })));
-    for (const file of files) {
-      setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
+    const requestId = uploadRequestCounter.current + 1;
+    uploadRequestCounter.current = requestId;
+    activeUploadRequestId.current = requestId;
+    const selectedItems = files.map((file, index) => ({
+      id: `${requestId}-${index}-${file.name}`,
+      requestId,
+      name: file.name,
+      status: "上传中" as const
+    }));
+    setItems(selectedItems);
+    if (mode === "plain" && files.length > 1) {
+      const selectedItemIds = new Set(selectedItems.map((item) => item.id));
+      setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? { ...item, status: "入库中" } : item));
       try {
-        if (mode === "plain") {
-          const garment = await uploadPlainGarment(token, file);
-          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "已入库", garments: [garment] } : item));
-          onPending([garment]);
-        } else {
-          const session = await uploadGarmentPhoto(token, file);
-          setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "已入库", session, garments: session.garments } : item));
-          onPending(session.garments);
+        const compressedFiles = await Promise.all(files.map((file) => compressImageFile(file)));
+        const response = await batchUploadGarments(token, compressedFiles);
+        if (activeUploadRequestId.current !== requestId) return;
+        if (response.items.length !== files.length) {
+          setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? {
+            ...item,
+            status: "失败",
+            session: undefined,
+            garments: undefined,
+            message: "批量上传返回数量不一致，请重试。"
+          } : item));
+          return;
         }
+        setItems((current) => current.map((item) => {
+          if (!selectedItemIds.has(item.id) || item.requestId !== requestId) return item;
+          const index = selectedItems.findIndex((selectedItem) => selectedItem.id === item.id);
+          if (index < 0 || index >= response.items.length) return { ...item, status: "失败", message: "批量上传返回数据不匹配，请重试。" };
+          const garment = response.items[index];
+          return { ...item, status: "已入库", garments: [garment], message: undefined };
+        }));
+        onPending(response.items);
       } catch (err) {
+        if (activeUploadRequestId.current !== requestId) return;
         if (isAuthError(err)) {
           onAuthExpired();
           return;
         }
-        setItems((current) => current.map((item) => item.name === file.name ? { ...item, status: "失败", message: errorMessage(err) } : item));
+        const message = errorMessage(err);
+        setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? { ...item, status: "失败", message } : item));
+      }
+      return;
+    }
+    for (const [index, file] of files.entries()) {
+      const uploadItem = selectedItems[index];
+      setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
+      try {
+        if (mode === "plain") {
+          const garment = await uploadPlainGarment(token, file);
+          if (activeUploadRequestId.current !== requestId) return;
+          setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "已入库", garments: [garment] } : item));
+          onPending([garment]);
+        } else {
+          const session = await uploadGarmentPhoto(token, file);
+          if (activeUploadRequestId.current !== requestId) return;
+          setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "已入库", session, garments: session.garments } : item));
+          onPending(session.garments);
+        }
+      } catch (err) {
+        if (activeUploadRequestId.current !== requestId) return;
+        if (isAuthError(err)) {
+          onAuthExpired();
+          return;
+        }
+        setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "失败", message: errorMessage(err) } : item));
       }
     }
   }
@@ -657,6 +914,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
         <button type="button" className={mode === "plain" ? "segment active" : "segment"} onClick={() => setMode("plain")}>普通上传</button>
         <button type="button" className={mode === "auto" ? "segment active" : "segment"} onClick={() => setMode("auto")}>自动识别</button>
       </div>
+      <p className="uploadHint">上传 3 件常穿衣物即可提升分析准确度。优先选上衣、下装和鞋。</p>
       <label className="uploadBox" htmlFor="garment-upload">
         <UploadCloud size={34} aria-hidden="true" />
         <strong>{mode === "plain" ? "选择单件图片" : "选择整套或多单品照片"}</strong>
@@ -665,7 +923,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
       </label>
       <div className="uploadList">
         {items.map((item) => (
-          <div key={item.name} className="uploadItem">
+          <div key={item.id} className="uploadItem">
             <span>{item.name}</span>
             <strong>{item.status === "已入库" ? (mode === "plain" ? "已入库，可编辑标签" : "单品拆分完成") : item.status}</strong>
             {item.message && <small>{item.message}</small>}
@@ -686,28 +944,38 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
   );
 }
 
-function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
+function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onSaved }: {
   token: string;
+  entryMode: PurchaseEntryMode;
   onAuthExpired: () => void;
+  onAnalyzed: () => void;
   onSaved: (garment: Garment) => void;
 }) {
   const [url, setUrl] = useState("");
   const [candidate, setCandidate] = useState<PurchaseCandidate | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [manualFallback, setManualFallback] = useState(false);
+  const [imageUploadVisible, setImageUploadVisible] = useState(entryMode === "image");
   const [saveMessage, setSaveMessage] = useState("");
+  const urlInputRef = useRef<HTMLInputElement>(null);
   const canAnalyze = /^https?:\/\/\S+\.\S+/.test(url.trim());
+  const showImageUpload = entryMode === "image" || imageUploadVisible;
+
+  useEffect(() => {
+    setImageUploadVisible(entryMode === "image");
+    if (entryMode === "url") urlInputRef.current?.focus();
+  }, [entryMode]);
 
   async function handleAnalyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
     setError("");
     setSaveMessage("");
-    setManualFallback(false);
+    setImageUploadVisible(false);
     try {
       const result = await analyzePurchaseUrl(token, url.trim());
       setCandidate(result);
+      onAnalyzed();
     } catch (err) {
       if (isAuthError(err)) {
         onAuthExpired();
@@ -715,7 +983,7 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
       }
       const message = errorMessage(err);
       if (["product_image_not_found", "page_fetch_failed", "image_download_failed", "invalid_url"].includes(message)) {
-        setManualFallback(true);
+        setImageUploadVisible(true);
         setError("未能自动找到商品图片，请上传商品图继续分析。");
       } else {
         setError(message);
@@ -731,9 +999,11 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
     setBusy(true);
     setError("");
     try {
-      const result = await analyzePurchaseImage(token, file, url.trim());
+      const compressedFile = await compressImageFile(file);
+      const result = await analyzePurchaseImage(token, compressedFile, url.trim());
       setCandidate(result);
-      setManualFallback(false);
+      onAnalyzed();
+      setImageUploadVisible(entryMode === "image");
     } catch (err) {
       if (isAuthError(err)) {
         onAuthExpired();
@@ -744,6 +1014,14 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
       setBusy(false);
       event.target.value = "";
     }
+  }
+
+  function handleReset() {
+    setCandidate(null);
+    setError("");
+    setSaveMessage("");
+    setImageUploadVisible(entryMode === "image");
+    if (entryMode === "url") urlInputRef.current?.focus();
   }
 
   async function handleSave() {
@@ -778,16 +1056,17 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
         <input
           id="purchase-url"
           type="url"
+          ref={urlInputRef}
           value={url}
           placeholder="https://example.com/product/123"
           onChange={(event) => setUrl(event.target.value)}
         />
         <button type="submit" className="primaryButton compact" disabled={!canAnalyze || busy}>
-          {busy ? <Loader2 size={18} aria-hidden="true" /> : <ShoppingBag size={18} aria-hidden="true" />}
+          {busy ? <Loader2 size={18} aria-hidden="true" /> : <Store size={18} aria-hidden="true" />}
           {busy ? "分析中" : "开始分析"}
         </button>
         {error && <div className="alert" role="alert">{error}</div>}
-        {manualFallback && (
+        {showImageUpload && (
           <label className="uploadBox purchaseUploadBox" htmlFor="purchase-image-upload">
             <UploadCloud size={28} aria-hidden="true" />
             <strong>上传商品图片</strong>
@@ -807,37 +1086,94 @@ function PurchaseAnalysisView({ token, onAuthExpired, onSaved }: {
                   {recommendationLabel(candidate.recommendation)} · {candidate.score}
                 </span>
               </div>
-              <p>{candidate.reason_summary}</p>
+              <section aria-labelledby="purchase-conclusion">
+                <h2 id="purchase-conclusion">购买结论</h2>
+                <p>{candidate.analysis.summary || candidate.reason_summary}</p>
+              </section>
               <div className="tagRow">
                 <span>{categoryLabel(candidate.category)}</span>
                 {candidate.colors.map((color) => <span key={color}>{color}</span>)}
                 {candidate.tags.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
               </div>
-              <div className="analysisStats">
-                <span>重复度 {Math.round(Number(candidate.analysis.duplicate_score || 0))}</span>
-                <span>缺口 {Math.round(Number(candidate.analysis.wardrobe_gap_score || 0))}</span>
-                <span>搭配 {Math.round(Number(candidate.analysis.pairing_score || 0))}</span>
-              </div>
-              <div className="buttonRow">
-                <button type="button" className="primaryButton compact" disabled={busy || candidate.status === "saved"} onClick={handleSave}>
-                  <Check size={18} aria-hidden="true" />
-                  加入衣橱
-                </button>
-                {saveMessage && <span className="favoritePill">{saveMessage}</span>}
-              </div>
             </div>
           </div>
-          {candidate.similar_items.length > 0 && (
-            <div className="similarStrip" aria-label="相似衣橱单品">
-              {candidate.similar_items.map((item) => (
-                <div key={item.garment_id} className="similarItem">
-                  <BlurImage src={item.image_url} alt="相似衣橱单品" />
-                  <strong>{Math.round(item.similarity)}%</strong>
-                  <span>{item.matched_reasons.slice(0, 2).join(" / ")}</span>
-                </div>
-              ))}
+          <section aria-labelledby="purchase-scores">
+            <h2 id="purchase-scores">分项评分</h2>
+            <div className="analysisStats">
+              <span>重复风险 {Math.round(Number(candidate.analysis.score_breakdown.duplicate_risk || candidate.analysis.duplicate_score || 0))}</span>
+              <span>衣橱缺口 {Math.round(Number(candidate.analysis.score_breakdown.wardrobe_gap || candidate.analysis.wardrobe_gap_score || 0))}</span>
+              <span>搭配潜力 {Math.round(Number(candidate.analysis.score_breakdown.outfit_potential || candidate.analysis.pairing_score || 0))}</span>
+              <span>场景匹配 {Math.round(Number(candidate.analysis.score_breakdown.scene_match || 0))}</span>
+              <span>闲置风险 {Math.round(Number(candidate.analysis.score_breakdown.idle_risk || candidate.analysis.idle_risk || 0))}</span>
             </div>
-          )}
+          </section>
+          <section aria-labelledby="purchase-reasons">
+            <h2 id="purchase-reasons">推荐与风险理由</h2>
+            <p>{candidate.reason_summary}</p>
+            <div className="tagRow">
+              {candidate.analysis.pros.map((reason) => <span key={`pro-${reason}`}>优点：{reason}</span>)}
+              {candidate.analysis.cons.map((reason) => <span key={`con-${reason}`}>风险：{reason}</span>)}
+            </div>
+          </section>
+          <section aria-labelledby="purchase-similar">
+            <h2 id="purchase-similar">相似衣橱单品</h2>
+            {candidate.similar_items.length > 0 ? (
+              <div className="similarStrip" aria-label="相似衣橱单品">
+                {candidate.similar_items.map((item) => (
+                  <div key={item.garment_id} className="similarItem">
+                    <BlurImage src={item.image_url} alt="相似衣橱单品" />
+                    <strong>{Math.round(item.similarity)}%</strong>
+                    <span>{item.matched_reasons.slice(0, 2).join(" / ")}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p>暂未发现高度相似单品。</p>
+            )}
+          </section>
+          <section aria-labelledby="purchase-outfits">
+            <h2 id="purchase-outfits">可搭配方案</h2>
+            {candidate.analysis.outfit_ideas.length > 0 ? (
+              <div className="miniGrid">
+                {candidate.analysis.outfit_ideas.map((idea) => (
+                  <div key={idea.scene} className="similarItem">
+                    <strong>{idea.scene}</strong>
+                    <span>{idea.reason}</span>
+                    {idea.items.map((item) => (
+                      <span key={`${idea.scene}-${item.category}-${item.image_url}`}>{categoryLabel(item.category)}：{item.reason}</span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p>暂无明确搭配方案。</p>
+            )}
+          </section>
+          <section aria-labelledby="purchase-idle-risk">
+            <h2 id="purchase-idle-risk">闲置风险</h2>
+            <p>{candidate.analysis.idle_risk_detail.level}：{candidate.analysis.idle_risk_detail.reason}</p>
+          </section>
+          <section aria-labelledby="purchase-price">
+            <h2 id="purchase-price">价格建议</h2>
+            <div className="analysisStats">
+              {candidate.analysis.product_price?.current && (
+                <span>页面价格 ¥{candidate.analysis.product_price.current}</span>
+              )}
+              <span>建议价 ¥{candidate.analysis.suggested_price.ideal}</span>
+              <span>可入手区间 ¥{candidate.analysis.suggested_price.min} - ¥{candidate.analysis.suggested_price.max}</span>
+            </div>
+          </section>
+          <div className="buttonRow">
+            <button type="button" className="primaryButton compact" disabled={busy || candidate.status === "saved"} onClick={handleSave}>
+              <Check size={18} aria-hidden="true" />
+              加入衣橱
+            </button>
+            <button type="button" className="ghostButton compact" disabled={busy} onClick={handleReset}>
+              <Plus size={18} aria-hidden="true" />
+              再分析一件
+            </button>
+            {saveMessage && <span className="favoritePill">{saveMessage}</span>}
+          </div>
         </article>
       )}
     </section>
@@ -852,6 +1188,118 @@ const shoppingTargets: Array<{ value: ShoppingRecommendationTarget; label: strin
   { value: "summer", label: "夏季" },
   { value: "basics", label: "基础款" }
 ];
+
+function ReportView({ token, onAuthExpired, onOpenShopping }: {
+  token: string;
+  onAuthExpired: () => void;
+  onOpenShopping: () => void;
+}) {
+  const [report, setReport] = useState<WardrobeReport | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadReport() {
+      setBusy(true);
+      setError("");
+      try {
+        const result = await fetchWardrobeReport(token);
+        if (!cancelled) setReport(result);
+      } catch (err) {
+        if (isAuthError(err)) {
+          onAuthExpired();
+          return;
+        }
+        if (!cancelled) setError(errorMessage(err));
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    }
+    void loadReport();
+    return () => {
+      cancelled = true;
+    };
+  }, [onAuthExpired, token]);
+
+  return (
+    <section className="pageSection" aria-labelledby="report-title">
+      <div className="pageHeader">
+        <div>
+          <h1 id="report-title">衣柜体检报告</h1>
+          <p>{report?.summary || "正在读取你的衣柜结构。"}</p>
+        </div>
+        {report && <div className="weatherPill"><Archive size={16} aria-hidden="true" />{report.ready_total} / {report.total}</div>}
+      </div>
+
+      <div className="buttonRow">
+        <button type="button" className="primaryButton compact" onClick={onOpenShopping}>
+          <Store size={18} aria-hidden="true" />
+          查看衣橱缺口商品
+        </button>
+      </div>
+
+      {busy && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在生成报告</div>}
+      {error && <div className="alert" role="alert">{error}</div>}
+
+      {report && (
+        <>
+          <div className="controlPanel">
+            <h2>衣橱缺口</h2>
+            {report.wardrobe_gaps.length === 0 ? (
+              <p className="hint">当前基础品类覆盖较均衡。</p>
+            ) : (
+              <div className="analysisStats">
+                {report.wardrobe_gaps.slice(0, 5).map((gap) => (
+                  <span key={gap.category}>{gap.label} {gap.score}</span>
+                ))}
+              </div>
+            )}
+            <div className="tagRow">
+              {report.wardrobe_gaps.slice(0, 3).map((gap) => <span key={gap.category}>{gap.reason}</span>)}
+            </div>
+          </div>
+
+          <div className="controlPanel">
+            <h2>最近不建议再买</h2>
+            {report.avoid_categories.length === 0 ? (
+              <p className="hint">暂时没有明显重复风险。</p>
+            ) : (
+              <div className="tagRow">
+                {report.avoid_categories.map((category) => <span key={category}>{category}</span>)}
+              </div>
+            )}
+          </div>
+
+          <div className="controlPanel">
+            <h2>品类分布</h2>
+            <DistributionList items={report.category_distribution} />
+          </div>
+
+          <div className="controlPanel">
+            <h2>颜色分布</h2>
+            <DistributionList items={report.color_distribution} />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function DistributionList({ items }: {
+  items: Array<{ key: string; label: string; count: number; ratio: number }>;
+}) {
+  if (items.length === 0) {
+    return <p className="hint">暂无数据。</p>;
+  }
+  return (
+    <div className="tagRow">
+      {items.map((item) => (
+        <span key={item.key}>{item.label} {item.count} ({Math.round(item.ratio * 100)}%)</span>
+      ))}
+    </div>
+  );
+}
 
 function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
   token: string;
@@ -924,14 +1372,14 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
     <section className="pageSection" aria-labelledby="shopping-title">
       <div className="pageHeader">
         <div>
-          <h1 id="shopping-title">推荐购买</h1>
+          <h1 id="shopping-title">衣橱缺口</h1>
           <p>按衣橱缺口或场景目标获取淘宝 / 天猫候选单品，先分析再决定是否加入衣橱。</p>
         </div>
       </div>
 
       <div className="controlPanel">
-        <div className="fieldLabel">推荐目标</div>
-        <div className="segmented" aria-label="推荐目标">
+        <div className="fieldLabel">分析目标</div>
+        <div className="segmented" aria-label="分析目标">
           {shoppingTargets.map((item) => (
             <button
               key={item.value}
@@ -946,7 +1394,7 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
         <div className="buttonRow">
           <button type="button" className="primaryButton compact" disabled={busy} onClick={() => handleFetch(false)}>
             {busy ? <Loader2 size={18} aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
-            获取推荐
+            查看缺口
           </button>
           <button type="button" className="secondaryButton compact" disabled={busy} onClick={() => handleFetch(true)}>
             <Search size={18} aria-hidden="true" />
@@ -966,7 +1414,7 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
       {!run && (
         <div className="emptyState">
           <Store size={34} aria-hidden="true" />
-          <h2>选择目标后获取推荐</h2>
+          <h2>先看衣橱真正缺什么</h2>
           <p>系统会从当前衣橱出发，优先补齐缺少的品类和适合场景的单品。</p>
         </div>
       )}
@@ -976,6 +1424,27 @@ function ShoppingRecommendationsView({ token, onAuthExpired, onSaved }: {
           <Search size={34} aria-hidden="true" />
           <h2>没有找到合适商品</h2>
           <p>换一个目标或稍后重新搜索。</p>
+        </div>
+      )}
+
+      {run && (
+        <div className="controlPanel">
+          <h2>你的衣橱当前缺口</h2>
+          {run.wardrobe_gaps.length > 0 ? (
+            <div className="tagRow">
+              {run.wardrobe_gaps.map((gap) => <span key={gap.category}>{gap.label} {gap.score}%</span>)}
+            </div>
+          ) : (
+            <p className="hint">暂无明显衣橱缺口</p>
+          )}
+          <h2>最近不建议再买</h2>
+          {run.avoid_categories.length > 0 ? (
+            <div className="tagRow">
+              {run.avoid_categories.map((category) => <span key={category}>{category}</span>)}
+            </div>
+          ) : (
+            <p className="hint">暂无明显重复品类</p>
+          )}
         </div>
       )}
 
@@ -1122,11 +1591,12 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
   );
 }
 
-function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
+function OutfitView({ token, garments, currentOutfit, setCurrentOutfit, onHistoryChanged }: {
   token: string;
   garments: Garment[];
   currentOutfit: Outfit | null;
   setCurrentOutfit: (outfit: Outfit) => void;
+  onHistoryChanged: () => void;
 }) {
   const [mode, setMode] = useState<"ai" | "manual">("ai");
   const [occasion, setOccasion] = useState<Occasion>("work");
@@ -1136,6 +1606,10 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   const [weatherMessage, setWeatherMessage] = useState("正在获取天气");
   const [manualName, setManualName] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [targetEnabled, setTargetEnabled] = useState(false);
+  const [targetGarmentId, setTargetGarmentId] = useState("");
+  const [dislikeReason, setDislikeReason] = useState("");
+  const [feedbackMessage, setFeedbackMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const readyGarments = garments.filter((garment) => garment.status === "ready");
@@ -1174,8 +1648,14 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   async function handleGenerate() {
     setBusy(true);
     setError("");
+    setFeedbackMessage("");
     try {
-      const outfit = await generateOutfit(token, { occasion, temperature: weather?.temperature ?? temperature, weather });
+      const outfit = await generateOutfit(token, {
+        occasion,
+        temperature: weather?.temperature ?? temperature,
+        weather,
+        garment_id: targetEnabled && targetGarmentId ? targetGarmentId : null
+      });
       setCurrentOutfit(outfit);
     } catch (err) {
       setError(errorMessage(err));
@@ -1187,14 +1667,29 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
   async function handleFavorite() {
     if (!currentOutfit) return;
     setBusy(true);
+    setFeedbackMessage("");
     try {
       const updated = await setOutfitFavorite(token, currentOutfit.id, true);
       setCurrentOutfit(updated);
+      setFeedbackMessage("已记录反馈");
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleDislike() {
+    if (!dislikeReason) {
+      setFeedbackMessage("请选择不喜欢原因");
+      return;
+    }
+    try {
+      const feedback = JSON.parse(localStorage.getItem("aiwardrobe_outfit_feedback") || "{}");
+      feedback[currentOutfit?.id || "unknown"] = { reason: dislikeReason, timestamp: Date.now() };
+      localStorage.setItem("aiwardrobe_outfit_feedback", JSON.stringify(feedback));
+    } catch { /* localStorage may be unavailable */ }
+    setFeedbackMessage("已记录反馈（本次会话有效）");
   }
 
   async function handleFixed() {
@@ -1227,6 +1722,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
         weather
       });
       setCurrentOutfit(outfit);
+      onHistoryChanged();
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -1260,10 +1756,37 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
         <label htmlFor="temperature">温度：{temperature}°C</label>
         <input id="temperature" type="range" min="-10" max="40" value={temperature} onChange={(event) => setTemperature(Number(event.target.value))} />
         {mode === "ai" ? (
-          <button type="button" className="accentButton compact aiPulse" disabled={busy || weatherStatus === "loading"} onClick={handleGenerate}>
-            <Sparkles size={18} aria-hidden="true" />
-            {weatherStatus === "loading" ? "获取天气中" : busy ? "生成中" : "生成搭配"}
-          </button>
+          <>
+            <label className="manualChoice compactChoice">
+              <input
+                type="checkbox"
+                checked={targetEnabled}
+                onChange={(event) => {
+                  setTargetEnabled(event.target.checked);
+                  if (event.target.checked && !targetGarmentId && readyGarments[0]) {
+                    setTargetGarmentId(readyGarments[0].id);
+                  }
+                }}
+              />
+              <span>想把某件衣服搭出来</span>
+            </label>
+            {targetEnabled && (
+              <>
+                <label htmlFor="target-garment">指定单品</label>
+                <select id="target-garment" value={targetGarmentId} onChange={(event) => setTargetGarmentId(event.target.value)}>
+                  {readyGarments.map((garment) => (
+                    <option key={garment.id} value={garment.id}>
+                      {categoryLabel(garment.category)} · {garment.style || garment.colors.join("/")}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button type="button" className="accentButton compact aiPulse" disabled={busy || weatherStatus === "loading"} onClick={handleGenerate}>
+              <Sparkles size={18} aria-hidden="true" />
+              {weatherStatus === "loading" ? "获取天气中" : busy ? "生成中" : "生成搭配"}
+            </button>
+          </>
         ) : (
           <ManualPicker
             garments={readyGarments}
@@ -1301,13 +1824,24 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
               onClick={handleFavorite}
             >
               <Heart size={18} aria-hidden="true" fill={currentOutfit.is_favorite ? "currentColor" : "none"} />
-              {currentOutfit.is_favorite ? "已收藏" : "保存喜欢"}
+              {currentOutfit.is_favorite ? "已收藏" : "喜欢"}
+            </button>
+            <button type="button" className="secondaryButton compact" disabled={busy} onClick={handleDislike}>
+              不喜欢
             </button>
             <button type="button" className="secondaryButton compact" disabled={busy} onClick={handleFixed}>
               <Check size={18} aria-hidden="true" />
               {currentOutfit.is_fixed ? "取消固定" : "保存固定搭配"}
             </button>
           </div>
+          <label htmlFor="dislike-reason">不喜欢原因</label>
+          <select id="dislike-reason" value={dislikeReason} onChange={(event) => setDislikeReason(event.target.value)}>
+            <option value="">选择原因</option>
+            <option value="风格不适合">风格不适合</option>
+            <option value="颜色不合适">颜色不合适</option>
+            <option value="场景不匹配">场景不匹配</option>
+          </select>
+          {feedbackMessage && <p className="hint">{feedbackMessage}</p>}
         </article>
       )}
     </section>
@@ -1394,36 +1928,6 @@ function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete }: {
           ))}
         </div>
       )}
-    </section>
-  );
-}
-
-function TryOnView() {
-  return (
-    <section className="pageSection" aria-labelledby="tryon-title">
-      <div className="pageHeader">
-        <div>
-          <h1 id="tryon-title">AI 换装</h1>
-          <p>这里预留形象生成能力入口，当前版本只展示未开放状态。</p>
-        </div>
-      </div>
-      <div className="tryonGrid">
-        {[
-          { title: "换装", description: "上传人体照并替换服装的能力入口。", icon: Wand2 },
-          { title: "换发型", description: "预留发型风格变换入口。", icon: Sparkles },
-          { title: "换背景", description: "预留背景替换入口。", icon: Image }
-        ].map((item) => {
-          const Icon = item.icon;
-          return (
-            <article key={item.title} className="tryonCard" aria-disabled="true">
-              <Icon size={24} aria-hidden="true" />
-              <strong>{item.title}</strong>
-              <p>{item.description}</p>
-              <span className="status">未开放</span>
-            </article>
-          );
-        })}
-      </div>
     </section>
   );
 }

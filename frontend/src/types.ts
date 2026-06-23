@@ -12,6 +12,14 @@ export type User = {
   updated_at: string;
 };
 
+export type UserPreference = {
+  primary_goal: string;
+  scenes: string[];
+  styles: string[];
+  avoid_types: string[];
+  budget_range: string;
+};
+
 export type Garment = {
   id: string;
   source_upload_id: string | null;
@@ -106,11 +114,48 @@ export type PurchaseCandidate = {
   score: number;
   reason_summary: string;
   analysis: {
-    duplicate_score?: number;
-    wardrobe_gap_score?: number;
-    pairing_score?: number;
-    decision_factors?: string[];
-    [key: string]: unknown;
+    conclusion: PurchaseRecommendation;
+    score: number;
+    summary: string;
+    dimensions: {
+      outfit_potential: number;
+      scene_match: number;
+      gap_fill: number;
+      duplicate_risk: number;
+      idle_risk: number;
+    };
+    duplicate_risk: number;
+    idle_risk: number;
+    outfit_potential: number;
+    match_scenes: string[];
+    suggested_price: { min: number; ideal: number; max: number };
+    product_price?: { current: string; currency: string; source: string } | null;
+    score_breakdown: {
+      duplicate_risk: number;
+      wardrobe_gap: number;
+      outfit_potential: number;
+      scene_match: number;
+      idle_risk: number;
+    };
+    pros: string[];
+    cons: string[];
+    outfit_ideas: Array<{
+      scene: string;
+      items: Array<{ category: string; image_url: string; reason: string }>;
+      reason: string;
+    }>;
+    idle_risk_detail: { level: "低" | "中" | "高"; reason: string };
+    next_actions: string[];
+    duplicate_score: number;
+    wardrobe_gap_score: number;
+    pairing_score: number;
+    decision_factors: string[];
+    similar_items: Array<{
+      garment_id: string;
+      image_url: string;
+      similarity: number;
+      matched_reasons: string[];
+    }>;
   };
   status: "analyzing" | "ready" | "failed" | "saved";
   created_at: string;
@@ -150,9 +195,27 @@ export type ShoppingRecommendationRun = {
     remaining_refreshes: number | null;
     reset_at: string | null;
   };
+  wardrobe_gaps: Array<{ category: Category; label: string; score: number; reason: string }>;
+  avoid_categories: string[];
+  recommendation_groups: Array<{ title: string; reason: string; item_ids: string[] }>;
   items: ShoppingRecommendationItem[];
   created_at: string;
   updated_at: string;
+};
+
+export type WardrobeReport = {
+  total: number;
+  ready_total: number;
+  summary: string;
+  category_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
+  color_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
+  style_distribution: Array<{ key: string; label: string; count: number; ratio: number }>;
+  scene_coverage: Record<string, number>;
+  duplicate_risks: Array<{ category: Category; label: string; colors: string[]; count: number; garment_ids: string[] }>;
+  low_use_items: Array<{ garment_id: string; category: Category; label: string; reason: string; score: number }>;
+  wardrobe_gaps: Array<{ category: Category; label: string; score: number; reason: string }>;
+  avoid_categories: string[];
+  suggested_categories: string[];
 };
 
 export type AuthResponse = {
