@@ -1,126 +1,316 @@
 @echo off
-chcp 65001 >nul
-setlocal enabledelayedexpansion
+setlocal
 
-title AiWardrobe 启动器
+set "ROOT=%~dp0"
+set "BACKEND_DIR=%ROOT%backend"
+set "FRONTEND_DIR=%ROOT%frontend"
+set "FRONTEND_URL=http://localhost:5174"
+set "BACKEND_URL=http://127.0.0.1:8031"
+set "MODE=%~1"
 
+if "%MODE%"=="" set "MODE=local"
+
+if /i "%MODE%"=="local" goto local
+if /i "%MODE%"=="dev" goto local
+if /i "%MODE%"=="backend" goto backend
+if /i "%MODE%"=="frontend" goto frontend
+if /i "%MODE%"=="docker" goto docker
+if /i "%MODE%"=="stop" goto stop
+if /i "%MODE%"=="help" goto usage
+if /i "%MODE%"=="-h" goto usage
+if /i "%MODE%"=="--help" goto usage
+if /i "%MODE%"=="/?" goto usage
+
+echo Unknown option: %MODE%
 echo.
-echo   ╔══════════════════════════════════╗
-echo   ║     AiWardrobe — AI 个人衣橱     ║
-echo   ╚══════════════════════════════════╝
+goto usage
+
+:local
+title AiWardrobe Local Launcher
 echo.
-echo   选择启动方式:
-echo     [1] 本地开发 (前端 + 后端)
-echo     [2] Docker Compose (全服务)
-echo     [3] 仅后端
-echo     [4] 仅前端
-echo     [0] 退出
+echo AiWardrobe one-click start
+echo Mode: local backend/frontend
 echo.
 
-choice /c 12340 /n /m "请输入选项: "
-
-if errorlevel 5 goto :exit
-if errorlevel 4 goto :frontend
-if errorlevel 3 goto :backend
-if errorlevel 2 goto :docker
-if errorlevel 1 goto :dev
-
-:dev
-echo.
-echo  === 本地开发模式 ===
-call :check_deps
-call :start_backend
-call :start_frontend
-call :open_browser
-echo.
-echo  后端: http://localhost:8000/docs
-echo  前端: http://localhost:5173
-echo.
-echo  按 Ctrl+C 停止所有服务...
-pause >nul
-goto :exit
-
-:docker
-echo.
-echo  === Docker Compose 模式 ===
-docker compose up --build
-goto :exit
-
-:backend
-echo.
-echo  === 启动后端 ===
-call :check_python
-start "AiWardrobe Backend" cmd /c "cd /d "%~dp0backend" && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
-echo  后端已在新窗口启动 → http://localhost:8000/docs
-echo.
-pause
-goto :exit
-
-:frontend
-echo.
-echo  === 启动前端 ===
-call :check_node
-start "AiWardrobe Frontend" cmd /c "cd /d "%~dp0frontend" && npm run dev"
-echo  前端已在新窗口启动 → http://localhost:5173
-echo.
-pause
-goto :exit
-
-:exit
-endlocal
-exit /b 0
-
-:: ===== 辅助函数 =====
-
-:check_deps
-call :check_python
-call :check_node
-echo.
-exit /b
-
-:check_python
 where python >nul 2>&1
 if errorlevel 1 (
-    echo  [错误] 未找到 Python，请先安装 Python ^>=3.11
+    echo [ERROR] Python was not found. Install Python 3.11 or newer.
     pause
     exit /b 1
 )
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do echo  Python %%v ✓
-exit /b
+python --version
 
-:check_node
 where node >nul 2>&1
 if errorlevel 1 (
-    echo  [错误] 未找到 Node.js，请先安装 Node.js
+    echo [ERROR] Node.js was not found. Install Node.js first.
     pause
     exit /b 1
 )
-for /f "tokens=1,2 delims=v." %%a in ('node --version 2^>^&1') do echo  Node.js v%%b ✓
-exit /b
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] npm was not found. Install Node.js with npm.
+    pause
+    exit /b 1
+)
+node --version
+cmd /c npm --version
+if errorlevel 1 (
+    echo [ERROR] npm failed to run.
+    pause
+    exit /b 1
+)
 
-:start_backend
-echo  启动后端...
-cd /d "%~dp0backend"
-if not exist ".venv\" (
-    echo  创建虚拟环境...
+echo.
+echo Preparing backend dependencies...
+pushd "%BACKEND_DIR%"
+where uv >nul 2>&1
+if errorlevel 1 goto local_backend_pip
+
+uv --version
+if not exist ".venv\Scripts\python.exe" (
+    uv venv .venv --python python
+    if errorlevel 1 (
+        popd
+        pause
+        exit /b 1
+    )
+)
+uv pip install --link-mode=copy --python ".venv\Scripts\python.exe" -e ".[dev]"
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
+goto local_backend_ready
+
+:local_backend_pip
+echo uv was not found; falling back to python venv and pip.
+if not exist ".venv\Scripts\python.exe" (
     python -m venv .venv
+    if errorlevel 1 (
+        popd
+        pause
+        exit /b 1
+    )
 )
-call .venv\Scripts\activate.bat 2>nul
-python -m pip install -e .[dev] -q 2>nul
-start "AiWardrobe Backend" cmd /c "cd /d "%~dp0backend" && .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
-exit /b
-
-:start_frontend
-echo  启动前端...
-cd /d "%~dp0frontend"
-if not exist "node_modules\" (
-    echo  安装依赖...
-    call npm install
+".venv\Scripts\python.exe" -m pip install --upgrade pip
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
 )
-start "AiWardrobe Frontend" cmd /c "cd /d "%~dp0frontend" && npm run dev"
-exit /b
+".venv\Scripts\python.exe" -m pip install -e ".[dev]"
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
 
-:open_browser
-timeout /t 3 /nobreak >nul
-start http://localhost:5173 2>nul
-exit /b
+:local_backend_ready
+popd
+
+echo.
+echo Preparing frontend dependencies...
+pushd "%FRONTEND_DIR%"
+cmd /c npm install
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
+popd
+
+start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+start "AiWardrobe Frontend" /D "%FRONTEND_DIR%" cmd /k "set VITE_BACKEND_TARGET=%BACKEND_URL%&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
+timeout /t 5 /nobreak >nul
+start "" "%FRONTEND_URL%"
+
+echo.
+echo Frontend: %FRONTEND_URL%
+echo Backend:  %BACKEND_URL%/docs
+echo.
+echo Backend and frontend are running in separate terminals.
+echo Close those terminals to stop local dev servers.
+echo.
+pause
+exit /b 0
+
+:backend
+title AiWardrobe Backend Launcher
+echo.
+echo Starting AiWardrobe backend...
+
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Python was not found. Install Python 3.11 or newer.
+    pause
+    exit /b 1
+)
+python --version
+
+echo.
+echo Preparing backend dependencies...
+pushd "%BACKEND_DIR%"
+where uv >nul 2>&1
+if errorlevel 1 goto backend_pip
+
+uv --version
+if not exist ".venv\Scripts\python.exe" (
+    uv venv .venv --python python
+    if errorlevel 1 (
+        popd
+        pause
+        exit /b 1
+    )
+)
+uv pip install --link-mode=copy --python ".venv\Scripts\python.exe" -e ".[dev]"
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
+goto backend_ready
+
+:backend_pip
+echo uv was not found; falling back to python venv and pip.
+if not exist ".venv\Scripts\python.exe" (
+    python -m venv .venv
+    if errorlevel 1 (
+        popd
+        pause
+        exit /b 1
+    )
+)
+".venv\Scripts\python.exe" -m pip install --upgrade pip
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
+".venv\Scripts\python.exe" -m pip install -e ".[dev]"
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
+
+:backend_ready
+popd
+
+start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+echo Backend: %BACKEND_URL%/docs
+echo.
+pause
+exit /b 0
+
+:frontend
+title AiWardrobe Frontend Launcher
+echo.
+echo Starting AiWardrobe frontend...
+
+where node >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Node.js was not found. Install Node.js first.
+    pause
+    exit /b 1
+)
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] npm was not found. Install Node.js with npm.
+    pause
+    exit /b 1
+)
+node --version
+cmd /c npm --version
+if errorlevel 1 (
+    echo [ERROR] npm failed to run.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Preparing frontend dependencies...
+pushd "%FRONTEND_DIR%"
+cmd /c npm install
+if errorlevel 1 (
+    popd
+    pause
+    exit /b 1
+)
+popd
+
+start "AiWardrobe Frontend" /D "%FRONTEND_DIR%" cmd /k "set VITE_BACKEND_TARGET=%BACKEND_URL%&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
+timeout /t 5 /nobreak >nul
+start "" "%FRONTEND_URL%"
+echo Frontend: %FRONTEND_URL%
+echo.
+pause
+exit /b 0
+
+:docker
+title AiWardrobe Docker Launcher
+echo.
+echo AiWardrobe one-click start
+echo Mode: Docker Compose full stack
+echo.
+
+where docker >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Docker was not found. Install Docker Desktop first.
+    pause
+    exit /b 1
+)
+docker info >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Docker Engine is not running. Start Docker Desktop first.
+    pause
+    exit /b 1
+)
+
+pushd "%ROOT%"
+docker compose up --build -d
+set "DOCKER_CODE=%ERRORLEVEL%"
+popd
+if not "%DOCKER_CODE%"=="0" (
+    echo [ERROR] Docker Compose failed.
+    pause
+    exit /b %DOCKER_CODE%
+)
+
+timeout /t 5 /nobreak >nul
+start "" "http://localhost:5173"
+echo Frontend: http://localhost:5173
+echo Backend:  http://localhost:8000/docs
+echo.
+pause
+exit /b 0
+
+:stop
+echo.
+echo Stopping Docker services...
+where docker >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Docker was not found.
+    pause
+    exit /b 1
+)
+pushd "%ROOT%"
+docker compose down
+set "STOP_CODE=%ERRORLEVEL%"
+popd
+exit /b %STOP_CODE%
+
+:usage
+echo AiWardrobe startup script
+echo.
+echo Usage:
+echo   start.bat             Start the local backend and frontend
+echo   start.bat local       Start the local backend and frontend
+echo   start.bat dev         Alias for local
+echo   start.bat backend     Start only the local FastAPI backend
+echo   start.bat frontend    Start only the local Vite frontend
+echo   start.bat docker      Start the full stack with Docker Compose
+echo   start.bat stop        Stop Docker Compose services
+echo   start.bat help        Show this help
+echo.
+exit /b 0

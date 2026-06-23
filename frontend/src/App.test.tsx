@@ -111,6 +111,7 @@ const purchaseCandidate = {
     outfit_potential: 72,
     match_scenes: ["通勤", "周末"],
     suggested_price: { min: 99, ideal: 150, max: 199 },
+    product_price: { current: "129.00", currency: "CNY", source: "product_page" },
     score_breakdown: {
       duplicate_risk: 86,
       wardrobe_gap: 45,
@@ -306,6 +307,13 @@ describe("AiWardrobe app", () => {
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [garment, secondGarment, shoesGarment] });
     mockFetchOnce({
+      primary_goal: "",
+      scenes: [],
+      styles: [],
+      avoid_types: [],
+      budget_range: ""
+    });
+    mockFetchOnce({
       primary_goal: "少买闲置",
       scenes: ["通勤"],
       styles: ["简约"],
@@ -323,9 +331,9 @@ describe("AiWardrobe app", () => {
     await user.type(screen.getByLabelText("预算区间"), "100-300");
     await user.click(screen.getByRole("button", { name: "保存偏好" }));
 
-    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/preferences/me"));
-    expect(vi.mocked(fetch).mock.calls[1][1]).toEqual(expect.objectContaining({ method: "PUT" }));
-    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body));
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/preferences/me"));
+    expect(vi.mocked(fetch).mock.calls[2][1]).toEqual(expect.objectContaining({ method: "PUT" }));
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[2][1]?.body));
     expect(body.scenes).toEqual(["通勤"]);
     expect(screen.queryByText("个性化偏好")).not.toBeInTheDocument();
   });
@@ -714,7 +722,7 @@ describe("AiWardrobe app", () => {
 
     await user.selectOptions(screen.getByLabelText("不喜欢原因"), "颜色不合适");
     await user.click(screen.getByRole("button", { name: "不喜欢" }));
-    expect(screen.getByText("已记录反馈")).toBeInTheDocument();
+    expect(screen.getByText("已记录反馈（本次会话有效）")).toBeInTheDocument();
   });
 
   test("falls back to default city weather when geolocation is unavailable", async () => {
@@ -848,6 +856,13 @@ describe("AiWardrobe app", () => {
     mockFetchOnce({ items: [garment] });
     mockFetchOnce(purchaseCandidate, 201);
     mockFetchOnce({
+      primary_goal: "",
+      scenes: [],
+      styles: [],
+      avoid_types: [],
+      budget_range: ""
+    });
+    mockFetchOnce({
       ...garment,
       id: "saved-purchase",
       image_url: purchaseCandidate.image_url,
@@ -868,10 +883,11 @@ describe("AiWardrobe app", () => {
 
     expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
     expect(screen.getByText("已有相似黑色上衣，但夏季搭配仍有一定价值。")).toBeInTheDocument();
+    expect(screen.getByText("页面价格 ¥129.00")).toBeInTheDocument();
     expect(screen.getByText("86%")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "加入衣橱" }));
 
-    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/candidates/candidate-1/save"));
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/purchase/candidates/candidate-1/save"));
   });
 
   test("purchase analysis offers manual image upload when URL extraction fails", async () => {

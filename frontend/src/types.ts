@@ -129,6 +129,7 @@ export type PurchaseCandidate = {
     outfit_potential: number;
     match_scenes: string[];
     suggested_price: { min: number; ideal: number; max: number };
+    product_price?: { current: string; currency: string; source: string } | null;
     score_breakdown: {
       duplicate_risk: number;
       wardrobe_gap: number;

@@ -296,7 +296,7 @@ def _match_scenes(candidate: AiAnalysis) -> list[str]:
 def _suggested_price(candidate: AiAnalysis, score: int) -> dict[str, int]:
     base = 180 if candidate.category in {"outerwear", "shoes", "bag"} else 120
     ideal = round(base * (0.75 + score / 200))
-    return {"min": max(49, ideal - 70), "ideal": ideal, "max": ideal + 100}
+    return {"min": max(49, ideal - 70), "ideal": max(1, ideal), "max": ideal + 100}
 
 
 def _pros_cons(

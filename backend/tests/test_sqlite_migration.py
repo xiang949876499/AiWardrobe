@@ -95,8 +95,23 @@ def test_migrates_legacy_sqlite_into_target_database_and_merges_users_by_email(t
     assert second.outfits == 0
 
 
-def test_rejects_sqlite_database_url_outside_tests(monkeypatch) -> None:
+def test_allows_sqlite_database_url_in_development(monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "sqlite:///./aiwardrobe.db")
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("TESTING", "false")
+
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.database_url == "sqlite:///./aiwardrobe.db"
+
+
+def test_rejects_sqlite_database_url_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///./aiwardrobe.db")
+    monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("TESTING", "false")
 
     from app.config import get_settings
@@ -106,6 +121,6 @@ def test_rejects_sqlite_database_url_outside_tests(monkeypatch) -> None:
     try:
         get_settings()
     except ValueError as exc:
-        assert "SQLite is only allowed when TESTING=true" in str(exc)
+        assert "SQLite is only allowed for development or tests" in str(exc)
     else:
-        raise AssertionError("Expected non-test SQLite DATABASE_URL to be rejected")
+        raise AssertionError("Expected production SQLite DATABASE_URL to be rejected")

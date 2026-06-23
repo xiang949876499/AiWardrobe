@@ -48,7 +48,7 @@ def test_generated_outfit_uses_database_image_urls_even_when_ai_hallucinates(mon
     _create_garment(client, token, "trousers.jpg", "bottom")
     _create_garment(client, token, "loafers.jpg", "shoes")
 
-    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None):
+    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None, preferences=None):
         return [
             {
                 "garment_id": top_id,
@@ -81,7 +81,7 @@ def test_generated_outfit_includes_target_garment_even_when_ai_omits_it(monkeypa
     target_id = _create_garment(client, token, "trousers.jpg", "bottom")
     shoes_id = _create_garment(client, token, "loafers.jpg", "shoes")
 
-    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None):
+    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None, preferences=None):
         return [
             {
                 "garment_id": shoes_id,

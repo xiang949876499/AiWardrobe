@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -17,6 +18,7 @@ class ProductMetadata:
     image_url: str
     title: str
     domain: str
+    price: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class ExtractedProductImage:
     content_type: str
     title: str
     domain: str
+    price: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,9 +43,11 @@ class _ProductHTMLParser(HTMLParser):
         super().__init__()
         self.meta: list[dict[str, str]] = []
         self.images: list[dict[str, str]] = []
+        self.scripts: list[str] = []
         self.json_ld: list[str] = []
         self.title = ""
         self._in_title = False
+        self._in_script = False
         self._in_json_ld = False
         self._script_buffer: list[str] = []
 
@@ -54,23 +59,27 @@ class _ProductHTMLParser(HTMLParser):
             self.images.append(values)
         elif tag == "title":
             self._in_title = True
-        elif tag == "script" and values.get("type", "").lower() == "application/ld+json":
-            self._in_json_ld = True
+        elif tag == "script":
+            self._in_script = True
+            self._in_json_ld = values.get("type", "").lower() == "application/ld+json"
             self._script_buffer = []
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
             self._in_title = False
-        elif tag == "script" and self._in_json_ld:
-            self._in_json_ld = False
+        elif tag == "script" and self._in_script:
+            self._in_script = False
             text = "".join(self._script_buffer).strip()
             if text:
-                self.json_ld.append(text)
+                self.scripts.append(text)
+                if self._in_json_ld:
+                    self.json_ld.append(text)
+            self._in_json_ld = False
 
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self.title += data.strip()
-        elif self._in_json_ld:
+        elif self._in_script:
             self._script_buffer.append(data)
 
 
@@ -81,7 +90,11 @@ def select_product_metadata(html: str, product_url: str) -> ProductMetadata:
 
     parser = _ProductHTMLParser()
     parser.feed(html)
+    if _is_blocked_or_homepage(parser.title, parsed_url, html):
+        raise ProductExtractionError("product_page_blocked", "Product page was blocked or redirected to a marketplace homepage")
+
     candidates: list[_ImageCandidate] = []
+    price = _meta_price(parser.meta) or _json_ld_price(parser.json_ld) or _script_price(parser.scripts)
 
     for attrs in parser.meta:
         name = attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or ""
@@ -98,6 +111,9 @@ def select_product_metadata(html: str, product_url: str) -> ProductMetadata:
 
     for image_url in _json_ld_images(parser.json_ld):
         candidates.append(_ImageCandidate(image_url, 75))
+
+    for image_url in _script_images(parser.scripts):
+        candidates.append(_ImageCandidate(image_url, 70))
 
     for attrs in parser.images:
         src = (attrs.get("src") or attrs.get("data-src") or attrs.get("data-original") or "").strip()
@@ -121,6 +137,7 @@ def select_product_metadata(html: str, product_url: str) -> ProductMetadata:
         image_url=urljoin(product_url, best.url),
         title=parser.title.strip(),
         domain=parsed_url.netloc.lower(),
+        price=price,
     )
 
 
@@ -158,7 +175,115 @@ async def extract_product_image(url: str) -> ExtractedProductImage:
         content_type=content_type,
         title=metadata.title,
         domain=metadata.domain,
+        price=metadata.price,
     )
+
+
+def _is_blocked_or_homepage(title: str, parsed_url, html: str) -> bool:
+    host = parsed_url.netloc.lower()
+    path = parsed_url.path.strip("/")
+    normalized_title = title.strip()
+    if host in {"www.jd.com", "jd.com"} and not path:
+        return True
+    if host.endswith("jd.com") and "京东(JD.COM)-正品低价" in normalized_title and "item.jd.com" not in html:
+        return True
+    if "trade.m.jd.com" in host and "common/limit" in path:
+        return True
+    return False
+
+
+def _meta_price(meta: list[dict[str, str]]) -> str | None:
+    for attrs in meta:
+        name = (attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or "").lower()
+        content = attrs.get("content", "").strip()
+        if content and name in {"product:price:amount", "og:price:amount", "price"}:
+            return _clean_price(content)
+    return None
+
+
+def _json_ld_price(json_ld_blocks: list[str]) -> str | None:
+    for block in json_ld_blocks:
+        try:
+            parsed = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        price = _collect_json_ld_price(parsed)
+        if price:
+            return price
+    return None
+
+
+def _collect_json_ld_price(value: object) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            price = _collect_json_ld_price(item)
+            if price:
+                return price
+    elif isinstance(value, dict):
+        direct = value.get("price") or value.get("lowPrice") or value.get("highPrice")
+        if direct:
+            return _clean_price(str(direct))
+        offers = value.get("offers")
+        if isinstance(offers, (dict, list)):
+            price = _collect_json_ld_price(offers)
+            if price:
+                return price
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                price = _collect_json_ld_price(item)
+                if price:
+                    return price
+    return None
+
+
+def _script_price(scripts: list[str]) -> str | None:
+    patterns = [
+        r"""["'](?:jdPrice|p|price|salePrice|skuPrice)["']\s*:\s*["']?([0-9]+(?:\.[0-9]+)?)""",
+        r"""(?:jdPrice|salePrice|skuPrice)\s*[:=]\s*["']([0-9]+(?:\.[0-9]+)?)["']""",
+    ]
+    for script in scripts:
+        for pattern in patterns:
+            match = re.search(pattern, script)
+            if match:
+                return _clean_price(match.group(1))
+    return None
+
+
+def _script_images(scripts: list[str]) -> list[str]:
+    images: list[str] = []
+    patterns = [
+        r"""imageList\s*:\s*\[([^\]]+)\]""",
+        r"""["']imageList["']\s*:\s*\[([^\]]+)\]""",
+    ]
+    for script in scripts:
+        for pattern in patterns:
+            for block in re.findall(pattern, script, flags=re.DOTALL):
+                for value in re.findall(r"""["']([^"']+\.(?:jpg|jpeg|png|webp)(?:![^"']*)?)["']""", block, flags=re.I):
+                    images.append(_normalize_script_image_url(value))
+        for value in re.findall(
+            r"""(?:imagePath|imageUrl|mainImage|skuImage)\s*[:=]\s*["']([^"']+\.(?:jpg|jpeg|png|webp)(?:![^"']*)?)["']""",
+            script,
+            flags=re.I,
+        ):
+            images.append(_normalize_script_image_url(value))
+    return list(dict.fromkeys(image for image in images if image))
+
+
+def _normalize_script_image_url(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("//"):
+        return f"https:{cleaned}"
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        return cleaned
+    if cleaned.startswith("jfs/"):
+        return f"https://img14.360buyimg.com/n1/{cleaned}"
+    return cleaned
+
+
+def _clean_price(value: str) -> str:
+    cleaned = value.strip().replace(",", "")
+    match = re.search(r"[0-9]+(?:\.[0-9]+)?", cleaned)
+    return match.group(0) if match else cleaned
 
 
 def _json_ld_images(json_ld_blocks: list[str]) -> list[str]:

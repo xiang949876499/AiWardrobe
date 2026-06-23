@@ -21,8 +21,9 @@ AiWardrobe is an AI buy-before-you-buy wardrobe assistant (MVP). Users can analy
 
 ```powershell
 cd backend
-python -m pip install -e .[dev]
-python -m uvicorn app.main:app --reload
+uv venv .venv --python python
+uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 python -m pytest
 ```
 
@@ -48,7 +49,7 @@ Services: frontend `:5173`, backend `:8000`, MinIO console `:9001`, Postgres `:5
 
 Copy `.env.example` to `.env`. Key env vars:
 
-- `DATABASE_URL` - Postgres URL for app runtime; SQLite is allowed only in tests
+- `DATABASE_URL` - Postgres URL for production/Docker; SQLite is allowed in development and tests
 - `AI_DEMO_MODE` - defaults to `true`; set to `false` and configure `AI_BASE_URL`/`AI_API_KEY`/`AI_MODEL` for real AI
 - `OUTFIT_AI_PROVIDER`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` - outfit generation provider settings
 - `SHOPPING_RECOMMENDATION_DEMO_MODE`, `TAOBAO_*` - wardrobe gap product search settings

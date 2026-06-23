@@ -13,6 +13,7 @@ from app.ai import AiService
 from app.commerce import CommerceProduct
 from app.config import Settings
 from app.models import Garment, PurchaseCandidate, ShoppingRecommendationItem, ShoppingRecommendationRun, User
+from app.preferences import preference_context
 from app.purchase_analysis import analyze_purchase, explain_purchase
 from app.rate_limit import RateLimitResult, check_rate_limit
 from app.storage import StorageService
@@ -131,7 +132,7 @@ async def analyze_recommendation_item(
             image_bytes=image_bytes,
         )
         ready_garments = _ready_garments(db, current_user)
-        decision = analyze_purchase(analysis, ready_garments)
+        decision = analyze_purchase(analysis, ready_garments, preference_context(db, current_user.id))
         reason_summary = await explain_purchase(settings, decision, analysis)
         candidate = PurchaseCandidate(
             user_id=current_user.id,

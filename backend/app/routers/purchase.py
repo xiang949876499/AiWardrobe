@@ -40,6 +40,7 @@ async def analyze_product_url(
         content_type=extracted.content_type,
         title=extracted.title,
         domain=extracted.domain,
+        price=extracted.price,
     )
 
 
@@ -64,6 +65,7 @@ async def analyze_uploaded_product_image(
         content_type=file.content_type or "image/jpeg",
         title=Path(file.filename or "Product image").stem,
         domain=domain,
+        price=None,
     )
 
 
@@ -110,6 +112,7 @@ async def _create_candidate_from_image(
     content_type: str,
     title: str,
     domain: str,
+    price: str | None,
 ) -> PurchaseCandidate:
     suffix = _suffix_for_image(content_type, source_image_url)
     stored = StorageService(settings).save_bytes(image_bytes, suffix=suffix, prefix="purchase")
@@ -128,6 +131,8 @@ async def _create_candidate_from_image(
         ).scalars()
     )
     decision = analyze_purchase(analysis, ready_garments, preference_context(db, current_user.id))
+    if price:
+        decision.analysis["product_price"] = {"current": price, "currency": "CNY", "source": "product_page"}
     reason_summary = await explain_purchase(settings, decision, analysis)
     candidate = PurchaseCandidate(
         user_id=current_user.id,

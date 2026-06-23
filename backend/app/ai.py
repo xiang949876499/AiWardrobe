@@ -309,7 +309,15 @@ class AiService:
             weather_text = f"，参考天气：{weather.get('condition', '未知')}，{weather.get('temperature', temperature or '--')}度"
         else:
             weather_text = f"，适配{temperature}度" if temperature is not None else f"，适配{season or '当前天气'}"
-        preference_text = f"，参考你的偏好：{preferences.get('primary_goal')}" if preferences and preferences.get("primary_goal") else ""
+        preference_parts: list[str] = []
+        if preferences:
+            if preferences.get("primary_goal"):
+                preference_parts.append(f"目标：{preferences['primary_goal']}")
+            if preferences.get("scenes"):
+                preference_parts.append(f"场景：{'/'.join(preferences['scenes'][:3])}")
+            if preferences.get("styles"):
+                preference_parts.append(f"风格：{'/'.join(preferences['styles'][:3])}")
+        preference_text = f"，参考你的偏好：{'；'.join(preference_parts)}" if preference_parts else ""
         explanation = f"这套搭配适合{_occasion_label(occasion)}。整体以利落基础款为主{weather_text}{preference_text}，兼顾舒适度和完整度。"
         return items, explanation
 

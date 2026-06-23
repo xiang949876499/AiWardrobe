@@ -10,13 +10,14 @@ import {
   MapPin,
   Plus,
   Search,
+  Settings,
   Shirt,
   Sparkles,
   Store,
   Trash2,
   UploadCloud
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   analyzeShoppingRecommendationItem,
@@ -31,6 +32,7 @@ import {
   fetchGarments,
   fetchOutfits,
   fetchTodayWeather,
+  fetchUserPreference,
   fetchWardrobeReport,
   generateOutfit,
   getStoredToken,
@@ -127,9 +129,10 @@ function App() {
   const [purchaseEntryMode, setPurchaseEntryMode] = useState<PurchaseEntryMode>("url");
   const [preferenceDismissed, setPreferenceDismissed] = useState(false);
   const [preferenceCompleted, setPreferenceCompleted] = useState(false);
+  const [preferenceSettingsOpen, setPreferenceSettingsOpen] = useState(false);
   const [purchaseAnalysisDone, setPurchaseAnalysisDone] = useState(false);
   const readyGarmentCount = garments.filter((garment) => garment.status === "ready").length;
-  const showPreferencePrompt = !preferenceDismissed && !preferenceCompleted && (purchaseAnalysisDone || readyGarmentCount >= 3);
+  const showPreferencePrompt = preferenceSettingsOpen || (!preferenceDismissed && !preferenceCompleted && (purchaseAnalysisDone || readyGarmentCount >= 3));
 
   useEffect(() => {
     if (token) void refreshGarments(token);
@@ -223,7 +226,7 @@ function App() {
     setActiveView("purchase");
   }
 
-  function handleLogout() {
+  const handleLogout = useCallback(() => {
     clearToken();
     setToken(null);
     setGarments([]);
@@ -231,9 +234,10 @@ function App() {
     setCurrentOutfit(null);
     setPreferenceDismissed(false);
     setPreferenceCompleted(false);
+    setPreferenceSettingsOpen(false);
     setPurchaseAnalysisDone(false);
     setActiveView("home");
-  }
+  }, []);
 
   if (!token) {
     return (
@@ -267,8 +271,9 @@ function App() {
           <PreferencePrompt
             token={token}
             onAuthExpired={handleLogout}
-            onSaved={() => setPreferenceCompleted(true)}
-            onSkip={() => setPreferenceDismissed(true)}
+            isSettings={preferenceSettingsOpen}
+            onSaved={() => { setPreferenceCompleted(true); setPreferenceSettingsOpen(false); }}
+            onSkip={() => preferenceSettingsOpen ? setPreferenceSettingsOpen(false) : setPreferenceDismissed(true)}
           />
         )}
         {activeView === "home" && (
@@ -278,6 +283,7 @@ function App() {
             onPurchaseUrl={() => openPurchase("url")}
             onReport={() => setActiveView("report")}
             onOutfit={() => setActiveView("outfit")}
+            onOpenPreferences={() => setPreferenceSettingsOpen(true)}
           />
         )}
         {activeView === "wardrobe" && (
@@ -356,6 +362,7 @@ function App() {
             garments={garments}
             currentOutfit={currentOutfit}
             setCurrentOutfit={setCurrentOutfit}
+            onHistoryChanged={() => void loadHistory()}
           />
         )}
         {activeView === "history" && (
@@ -488,11 +495,12 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
-function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip }: {
+function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip, isSettings }: {
   token: string;
   onAuthExpired: () => void;
   onSaved: () => void;
   onSkip: () => void;
+  isSettings?: boolean;
 }) {
   const [form, setForm] = useState<UserPreference>({
     primary_goal: "",
@@ -506,6 +514,21 @@ function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip }: {
   const [avoidText, setAvoidText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetchUserPreference(token).then((pref) => {
+      setForm({
+        primary_goal: pref.primary_goal || "",
+        scenes: pref.scenes || [],
+        styles: pref.styles || [],
+        avoid_types: pref.avoid_types || [],
+        budget_range: pref.budget_range || ""
+      });
+      setScenesText((pref.scenes || []).join("，"));
+      setStylesText((pref.styles || []).join("，"));
+      setAvoidText((pref.avoid_types || []).join("，"));
+    }).catch(() => { /* ignore fetch errors; form starts empty */ });
+  }, [token]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -535,7 +558,7 @@ function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip }: {
     <section className="controlPanel" aria-label="个性化偏好">
       <div className="resultHeader">
         <strong>个性化偏好</strong>
-        <button type="button" className="ghostButton compact" onClick={onSkip}>跳过</button>
+        <button type="button" className="ghostButton compact" onClick={onSkip}>{isSettings ? "关闭" : "跳过"}</button>
       </div>
       <form className="formStack" onSubmit={handleSubmit}>
         <label htmlFor="preference-goal">主要目标</label>
@@ -562,12 +585,13 @@ function splitPreferenceList(value: string): string[] {
     .filter(Boolean);
 }
 
-function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutfit }: {
+function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutfit, onOpenPreferences }: {
   readyCount: number;
   onPurchaseImage: () => void;
   onPurchaseUrl: () => void;
   onReport: () => void;
   onOutfit: () => void;
+  onOpenPreferences: () => void;
 }) {
   return (
     <section className="pageSection" aria-labelledby="home-title">
@@ -594,6 +618,10 @@ function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutf
           </button>
         </div>
         <div className="hint">适合下单前快速判断：衣橱里有没有类似款、能搭几套、是不是刚好补齐缺口。</div>
+        <button type="button" className="ghostButton compact" style={{ marginTop: 8 }} onClick={onOpenPreferences}>
+          <Settings size={14} aria-hidden="true" />
+          设置偏好
+        </button>
       </div>
 
       <article className="outfitResult recommendation-consider">
@@ -832,6 +860,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
         setItems((current) => current.map((item) => {
           if (!selectedItemIds.has(item.id) || item.requestId !== requestId) return item;
           const index = selectedItems.findIndex((selectedItem) => selectedItem.id === item.id);
+          if (index < 0 || index >= response.items.length) return { ...item, status: "失败", message: "批量上传返回数据不匹配，请重试。" };
           const garment = response.items[index];
           return { ...item, status: "已入库", garments: [garment], message: undefined };
         }));
@@ -1127,6 +1156,9 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
           <section aria-labelledby="purchase-price">
             <h2 id="purchase-price">价格建议</h2>
             <div className="analysisStats">
+              {candidate.analysis.product_price?.current && (
+                <span>页面价格 ¥{candidate.analysis.product_price.current}</span>
+              )}
               <span>建议价 ¥{candidate.analysis.suggested_price.ideal}</span>
               <span>可入手区间 ¥{candidate.analysis.suggested_price.min} - ¥{candidate.analysis.suggested_price.max}</span>
             </div>
@@ -1559,11 +1591,12 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
   );
 }
 
-function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
+function OutfitView({ token, garments, currentOutfit, setCurrentOutfit, onHistoryChanged }: {
   token: string;
   garments: Garment[];
   currentOutfit: Outfit | null;
   setCurrentOutfit: (outfit: Outfit) => void;
+  onHistoryChanged: () => void;
 }) {
   const [mode, setMode] = useState<"ai" | "manual">("ai");
   const [occasion, setOccasion] = useState<Occasion>("work");
@@ -1651,7 +1684,12 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
       setFeedbackMessage("请选择不喜欢原因");
       return;
     }
-    setFeedbackMessage("已记录反馈");
+    try {
+      const feedback = JSON.parse(localStorage.getItem("aiwardrobe_outfit_feedback") || "{}");
+      feedback[currentOutfit?.id || "unknown"] = { reason: dislikeReason, timestamp: Date.now() };
+      localStorage.setItem("aiwardrobe_outfit_feedback", JSON.stringify(feedback));
+    } catch { /* localStorage may be unavailable */ }
+    setFeedbackMessage("已记录反馈（本次会话有效）");
   }
 
   async function handleFixed() {
@@ -1684,6 +1722,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit }: {
         weather
       });
       setCurrentOutfit(outfit);
+      onHistoryChanged();
     } catch (err) {
       setError(errorMessage(err));
     } finally {

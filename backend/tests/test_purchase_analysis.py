@@ -63,6 +63,56 @@ def test_product_image_extraction_prefers_og_image_and_resolves_relative_url() -
     assert metadata.domain == "shop.example.com"
 
 
+def test_product_extraction_reads_jd_script_image_and_price() -> None:
+    from app.product_extraction import select_product_metadata
+
+    metadata = select_product_metadata(
+        """
+        <html>
+          <head><title>森马短袖T恤 京东自营</title></head>
+          <body>
+            <script>
+              var pageConfig = {
+                product: {
+                  name: '森马短袖T恤',
+                  imageList: ['//img14.360buyimg.com/n1/jfs/t1/123/456/main-shirt.jpg']
+                },
+                price: { jdPrice: '79.90' }
+              };
+            </script>
+          </body>
+        </html>
+        """,
+        "https://item.jd.com/10212037610954.html",
+    )
+
+    assert metadata.image_url == "https://img14.360buyimg.com/n1/jfs/t1/123/456/main-shirt.jpg"
+    assert metadata.title == "森马短袖T恤 京东自营"
+    assert metadata.price == "79.90"
+
+
+def test_product_extraction_rejects_jd_homepage_redirect() -> None:
+    from app.product_extraction import ProductExtractionError, select_product_metadata
+
+    try:
+        select_product_metadata(
+            """
+            <html>
+              <head>
+                <title>京东(JD.COM)-正品低价、品质保障、配送及时、轻松购物！</title>
+                <meta property="og:image" content="//storage.360buyimg.com/retail-mall/logo.png" />
+              </head>
+              <body>网上购物，上京东</body>
+            </html>
+            """,
+            "https://www.jd.com?from=pc_item_sd",
+        )
+    except ProductExtractionError as exc:
+        assert exc.code == "product_page_blocked"
+    else:
+        raise AssertionError("Expected JD homepage redirect to be rejected")
+
+
 def test_product_image_extraction_returns_recoverable_error_when_no_image() -> None:
     from app.product_extraction import ProductExtractionError, select_product_metadata
 
@@ -128,6 +178,7 @@ def test_purchase_analysis_creates_candidate_without_creating_garment(monkeypatc
             content_type="image/jpeg",
             title="Black Shirt",
             domain="shop.example.com",
+            price="129.00",
         )
 
     import app.routers.purchase as purchase_router
@@ -151,6 +202,7 @@ def test_purchase_analysis_creates_candidate_without_creating_garment(monkeypatc
     analysis = body["analysis"]
     assert analysis["conclusion"] in ["recommend", "consider", "skip"]
     assert analysis["score"] == body["score"]
+    assert analysis["product_price"] == {"current": "129.00", "currency": "CNY", "source": "product_page"}
     assert analysis["dimensions"]["duplicate_risk"] >= 0
     assert analysis["dimensions"]["outfit_potential"] >= 0
     assert analysis["idle_risk_detail"]["level"] in ["低", "中", "高"]

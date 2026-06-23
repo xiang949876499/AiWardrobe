@@ -41,12 +41,25 @@ Recommendation responses include `wardrobe_gaps`, `avoid_categories`, and `recom
 
 ## Local Development
 
+One-click start on Windows:
+
+```powershell
+.\start.bat
+```
+
+By default this starts the FastAPI backend and Vite frontend locally, then opens
+the frontend. Other useful modes: `.\start.bat backend`, `.\start.bat frontend`,
+and `.\start.bat docker` if you explicitly want the full Docker Compose stack.
+The local backend uses `backend\aiwardrobe-local.db` (SQLite) and local upload
+storage, so Docker/Postgres/MinIO are not required for basic development.
+
 Backend:
 
 ```powershell
 cd backend
-python -m pip install -e .[dev]
-python -m uvicorn app.main:app --reload
+uv venv .venv --python python
+uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
 Frontend:
@@ -57,7 +70,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The frontend proxies API calls to [http://localhost:8000](http://localhost:8000).
+Open [http://localhost:5174](http://localhost:5174). The local frontend proxies API calls to [http://127.0.0.1:8031](http://127.0.0.1:8031).
 
 ## Docker Compose
 

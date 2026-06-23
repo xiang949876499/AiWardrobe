@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
 
+from app.purchase_analysis import _idle_risk, _idle_risk_detail, _pros_cons, _suggested_price
+
 Category = Literal["top", "bottom", "outerwear", "shoes", "bag", "accessory"]
 GarmentStatus = Literal["uploaded", "extracting", "tagging", "pending_review", "processing", "ready", "failed"]
 PurchaseCandidateStatus = Literal["analyzing", "ready", "failed", "saved"]
@@ -175,6 +177,12 @@ class PurchaseSuggestedPrice(BaseModel):
     max: int
 
 
+class PurchaseProductPrice(BaseModel):
+    current: str
+    currency: str = "CNY"
+    source: str = "product_page"
+
+
 class PurchaseAnalysisDetail(BaseModel):
     conclusion: PurchaseRecommendation
     score: int
@@ -185,6 +193,7 @@ class PurchaseAnalysisDetail(BaseModel):
     outfit_potential: int
     match_scenes: list[str]
     suggested_price: PurchaseSuggestedPrice
+    product_price: PurchaseProductPrice | None = None
     score_breakdown: PurchaseScoreBreakdown
     pros: list[str]
     cons: list[str]
@@ -263,7 +272,7 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
         raw_breakdown,
         raw_dimensions,
         ("idle_risk", "idle_risk", "idle_risk", "idle_risk"),
-        _legacy_idle_risk(duplicate_score, gap_score, pairing_score),
+        _idle_risk(duplicate_score, gap_score, pairing_score),
     )
     scene_match = _first_analysis_int(
         analysis,
@@ -305,8 +314,9 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
     analysis.setdefault("match_scenes", ["日常"])
     analysis.setdefault("suggested_price", _legacy_suggested_price(response_data.get("category"), score))
     analysis["score_breakdown"] = score_breakdown
-    analysis.setdefault("pros", _legacy_pros(gap_score, pairing_score, duplicate_score))
-    analysis.setdefault("cons", _legacy_cons(gap_score, pairing_score, duplicate_score))
+    default_pros, default_cons = _pros_cons(recommendation, duplicate_score, gap_score, pairing_score)
+    analysis.setdefault("pros", default_pros)
+    analysis.setdefault("cons", default_cons)
     analysis.setdefault("outfit_ideas", [])
     analysis["idle_risk_detail"] = _normalize_idle_risk_detail(analysis.get("idle_risk_detail"), idle_risk)
     analysis.setdefault("next_actions", ["save", "share", "analyze_another", "upload_wardrobe"])
@@ -320,7 +330,10 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
 
 def _analysis_int(analysis: dict[str, object], key: str, default: int = 0) -> int:
     try:
-        return int(analysis.get(key, default) or 0)
+        value = analysis.get(key)
+        if value is None:
+            return default
+        return int(value or 0)
     except (TypeError, ValueError):
         return default
 
@@ -365,7 +378,7 @@ def _set_int_default_or_replace_zero(analysis: dict[str, object], key: str, valu
 
 
 def _normalize_idle_risk_detail(value: object, idle_risk: int) -> dict[str, str]:
-    fallback = _legacy_idle_risk_detail(idle_risk)
+    fallback = _idle_risk_detail(idle_risk)
     if not isinstance(value, dict):
         return fallback
 
@@ -402,45 +415,11 @@ def _analysis_recommendation(value: object) -> PurchaseRecommendation:
     return "consider"
 
 
-def _legacy_idle_risk(duplicate_score: int, gap_score: int, pairing_score: int) -> int:
-    risk = round(duplicate_score * 0.45 + (100 - gap_score) * 0.3 + (100 - pairing_score) * 0.25)
-    return max(0, min(100, risk))
-
-
 def _legacy_suggested_price(category: object, score: int) -> dict[str, int]:
+    """Thin wrapper delegating to _suggested_price — accepts raw category string for legacy backfill."""
     base = 180 if category in {"outerwear", "shoes", "bag"} else 120
     ideal = round(base * (0.75 + score / 200))
     return {"min": max(49, ideal - 70), "ideal": max(1, ideal), "max": ideal + 100}
-
-
-def _legacy_pros(gap_score: int, pairing_score: int, duplicate_score: int) -> list[str]:
-    pros: list[str] = []
-    if gap_score >= 65:
-        pros.append("补足衣橱缺口")
-    if pairing_score >= 70:
-        pros.append("搭配潜力高")
-    if duplicate_score < 70:
-        pros.append("与现有衣橱区分明显")
-    return pros or ["可继续观察"]
-
-
-def _legacy_cons(gap_score: int, pairing_score: int, duplicate_score: int) -> list[str]:
-    cons: list[str] = []
-    if gap_score < 65:
-        cons.append("新增覆盖有限")
-    if pairing_score < 70:
-        cons.append("可搭配方案偏少")
-    if duplicate_score >= 70:
-        cons.append("已有相似单品")
-    return cons or ["暂无明显风险"]
-
-
-def _legacy_idle_risk_detail(idle_risk: int) -> dict[str, str]:
-    if idle_risk >= 70:
-        return {"level": "高", "reason": "重复或不好搭的概率偏高，建议冷静后再买。"}
-    if idle_risk >= 45:
-        return {"level": "中", "reason": "有一定使用场景，但需要确认价格和搭配。"}
-    return {"level": "低", "reason": "与衣橱互补度较好，闲置风险可控。"}
 
 
 class ShoppingRateLimitResponse(BaseModel):
