@@ -52,6 +52,20 @@ const secondGarment = {
   updated_at: "2026-05-22T00:00:00Z"
 };
 
+const shoesGarment = {
+  ...garment,
+  id: "garment-3",
+  image_url: "/static/uploads/shoes.jpg",
+  image_key: "garments/shoes.jpg",
+  thumbnail_url: "/static/uploads/shoes.jpg",
+  category: "shoes",
+  colors: ["black"],
+  style: "通勤",
+  tags: ["通勤"],
+  created_at: "2026-05-23T00:00:00Z",
+  updated_at: "2026-05-23T00:00:00Z"
+};
+
 const purchaseCandidate = {
   id: "candidate-1",
   product_url: "https://shop.example.com/products/black-shirt",
@@ -285,6 +299,35 @@ describe("AiWardrobe app", () => {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
     expect(screen.queryByRole("button", { name: "AI 换装" })).not.toBeInTheDocument();
+  });
+
+  test("shows a skippable preference panel after three ready garments and saves it", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment, secondGarment, shoesGarment] });
+    mockFetchOnce({
+      primary_goal: "少买闲置",
+      scenes: ["通勤"],
+      styles: ["简约"],
+      avoid_types: ["低质感针织"],
+      budget_range: "100-300"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("个性化偏好")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("主要目标"), "少买闲置");
+    await user.type(screen.getByLabelText("常用场景"), "通勤");
+    await user.type(screen.getByLabelText("喜欢风格"), "简约");
+    await user.type(screen.getByLabelText("避雷类型"), "低质感针织");
+    await user.type(screen.getByLabelText("预算区间"), "100-300");
+    await user.click(screen.getByRole("button", { name: "保存偏好" }));
+
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/preferences/me"));
+    expect(vi.mocked(fetch).mock.calls[1][1]).toEqual(expect.objectContaining({ method: "PUT" }));
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body));
+    expect(body.scenes).toEqual(["通勤"]);
+    expect(screen.queryByText("个性化偏好")).not.toBeInTheDocument();
   });
 
   test("home product image CTA opens purchase analysis with upload immediately available", async () => {
