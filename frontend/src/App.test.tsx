@@ -617,6 +617,63 @@ describe("AiWardrobe app", () => {
     expect(body.season).toBeUndefined();
   });
 
+  test("outfit page generates around a selected garment and requires dislike reason", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [garment, secondGarment] });
+    mockFetchOnce({
+      date: "2026-05-27",
+      lat_key: "31.23",
+      lon_key: "121.47",
+      city: "褰撳墠浣嶇疆",
+      condition: "Cloudy",
+      temperature: 23,
+      feels_like: 23,
+      precipitation: 0,
+      wind_speed: 8,
+      cached: false
+    });
+    mockFetchOnce({
+      id: "outfit-targeted",
+      name: "",
+      occasion: "work",
+      season: "spring",
+      temperature: 23,
+      items: [
+        { garment_id: "garment-2", category: "bottom", image_url: "/static/uploads/pants.jpg", reason: "围绕指定单品" },
+        { garment_id: "garment-1", category: "top", image_url: "/static/uploads/shirt.jpg", reason: "补齐上衣" }
+      ],
+      explanation: "围绕这件衣服生成通勤搭配",
+      source: "ai",
+      is_favorite: false,
+      is_fixed: false,
+      weather_snapshot: { temperature: 23 },
+      created_at: "2026-05-27T00:00:00Z"
+    });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "搭配" }));
+    expect(await screen.findByRole("button", { name: "生成搭配" })).toBeEnabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "想把某件衣服搭出来" }));
+    await user.selectOptions(screen.getByLabelText("指定单品"), "garment-2");
+    await user.click(screen.getByRole("button", { name: "生成搭配" }));
+
+    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/outfits/generate"));
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[2][1]?.body));
+    expect(body.garment_id).toBe("garment-2");
+    expect(await screen.findByText("围绕这件衣服生成通勤搭配")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "不喜欢" }));
+    expect(screen.getByText("请选择不喜欢原因")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("不喜欢原因"), "颜色不合适");
+    await user.click(screen.getByRole("button", { name: "不喜欢" }));
+    expect(screen.getByText("已记录反馈")).toBeInTheDocument();
+  });
+
   test("falls back to default city weather when geolocation is unavailable", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");

@@ -75,6 +75,37 @@ def test_generated_outfit_uses_database_image_urls_even_when_ai_hallucinates(mon
     assert item["image_url"].startswith("/static/uploads/garments/")
 
 
+def test_generated_outfit_includes_target_garment_even_when_ai_omits_it(monkeypatch, client: TestClient) -> None:
+    token = login(client)
+    _create_garment(client, token, "shirt.jpg", "top")
+    target_id = _create_garment(client, token, "trousers.jpg", "bottom")
+    shoes_id = _create_garment(client, token, "loafers.jpg", "shoes")
+
+    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None):
+        return [
+            {
+                "garment_id": shoes_id,
+                "category": "shoes",
+                "reason": "AI omitted the requested garment",
+            }
+        ], "AI outfit"
+
+    import app.routers.outfits as outfits_module
+
+    monkeypatch.setattr(outfits_module.AiService, "generate_outfit", fake_generate_outfit)
+
+    generated = client.post(
+        "/outfits/generate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"occasion": "work", "season": "spring", "temperature": 22, "garment_id": target_id},
+    )
+
+    assert generated.status_code == 201
+    item_ids = [item["garment_id"] for item in generated.json()["items"]]
+    assert target_id in item_ids
+    assert item_ids[0] == target_id
+
+
 def test_generating_outfit_derives_season_when_client_omits_it(monkeypatch, client: TestClient) -> None:
     token = login(client)
     _create_garment(client, token, "shirt.jpg", "top")
