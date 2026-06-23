@@ -9,6 +9,7 @@ from app.ai import AiService
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import Garment, PurchaseCandidate, User
+from app.preferences import preference_context
 from app.product_extraction import ProductExtractionError, extract_product_image
 from app.purchase_analysis import analyze_purchase, explain_purchase
 from app.schemas import GarmentResponse, PurchaseAnalyzeRequest, PurchaseCandidateResponse
@@ -126,7 +127,7 @@ async def _create_candidate_from_image(
             select(Garment).where(Garment.user_id == current_user.id, Garment.status == "ready")
         ).scalars()
     )
-    decision = analyze_purchase(analysis, ready_garments)
+    decision = analyze_purchase(analysis, ready_garments, preference_context(db, current_user.id))
     reason_summary = await explain_purchase(settings, decision, analysis)
     candidate = PurchaseCandidate(
         user_id=current_user.id,

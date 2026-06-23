@@ -40,6 +40,27 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    preference: Mapped["UserPreference | None"] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class UserPreference(Base):
+    __tablename__ = "user_preferences"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), unique=True, index=True, nullable=False)
+    primary_goal: Mapped[str] = mapped_column(String(120), default="")
+    scenes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    styles: Mapped[list[str]] = mapped_column(JSON, default=list)
+    avoid_types: Mapped[list[str]] = mapped_column(JSON, default=list)
+    budget_range: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    user: Mapped[User] = relationship(back_populates="preference")
 
 
 class EmailCode(Base):

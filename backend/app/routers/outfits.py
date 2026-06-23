@@ -6,6 +6,7 @@ from app.ai import AiService
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import Garment, Outfit, User
+from app.preferences import preference_context
 from app.schemas import (
     FavoriteUpdate,
     FixedUpdate,
@@ -40,13 +41,17 @@ async def generate_outfit(
     target_garment = _target_garment(body.garment_id, garments)
 
     season = body.season or current_season(settings)
-    items, explanation = await AiService(settings).generate_outfit(
-        garments=garments,
-        occasion=body.occasion,
-        season=season,
-        temperature=body.temperature,
-        weather=body.weather,
-    )
+    outfit_request = {
+        "garments": garments,
+        "occasion": body.occasion,
+        "season": season,
+        "temperature": body.temperature,
+        "weather": body.weather,
+    }
+    preferences = preference_context(db, current_user.id)
+    if preferences:
+        outfit_request["preferences"] = preferences
+    items, explanation = await AiService(settings).generate_outfit(**outfit_request)
     items = _trusted_outfit_items(items, garments)
     items = _ensure_target_item(items, target_garment)
     outfit = Outfit(

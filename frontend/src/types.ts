@@ -12,6 +12,14 @@ export type User = {
   updated_at: string;
 };
 
+export type UserPreference = {
+  primary_goal: string;
+  scenes: string[];
+  styles: string[];
+  avoid_types: string[];
+  budget_range: string;
+};
+
 export type Garment = {
   id: string;
   source_upload_id: string | null;

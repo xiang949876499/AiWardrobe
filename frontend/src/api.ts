@@ -8,6 +8,7 @@ import type {
   ShoppingRecommendationTarget,
   ShoppingRecommendationItem,
   UploadSession,
+  UserPreference,
   WardrobeReport,
   Weather
 } from "./types";
@@ -75,6 +76,14 @@ export function loginWithPassword(email: string, password: string) {
     method: "POST",
     body: JSON.stringify({ email, password })
   });
+}
+
+export function fetchUserPreference(token: string) {
+  return request<UserPreference>("/preferences/me", {}, token);
+}
+
+export function updateUserPreference(token: string, body: UserPreference) {
+  return request<UserPreference>("/preferences/me", { method: "PUT", body: JSON.stringify(body) }, token);
 }
 
 export function fetchGarments(token: string, filters: { category?: string; tag?: string; color?: string; season?: string } = {}) {

@@ -60,7 +60,11 @@ def score_similarity(candidate: AiAnalysis, garment: Garment) -> SimilarityResul
     )
 
 
-def analyze_purchase(candidate: AiAnalysis, garments: list[Garment]) -> PurchaseDecision:
+def analyze_purchase(
+    candidate: AiAnalysis,
+    garments: list[Garment],
+    preferences: dict[str, object] | None = None,
+) -> PurchaseDecision:
     ready = [garment for garment in garments if garment.status == "ready"]
     similar_items = sorted(
         (score_similarity(candidate, garment) for garment in ready),
@@ -80,6 +84,8 @@ def analyze_purchase(candidate: AiAnalysis, garments: list[Garment]) -> Purchase
         recommendation = "consider"
 
     decision_factors = _decision_factors(candidate, duplicate_score, gap_score, pairing_score)
+    if preferences:
+        decision_factors.append(f"user_preferences:{json.dumps(preferences, ensure_ascii=False)}")
     reason_summary = _reason_summary(recommendation, duplicate_score, gap_score, pairing_score)
     return PurchaseDecision(
         similar_items=similar_items,

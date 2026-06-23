@@ -41,6 +41,7 @@ import {
   setOutfitFixed,
   storeToken,
   updateGarment,
+  updateUserPreference,
   uploadGarmentPhoto,
   uploadPlainGarment
 } from "./api";
@@ -54,6 +55,7 @@ import type {
   ShoppingRecommendationRun,
   ShoppingRecommendationTarget,
   UploadSession,
+  UserPreference,
   WardrobeReport,
   Weather
 } from "./types";
@@ -123,6 +125,11 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [purchaseEntryMode, setPurchaseEntryMode] = useState<PurchaseEntryMode>("url");
+  const [preferenceDismissed, setPreferenceDismissed] = useState(false);
+  const [preferenceCompleted, setPreferenceCompleted] = useState(false);
+  const [purchaseAnalysisDone, setPurchaseAnalysisDone] = useState(false);
+  const readyGarmentCount = garments.filter((garment) => garment.status === "ready").length;
+  const showPreferencePrompt = !preferenceDismissed && !preferenceCompleted && (purchaseAnalysisDone || readyGarmentCount >= 3);
 
   useEffect(() => {
     if (token) void refreshGarments(token);
@@ -222,6 +229,9 @@ function App() {
     setGarments([]);
     setOutfits([]);
     setCurrentOutfit(null);
+    setPreferenceDismissed(false);
+    setPreferenceCompleted(false);
+    setPurchaseAnalysisDone(false);
     setActiveView("home");
   }
 
@@ -253,9 +263,17 @@ function App() {
         <a className="skipLink" href="#main">跳到主要内容</a>
         {error && <div className="alert" role="alert">{error}</div>}
         {loading && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在同步云端衣橱</div>}
+        {showPreferencePrompt && (
+          <PreferencePrompt
+            token={token}
+            onAuthExpired={handleLogout}
+            onSaved={() => setPreferenceCompleted(true)}
+            onSkip={() => setPreferenceDismissed(true)}
+          />
+        )}
         {activeView === "home" && (
           <HomeView
-            readyCount={garments.filter((garment) => garment.status === "ready").length}
+            readyCount={readyGarmentCount}
             onPurchaseImage={() => openPurchase("image")}
             onPurchaseUrl={() => openPurchase("url")}
             onReport={() => setActiveView("report")}
@@ -292,6 +310,7 @@ function App() {
             token={token}
             entryMode={purchaseEntryMode}
             onAuthExpired={handleLogout}
+            onAnalyzed={() => setPurchaseAnalysisDone(true)}
             onSaved={(garment) => {
               setGarments((items) => mergeGarments([garment], items));
               setActiveView("wardrobe");
@@ -467,6 +486,80 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
       </div>
     </main>
   );
+}
+
+function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip }: {
+  token: string;
+  onAuthExpired: () => void;
+  onSaved: () => void;
+  onSkip: () => void;
+}) {
+  const [form, setForm] = useState<UserPreference>({
+    primary_goal: "",
+    scenes: [],
+    styles: [],
+    avoid_types: [],
+    budget_range: ""
+  });
+  const [scenesText, setScenesText] = useState("");
+  const [stylesText, setStylesText] = useState("");
+  const [avoidText, setAvoidText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await updateUserPreference(token, {
+        primary_goal: form.primary_goal,
+        scenes: splitPreferenceList(scenesText),
+        styles: splitPreferenceList(stylesText),
+        avoid_types: splitPreferenceList(avoidText),
+        budget_range: form.budget_range
+      });
+      onSaved();
+    } catch (err) {
+      if (isAuthError(err)) {
+        onAuthExpired();
+        return;
+      }
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="controlPanel" aria-label="个性化偏好">
+      <div className="resultHeader">
+        <strong>个性化偏好</strong>
+        <button type="button" className="ghostButton compact" onClick={onSkip}>跳过</button>
+      </div>
+      <form className="formStack" onSubmit={handleSubmit}>
+        <label htmlFor="preference-goal">主要目标</label>
+        <input id="preference-goal" value={form.primary_goal} onChange={(event) => setForm({ ...form, primary_goal: event.target.value })} />
+        <label htmlFor="preference-scenes">常用场景</label>
+        <input id="preference-scenes" value={scenesText} onChange={(event) => setScenesText(event.target.value)} />
+        <label htmlFor="preference-styles">喜欢风格</label>
+        <input id="preference-styles" value={stylesText} onChange={(event) => setStylesText(event.target.value)} />
+        <label htmlFor="preference-avoid">避雷类型</label>
+        <input id="preference-avoid" value={avoidText} onChange={(event) => setAvoidText(event.target.value)} />
+        <label htmlFor="preference-budget">预算区间</label>
+        <input id="preference-budget" value={form.budget_range} onChange={(event) => setForm({ ...form, budget_range: event.target.value })} />
+        {error && <div className="alert" role="alert">{error}</div>}
+        <button type="submit" className="primaryButton compact" disabled={busy}>保存偏好</button>
+      </form>
+    </section>
+  );
+}
+
+function splitPreferenceList(value: string): string[] {
+  return value
+    .split(/[，,、\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutfit }: {
@@ -822,10 +915,11 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
   );
 }
 
-function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
+function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onSaved }: {
   token: string;
   entryMode: PurchaseEntryMode;
   onAuthExpired: () => void;
+  onAnalyzed: () => void;
   onSaved: (garment: Garment) => void;
 }) {
   const [url, setUrl] = useState("");
@@ -852,6 +946,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
     try {
       const result = await analyzePurchaseUrl(token, url.trim());
       setCandidate(result);
+      onAnalyzed();
     } catch (err) {
       if (isAuthError(err)) {
         onAuthExpired();
@@ -878,6 +973,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onSaved }: {
       const compressedFile = await compressImageFile(file);
       const result = await analyzePurchaseImage(token, compressedFile, url.trim());
       setCandidate(result);
+      onAnalyzed();
       setImageUploadVisible(entryMode === "image");
     } catch (err) {
       if (isAuthError(err)) {

@@ -35,6 +35,18 @@ class UserResponse(BaseModel):
     updated_at: datetime
 
 
+class UserPreferenceUpdate(BaseModel):
+    primary_goal: str = ""
+    scenes: list[str] = Field(default_factory=list)
+    styles: list[str] = Field(default_factory=list)
+    avoid_types: list[str] = Field(default_factory=list)
+    budget_range: str = ""
+
+
+class UserPreferenceResponse(UserPreferenceUpdate):
+    model_config = ConfigDict(from_attributes=True)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
