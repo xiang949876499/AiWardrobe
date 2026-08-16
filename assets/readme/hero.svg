@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">AiWardrobe — buy-before-you-buy wardrobe assistant</title>
+  <desc id="desc">A rose editorial board contrasting a candidate item with a confirmed wardrobe item and the decision flow between them.</desc>
+  <rect width="1200" height="360" rx="28" fill="#fff3f4"/>
+  <path d="M54 75H1146" stroke="#edcdd5" stroke-width="2"/>
+  <text x="58" y="64" fill="#a6466c" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="3">BUY BEFORE YOU BUY / PERSONAL WARDROBE INTELLIGENCE</text>
+  <text x="58" y="136" fill="#401f37" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="60" font-weight="700">AiWardrobe</text>
+  <text x="61" y="179" fill="#75415e" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="26">先解释值不值得买，再让衣橱变得更懂你</text>
+  <text x="61" y="211" fill="#9b7185" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="21">Evaluate a candidate before it joins your wardrobe.</text>
+  <text x="61" y="258" fill="#a6466c" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">MULTIMODAL · STYLE PROFILE · EXPLAINABLE DECISIONS</text>
+  <g transform="translate(650 52)" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+    <rect x="0" y="10" width="135" height="232" rx="21" fill="#fffafb" stroke="#d982a2" stroke-width="3"/>
+    <text x="17" y="43" fill="#a6466c" font-size="16" font-weight="700" letter-spacing="1">CANDIDATE</text>
+    <path d="M35 90l32-29 32 29 17 92H19z" fill="#e5a5bc"/><path d="M67 61v37M42 89h50" stroke="#fff3f4" stroke-width="5" stroke-linecap="round"/>
+    <rect x="16" y="204" width="103" height="22" rx="11" fill="#f5d7e0"/><text x="27" y="219" fill="#75415e" font-size="12">not saved</text>
+    <path d="M149 125H177M311 125H337" stroke="#a6466c" stroke-width="4"/><polygon points="177,125 165,117 165,133" fill="#a6466c"/><polygon points="337,125 325,117 325,133" fill="#a6466c"/>
+    <rect x="177" y="63" width="134" height="124" rx="19" fill="#6e3565"/>
+    <text x="202" y="96" fill="#fff3f4" font-size="16" font-weight="700">DECIDE</text><text x="194" y="121" fill="#f0cad9" font-size="13">risk + fit</text><text x="194" y="144" fill="#f0cad9" font-size="13">outfit potential</text><text x="194" y="167" fill="#f0cad9" font-size="13">next action</text>
+    <rect x="337" y="10" width="142" height="232" rx="21" fill="#fbecf0" stroke="#71406c" stroke-width="3"/>
+    <text x="356" y="43" fill="#71406c" font-size="16" font-weight="700" letter-spacing="1">WARDROBE</text>
+    <path d="M373 90l32-29 32 29 17 92H357z" fill="#b79ac6"/><path d="M405 61v37M380 89h50" stroke="#fbecf0" stroke-width="5" stroke-linecap="round"/>
+    <rect x="355" y="204" width="108" height="22" rx="11" fill="#d9c9df"/><text x="364" y="219" fill="#55314f" font-size="12">confirmed</text>
+    <text x="183" y="271" fill="#a6466c" font-size="14">analyse → explain → save</text>
+  </g>
+</svg>
