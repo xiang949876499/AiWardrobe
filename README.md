@@ -1,131 +1,146 @@
 # AiWardrobe
 
-AiWardrobe is an AI buy-before-you-buy wardrobe assistant with a FastAPI backend and a React + Vite mobile-first web frontend. The default product loop is: analyze a candidate item, explain whether it is worth buying, then use the wardrobe to improve future recommendations.
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="AiWardrobe 购买前 AI 衣橱决策助手：候选商品经过分析与确认后才进入正式衣橱">
+</p>
 
-## What Is Included
+<p align="center">
+  <strong>购买前 AI 衣橱决策助手</strong><br>
+  Understand whether an item is worth buying before it becomes part of your wardrobe.
+</p>
 
-- Email/password registration and login with JWT sessions.
-- Single and batch garment upload endpoints, with client-side image compression.
-- AI garment analysis through an OpenAI-compatible multimodal API, with demo fallback for local development.
-- AI outfit recommendation through DeepSeek by default when `AI_DEMO_MODE=false` and `DEEPSEEK_API_KEY` is set.
-- Manual garment correction for category, colors, style, material, season, fit, and tags.
-- Outfit generation by occasion, season, temperature, and optional target garment.
-- Current weather lookup through Open-Meteo with same-day location cache.
-- Outfit history and favorite toggling.
-- Purchase analysis from a product URL or product image, including structured scores, duplicate risk, idle risk, outfit potential, wardrobe similarity, price guidance, next actions, and saving a candidate into the wardrobe.
-- Wardrobe report with category, color, style, scene coverage, duplicate risks, low-use items, wardrobe gaps, and avoid-category guidance.
-- Wardrobe gaps that explain what is missing or overrepresented before showing Taobao/Tmall demo or configured product candidates.
-- Lightweight user preferences for primary goal, scenes, styles, avoid types, and budget range.
-- React UI following the agreed `ui-ux-pro-max` direction: flat, mobile-first, rose/pink brand accents, Lucide icons, labeled forms, and accessible focus states.
+## 这是什么 / What it is
 
-## Core APIs
+AiWardrobe 不是只在买完后管理衣服，而是在购买前帮助用户判断一件商品是否适合自己。它将候选商品与现有衣橱、个人偏好、场景和天气关联，解释重复风险、闲置风险、搭配潜力和下一步建议。
 
-- `POST /purchase/analyze` with `{ "url": "https://example.com/product/123" }` creates a `PurchaseCandidate` after extracting a likely product image and comparing it with ready wardrobe garments.
-- `POST /purchase/analyze-image` accepts multipart `file` plus optional `product_url` when URL image extraction fails.
-- `POST /purchase/candidates/{id}/save` converts a ready candidate into a normal ready `Garment` and marks the candidate as saved.
-- `GET /reports/wardrobe` returns wardrobe totals, distributions, scene coverage, duplicate risks, low-use items, gaps, avoid categories, and suggested categories.
-- `GET /preferences/me` returns the current user's lightweight style preferences.
-- `PUT /preferences/me` updates `primary_goal`, `scenes`, `styles`, `avoid_types`, and `budget_range`.
-- `POST /outfits/generate` can include `garment_id` or `purchase_candidate_id` to force a target item into the generated outfit.
+AiWardrobe keeps a candidate separate from a confirmed garment. The wardrobe only changes after the user explicitly saves the item.
 
-`PurchaseCandidate` rows are separate from `Garment` rows until the user explicitly saves them.
+## 核心体验 / Core experience
 
-## Wardrobe Gaps API
+- 邮箱登录、JWT 会话与轻量级风格偏好。
+- 单件或批量衣物上传，支持客户端压缩、AI 识别和人工修正。
+- 按场景、季节、温度和目标单品生成穿搭，支持历史与收藏。
+- 通过商品 URL 或图片创建购买候选，展示重复风险、闲置风险、搭配潜力、衣橱相似度、价格建议和下一步动作。
+- 将确认后的 PurchaseCandidate 保存为正式 Garment。
+- 输出衣橱分布、场景覆盖、重复风险、低利用单品、缺口和避购建议。
+- 使用 Open-Meteo 天气服务，以及 Demo 或已配置的 Taobao/Tmall 商品候选。
 
-- `POST /shopping/recommendations` with `{ "target": "auto_gap", "refresh": false }` creates or reuses a recommendation run and returns Taobao/Tmall candidates.
-- Supported targets: `auto_gap`, `work`, `date`, `sport`, `summer`, and `basics`.
-- `POST /shopping/recommendations/items/{id}/analyze` deep-analyzes a pending recommendation item and links it to a `PurchaseCandidate`.
-- Saving still uses `POST /purchase/candidates/{id}/save`.
+## 工作流 / How it works
 
-Recommendation responses include `wardrobe_gaps`, `avoid_categories`, and `recommendation_groups` before item cards. Refreshes are limited per user, Taobao searches are limited globally, and item analysis is limited per user.
+1. 录入已有衣物，AI 生成结构化标签，用户可修正。
+2. 粘贴商品链接或上传候选图片。
+3. 系统将候选与已就绪衣物、偏好和场景进行比较。
+4. 用户阅读结构化解释并决定购买、跳过或保存候选。
+5. 只有用户确认保存后，候选才进入正式衣橱并影响未来建议。
 
-## Local Development
+The product optimizes for informed decisions, not for forcing every candidate into a purchase recommendation.
 
-One-click start on Windows:
+## 快速开始 / Quick start
 
-```powershell
+Windows 下可使用一键启动：
+
+~~~powershell
 .\start.bat
-```
+~~~
 
-By default this starts the FastAPI backend and Vite frontend locally, then opens
-the frontend. Other useful modes: `.\start.bat backend`, `.\start.bat frontend`,
-and `.\start.bat docker` if you explicitly want the full Docker Compose stack.
-The local backend uses `backend\aiwardrobe-local.db` (SQLite) and local upload
-storage, so Docker/Postgres/MinIO are not required for basic development.
+默认本地模式会启动 FastAPI 后端和 Vite 前端，使用 SQLite 与本地上传存储：
 
-Backend:
+- 前端 / Frontend: http://localhost:5174
+- 后端 API / Backend API: http://127.0.0.1:8031/docs
 
-```powershell
+也可以分别启动：
+
+~~~powershell
+.\start.bat backend
+.\start.bat frontend
+~~~
+
+手动启动后端：
+
+~~~powershell
 cd backend
 uv venv .venv --python python
 uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
 .venv\Scripts\python.exe -m uvicorn app.main:app --reload
-```
+~~~
 
-Frontend:
+手动启动前端：
 
-```powershell
+~~~powershell
 cd frontend
 npm install
 npm run dev
-```
+~~~
 
-Open [http://localhost:5174](http://localhost:5174). The local frontend proxies API calls to [http://127.0.0.1:8031](http://127.0.0.1:8031).
+## 常用 API / Useful API
 
-## Docker Compose
+- POST /purchase/analyze：根据商品 URL 创建购买候选。
+- POST /purchase/analyze-image：在 URL 图片提取失败时上传候选图片。
+- POST /purchase/candidates/{id}/save：用户确认后将候选转换为正式衣物。
+- POST /outfits/generate：按场景、季节、天气与目标单品生成搭配。
+- GET /reports/wardrobe：获取衣橱分布、缺口和风险报告。
+- GET 或 PUT /preferences/me：读取或修改风格偏好。
 
-```powershell
-docker compose up --build
-```
+## 模型、商品与天气配置 / Providers
 
-Services:
+Docker Compose 默认使用 AI_DEMO_MODE=true，方便本地验证。要启用真实穿搭模型，请在 .env 中关闭 Demo 并提供你的服务配置：
 
-- Frontend: [http://localhost:5173](http://localhost:5173)
-- Backend: [http://localhost:8000](http://localhost:8000)
-- MinIO console: [http://localhost:9101](http://localhost:9101)
-- Postgres: `localhost:5432`
-
-By default Docker Compose runs with `AI_DEMO_MODE=true`. To use DeepSeek for outfit recommendation, copy `.env.example` to `.env`, set `AI_DEMO_MODE=false`, and provide:
-
-```powershell
+~~~env
+AI_DEMO_MODE=false
 OUTFIT_AI_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your-deepseek-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
-```
+~~~
 
-Garment image analysis can still use another OpenAI-compatible multimodal provider via `AI_BASE_URL`, `AI_API_KEY`, and `AI_MODEL`.
+衣物识别可使用 OpenAI-compatible 多模态服务：
 
-Shopping recommendations run in demo mode by default. To use configured Taobao/Tmall product search, set:
+~~~env
+AI_BASE_URL=https://your-compatible-provider/v1
+AI_API_KEY=your-provider-key
+AI_MODEL=your-vision-model
+~~~
 
-```powershell
+商品推荐默认可在 Demo 模式运行。若接入 Taobao/Tmall，请配置应用凭证；Open-Meteo 默认不需要密钥：
+
+~~~env
 SHOPPING_RECOMMENDATION_DEMO_MODE=false
 TAOBAO_APP_KEY=your-taobao-app-key
 TAOBAO_APP_SECRET=your-taobao-app-secret
-TAOBAO_ADZONE_ID=your-taobao-adzone-id
+TAOBAO_ADZONE_ID=your-adzone-id
 TAOBAO_API_BASE_URL=https://eco.taobao.com/router/rest
-```
-
-Weather uses Open-Meteo by default and does not require an API key:
-
-```powershell
 WEATHER_PROVIDER=open_meteo
 OPEN_METEO_BASE_URL=https://api.open-meteo.com
-```
+~~~
 
-## Verification
+不要提交 .env 或真实第三方凭证。
 
-Backend:
+## Docker / Full stack
 
-```powershell
+~~~powershell
+docker compose up --build
+~~~
+
+默认服务：
+
+- 前端 / Frontend: http://localhost:5173
+- 后端 / Backend: http://localhost:8000
+- MinIO Console: http://localhost:9101
+- PostgreSQL: localhost:5432
+
+## 验证 / Verify
+
+后端：
+
+~~~powershell
 cd backend
 python -m pytest
-```
+~~~
 
-Frontend:
+前端：
 
-```powershell
+~~~powershell
 cd frontend
 npm test
 npm run build
-```
+~~~
