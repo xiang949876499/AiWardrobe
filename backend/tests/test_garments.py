@@ -1,6 +1,7 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import login
+from tests.conftest import jpeg_bytes, login
 
 
 def test_upload_analyzes_garment_and_lists_it(client: TestClient) -> None:
@@ -9,15 +10,19 @@ def test_upload_analyzes_garment_and_lists_it(client: TestClient) -> None:
     uploaded = client.post(
         "/garments/upload",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("white-shirt.jpg", b"fake image bytes", "image/jpeg")},
+        files={"file": ("white-shirt.jpg", jpeg_bytes(), "image/jpeg")},
     )
 
     assert uploaded.status_code == 201
     garment = uploaded.json()
     assert garment["category"] in ["top", "bottom", "outerwear", "shoes", "accessory"]
     assert garment["status"] == "ready"
+    assert garment["review_status"] == "pending_review"
+    assert garment["analysis_source"] == "demo"
+    assert garment["provider"] is None
     assert garment["ai_confidence"] > 0
-    assert garment["image_url"].startswith("/static/uploads/")
+    assert garment["image_url"].startswith("/v2/assets/")
+    assert garment["image_key"] == ""
     assert "ai_result" in garment
 
     listed = client.get("/garments", headers={"Authorization": f"Bearer {token}"})
@@ -31,7 +36,7 @@ def test_user_correction_overrides_ai_attributes(client: TestClient) -> None:
     uploaded = client.post(
         "/garments/upload",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("jacket.jpg", b"fake image bytes", "image/jpeg")},
+        files={"file": ("jacket.jpg", jpeg_bytes(), "image/jpeg")},
     ).json()
 
     patched = client.patch(
@@ -54,6 +59,8 @@ def test_user_correction_overrides_ai_attributes(client: TestClient) -> None:
     assert body["colors"] == ["black"]
     assert body["tags"] == ["上班", "正式"]
     assert body["ai_result"]["category"] != ""
+    assert body["review_status"] == "confirmed"
+    assert body["user_confirmed_at"] is not None
 
 
 def test_filters_garments_by_category_and_tag(client: TestClient) -> None:
@@ -61,7 +68,7 @@ def test_filters_garments_by_category_and_tag(client: TestClient) -> None:
     first = client.post(
         "/garments/upload",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("sneakers.jpg", b"fake image bytes", "image/jpeg")},
+        files={"file": ("sneakers.jpg", jpeg_bytes(), "image/jpeg")},
     ).json()
     client.patch(
         f"/garments/{first['id']}",
@@ -77,3 +84,6 @@ def test_filters_garments_by_category_and_tag(client: TestClient) -> None:
     assert listed.status_code == 200
     assert len(listed.json()["items"]) == 1
     assert listed.json()["items"][0]["category"] == "shoes"
+
+
+pytestmark = pytest.mark.usefixtures("legacy_worker")

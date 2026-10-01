@@ -20,55 +20,71 @@ import {
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  ApiError,
   analyzeShoppingRecommendationItem,
-  analyzePurchaseImage,
-  analyzePurchaseUrl,
-  batchUploadGarments,
+  confirmV2Garment,
+  cancelAnalysisTask,
   clearToken,
+  createGarmentUploadTask,
+  createIdempotencyKey,
+  createV2Feedback,
+  createV2WearEvent,
+  fingerprintFile,
+  clearIdempotencyKey,
   createShoppingRecommendations,
   createManualOutfit,
   deleteGarment,
   deleteOutfit,
-  fetchGarments,
-  fetchOutfits,
+  fetchAnalysisTasks,
   fetchTodayWeather,
   fetchUserPreference,
   fetchWardrobeReport,
+  fetchV2WearEvents,
+  fetchV2Garments,
+  fetchV2Outfits,
   generateOutfit,
   getStoredToken,
+  getV2Garment,
   loginWithPassword,
   registerWithPassword,
+  retryAnalysisTask,
   savePurchaseCandidate,
+  saveV2Candidate,
   setOutfitFavorite,
   setOutfitFixed,
+  revokeV2WearEvent,
   storeToken,
   updateGarment,
   updateUserPreference,
-  uploadGarmentPhoto,
-  uploadPlainGarment
+  stableIdempotencyKey,
+  waitForAnalysisTask
 } from "./api";
 import type {
   Category,
+  AnalysisTask as AnalysisTaskType,
   Garment,
   Occasion,
   Outfit,
-  PurchaseCandidate,
+  CandidateV2,
   ShoppingRecommendationItem,
   ShoppingRecommendationRun,
   ShoppingRecommendationTarget,
-  UploadSession,
   UserPreference,
   WardrobeReport,
-  Weather
+  Weather,
+  WearEvent
 } from "./types";
 import { GarmentCardSkeleton } from "./Skeleton";
 import { compressImageFile } from "./imageCompression";
+import { PurchaseHistoryView } from "./PurchaseHistoryView";
+import { ResumablePurchasePanel, type PurchaseTaskControls } from "./ResumablePurchasePanel";
 
 const categories: Array<{ value: "all" | Category; label: string }> = [
   { value: "all", label: "全部" },
   { value: "top", label: "上衣" },
   { value: "bottom", label: "下装" },
   { value: "outerwear", label: "外套" },
+  { value: "dress", label: "连衣裙" },
   { value: "shoes", label: "鞋子" },
   { value: "bag", label: "包" },
   { value: "accessory", label: "饰品" }
@@ -81,6 +97,8 @@ const occasions: Array<{ value: Occasion; label: string }> = [
   { value: "formal", label: "正式场合" },
   { value: "casual", label: "休闲" }
 ];
+const preferenceCategories = categories.filter((item) => item.value !== "all") as Array<{ value: Category; label: string }>;
+const GUEST_PURCHASE_DRAFT_KEY = "aiwardrobe_guest_purchase_draft";
 
 const navItems = [
   { id: "home", label: "首页", icon: Home },
@@ -90,18 +108,26 @@ const navItems = [
   { id: "history", label: "历史", icon: Archive }
 ] as const;
 
-type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping" | "detail";
+type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping" | "detail" | "purchaseHistory";
 type PurchaseEntryMode = "url" | "image";
 
 type UploadItem = {
   id: string;
-  requestId: number;
+  taskId?: string;
   name: string;
-  status: "上传中" | "入库中" | "单品拆分中" | "标签识别中" | "已入库" | "失败";
-  session?: UploadSession;
+  mode: "single" | "split";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  task?: AnalysisTaskType;
   garments?: Garment[];
   message?: string;
 };
+
+type BatchDeleteResult = {
+  deletedIds: string[];
+  failed: Array<{ id: string; message: string }>;
+};
+
+type WardrobeFilters = { category?: Category; q?: string };
 
 function BlurImage({ src, alt, className = "" }: { src: string; alt: string; className?: string }) {
   const [loaded, setLoaded] = useState(false);
@@ -121,56 +147,162 @@ function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
   const [activeView, setActiveView] = useState<View>("home");
   const [garments, setGarments] = useState<Garment[]>([]);
+  const garmentCursor = useRef<string | null>(null);
+  const garmentFilters = useRef<WardrobeFilters>({});
+  const garmentController = useRef<AbortController | null>(null);
+  const [garmentHasMore, setGarmentHasMore] = useState(false);
   const [selectedGarment, setSelectedGarment] = useState<Garment | null>(null);
   const [outfits, setOutfits] = useState<Outfit[]>([]);
+  const outfitCursor = useRef<string | null>(null);
+  const outfitFavorite = useRef<boolean | undefined>(undefined);
+  const outfitController = useRef<AbortController | null>(null);
+  const [outfitHasMore, setOutfitHasMore] = useState(false);
+  const [wearEvents, setWearEvents] = useState<Record<string, WearEvent>>({});
+  const wearCursor = useRef<string | null>(null);
+  const wearController = useRef<AbortController | null>(null);
+  const [wearEventsHasMore, setWearEventsHasMore] = useState(false);
   const [currentOutfit, setCurrentOutfit] = useState<Outfit | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [resumeGuestPurchase, setResumeGuestPurchase] = useState("");
   const [purchaseEntryMode, setPurchaseEntryMode] = useState<PurchaseEntryMode>("url");
   const [preferenceDismissed, setPreferenceDismissed] = useState(false);
   const [preferenceCompleted, setPreferenceCompleted] = useState(false);
   const [preferenceSettingsOpen, setPreferenceSettingsOpen] = useState(false);
   const [purchaseAnalysisDone, setPurchaseAnalysisDone] = useState(false);
-  const readyGarmentCount = garments.filter((garment) => garment.status === "ready").length;
+  const previousView = useRef<View | null>(null);
+  const readyGarmentCount = garments.filter(isConfirmedGarment).length;
   const showPreferencePrompt = preferenceSettingsOpen || (!preferenceDismissed && !preferenceCompleted && (purchaseAnalysisDone || readyGarmentCount >= 3));
 
   useEffect(() => {
     if (token) void refreshGarments(token);
   }, [token]);
 
+  useEffect(() => {
+    if (previousView.current === null) {
+      previousView.current = activeView;
+      return;
+    }
+    if (previousView.current !== activeView) {
+      previousView.current = activeView;
+      const heading = document.querySelector<HTMLElement>("#main h1");
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus({ preventScroll: true });
+      }
+    }
+  }, [activeView]);
+
+  useEffect(() => {
+    if (!token) return;
+    const draft = sessionStorage.getItem(GUEST_PURCHASE_DRAFT_KEY) || "";
+    if (draft) {
+      setResumeGuestPurchase(draft);
+      setActiveView("purchase");
+      sessionStorage.removeItem(GUEST_PURCHASE_DRAFT_KEY);
+    }
+  }, [token]);
+
   async function refreshGarments(authToken = token) {
     if (!authToken) return;
+    garmentController.current?.abort();
+    const controller = new AbortController();
+    garmentController.current = controller;
+    garmentFilters.current = {};
     setLoading(true);
     setError("");
     try {
-      const response = await fetchGarments(authToken);
+      const response = await fetchV2Garments(authToken, { limit: 50, signal: controller.signal });
+      if (controller.signal.aborted) return;
       setGarments(response.items);
+      garmentCursor.current = response.next_cursor;
+      setGarmentHasMore(response.has_more);
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (isAuthError(err)) {
         handleLogout();
         return;
       }
       setError(errorMessage(err));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }
 
-  async function loadHistory(favorite?: boolean) {
+  async function loadGarmentPage(filters: WardrobeFilters = garmentFilters.current, append = false) {
     if (!token) return;
+    garmentController.current?.abort();
+    const controller = new AbortController();
+    garmentController.current = controller;
+    if (!append) {
+      filters = { category: filters.category, q: filters.q?.trim() || undefined };
+      garmentFilters.current = filters;
+    }
     setLoading(true);
     setError("");
     try {
-      const response = await fetchOutfits(token, favorite);
-      setOutfits(response.items);
+      const response = await fetchV2Garments(token, {
+        category: filters.category,
+        q: filters.q,
+        cursor: append ? garmentCursor.current || undefined : undefined,
+        limit: 50,
+        signal: controller.signal
+      });
+      if (controller.signal.aborted) return;
+      setGarments((current) => append ? mergeGarments(response.items, current) : response.items);
+      garmentCursor.current = response.next_cursor;
+      setGarmentHasMore(response.has_more);
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (isAuthError(err)) {
         handleLogout();
         return;
       }
       setError(errorMessage(err));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  }
+
+  async function loadHistory(favorite?: boolean, append = false) {
+    if (!token) return;
+    outfitController.current?.abort();
+    const controller = new AbortController();
+    outfitController.current = controller;
+    const selectedFavorite = append ? outfitFavorite.current : favorite;
+    if (!append) outfitFavorite.current = favorite;
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetchV2Outfits(token, {
+        favorite: selectedFavorite,
+        cursor: append ? outfitCursor.current || undefined : undefined,
+        limit: 50,
+        signal: controller.signal
+      });
+      if (controller.signal.aborted) return;
+      setOutfits((current) => append ? mergeOutfits(response.items, current) : response.items);
+      outfitCursor.current = response.next_cursor;
+      setOutfitHasMore(response.has_more);
+      if (!append) {
+        wearController.current?.abort();
+        wearController.current = controller;
+        const wearResponse = await fetchV2WearEvents(token, { limit: 100, signal: controller.signal });
+        if (controller.signal.aborted) return;
+        wearCursor.current = wearResponse.next_cursor;
+        setWearEventsHasMore(wearResponse.has_more);
+        setWearEvents(activeWearEvents(wearResponse.items));
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (isAuthError(err)) {
+        handleLogout();
+        return;
+      }
+      setError(errorMessage(err));
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
     }
   }
 
@@ -194,23 +326,31 @@ function App() {
   }
 
   async function handleBatchDeleteGarments(ids: string[]) {
-    if (!token || ids.length === 0) return false;
+    if (!token || ids.length === 0) return { deletedIds: [], failed: [] };
     setLoading(true);
     setError("");
     try {
-      await Promise.all(ids.map((id) => deleteGarment(token, id)));
-      setGarments((items) => items.filter((item) => !ids.includes(item.id)));
-      if (selectedGarment && ids.includes(selectedGarment.id)) {
+      const outcomes = await Promise.all(ids.map(async (id) => {
+        try {
+          await deleteGarment(token, id);
+          return { id, ok: true as const };
+        } catch (error) {
+          return { id, ok: false as const, error };
+        }
+      }));
+      const deletedIds = outcomes.filter((result) => result.ok).map((result) => result.id);
+      const failed = outcomes.filter((result): result is Extract<typeof result, { ok: false }> => !result.ok)
+        .map((result) => ({ id: result.id, message: errorMessage(result.error) }));
+      if (deletedIds.length > 0) {
+        setGarments((items) => items.filter((item) => !deletedIds.includes(item.id)));
+      }
+      if (selectedGarment && deletedIds.includes(selectedGarment.id)) {
         setSelectedGarment(null);
       }
-      return true;
-    } catch (err) {
-      if (isAuthError(err)) {
+      if (outcomes.some((result) => !result.ok && isAuthError(result.error))) {
         handleLogout();
-        return false;
       }
-      setError(errorMessage(err));
-      return false;
+      return { deletedIds, failed };
     } finally {
       setLoading(false);
     }
@@ -218,7 +358,31 @@ function App() {
 
   function openView(view: View) {
     setActiveView(view);
+    if (view === "wardrobe" && (garmentFilters.current.category || garmentFilters.current.q)) void loadGarmentPage({});
     if (view === "history") void loadHistory();
+  }
+
+  async function loadMoreWearEvents() {
+    if (!token || !wearCursor.current) return;
+    wearController.current?.abort();
+    const controller = new AbortController();
+    wearController.current = controller;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await fetchV2WearEvents(token, { cursor: wearCursor.current, limit: 100, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      wearCursor.current = result.next_cursor;
+      setWearEventsHasMore(result.has_more);
+      const olderEvents = activeWearEvents(result.items);
+      setWearEvents((current) => ({ ...olderEvents, ...current }));
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (isAuthError(err)) handleLogout();
+      else setError(errorMessage(err));
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
   }
 
   function openPurchase(mode: PurchaseEntryMode) {
@@ -227,16 +391,27 @@ function App() {
   }
 
   const handleLogout = useCallback(() => {
+    garmentController.current?.abort();
+    outfitController.current?.abort();
+    wearController.current?.abort();
     clearToken();
     setToken(null);
+    setLoading(false);
     setGarments([]);
+    garmentCursor.current = null;
+    garmentFilters.current = {};
+    setGarmentHasMore(false);
     setOutfits([]);
+    outfitCursor.current = null;
+    setOutfitHasMore(false);
+    setWearEvents({});
     setCurrentOutfit(null);
     setPreferenceDismissed(false);
     setPreferenceCompleted(false);
     setPreferenceSettingsOpen(false);
     setPurchaseAnalysisDone(false);
     setActiveView("home");
+    sessionStorage.removeItem(GUEST_PURCHASE_DRAFT_KEY);
   }, []);
 
   if (!token) {
@@ -245,6 +420,10 @@ function App() {
         onLogin={(nextToken) => {
           storeToken(nextToken);
           setToken(nextToken);
+        }}
+        onGuestDraft={(url) => {
+          if (url.trim()) sessionStorage.setItem(GUEST_PURCHASE_DRAFT_KEY, url.trim());
+          else sessionStorage.removeItem(GUEST_PURCHASE_DRAFT_KEY);
         }}
       />
     );
@@ -266,6 +445,7 @@ function App() {
       <main className="main" id="main">
         <a className="skipLink" href="#main">跳到主要内容</a>
         {error && <div className="alert" role="alert">{error}</div>}
+        {notice && <p className="hint" role="status" aria-live="polite">{notice}</p>}
         {loading && <div className="loadingLine"><Loader2 size={16} aria-hidden="true" /> 正在同步云端衣橱</div>}
         {showPreferencePrompt && (
           <PreferencePrompt
@@ -290,6 +470,9 @@ function App() {
           <WardrobeView
             garments={garments}
             loading={loading}
+            hasMore={garmentHasMore}
+            onLoadMore={() => void loadGarmentPage(garmentFilters.current, true)}
+            onFilterChange={(filters) => void loadGarmentPage(filters)}
             onSelect={(garment) => {
               setSelectedGarment(garment);
               setActiveView("detail");
@@ -315,6 +498,7 @@ function App() {
           <PurchaseAnalysisView
             token={token}
             entryMode={purchaseEntryMode}
+            initialUrl={resumeGuestPurchase}
             onAuthExpired={handleLogout}
             onAnalyzed={() => setPurchaseAnalysisDone(true)}
             onSaved={(garment) => {
@@ -368,6 +552,10 @@ function App() {
         {activeView === "history" && (
           <HistoryView
             outfits={outfits}
+            hasMore={outfitHasMore}
+            onLoadMore={() => void loadHistory(undefined, true)}
+            wearEventsHasMore={wearEventsHasMore}
+            onLoadMoreWearEvents={() => void loadMoreWearEvents()}
             onFavorites={() => void loadHistory(true)}
             onAll={() => void loadHistory()}
             onOpen={(outfit) => {
@@ -375,7 +563,13 @@ function App() {
               setActiveView("outfit");
             }}
             onDelete={(id) => void handleDeleteOutfit(id)}
+            onPurchaseHistory={() => setActiveView("purchaseHistory")}
+            wearEvents={wearEvents}
+            onWear={(outfit) => void handleWearOutfit(token, outfit, wearEvents[outfit.id], setWearEvents, setNotice, setError)}
           />
+        )}
+        {activeView === "purchaseHistory" && (
+          <PurchaseHistoryView token={token} onAuthExpired={handleLogout} onBack={() => setActiveView("history")} />
         )}
       </main>
 
@@ -409,6 +603,7 @@ function NavButton({ item, activeView, onOpen, mobile = false }: {
     <button
       type="button"
       aria-label={mobile ? `移动端${item.label}` : undefined}
+      aria-current={activeView === item.id ? "page" : undefined}
       className={activeView === item.id ? (mobile ? "bottomNavButton active" : "navButton active") : (mobile ? "bottomNavButton" : "navButton")}
       onClick={() => onOpen(item.id)}
     >
@@ -418,12 +613,13 @@ function NavButton({ item, activeView, onOpen, mobile = false }: {
   );
 }
 
-function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
+function LoginScreen({ onLogin, onGuestDraft }: { onLogin: (token: string) => void; onGuestDraft: (url: string) => void }) {
   const [mode, setMode] = useState<"register" | "login">("register");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [guestUrl, setGuestUrl] = useState(() => sessionStorage.getItem(GUEST_PURCHASE_DRAFT_KEY) || "");
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   const passwordValid = password.length >= 8;
 
@@ -489,6 +685,17 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
               {mode === "register" ? "注册账号" : "登录账号"}
             </button>
           </form>
+          <section className="guestPreview" aria-labelledby="guest-preview-title">
+            <h2 id="guest-preview-title">先看一个公开示例</h2>
+            <p><strong>黑色短袖衬衫：建议“考虑”</strong></p>
+            <p>示例理由：相似上衣较多；若缺少夏季通勤内搭，补齐价值更高。示例不读取账号或衣橱数据。</p>
+            <label htmlFor="guest-purchase-url">填写商品链接，登录后继续</label>
+            <input id="guest-purchase-url" type="url" value={guestUrl} placeholder="https://example.com/product/123" onChange={(event) => {
+              setGuestUrl(event.target.value);
+              onGuestDraft(event.target.value);
+            }} />
+            <p className="hint">链接仅保存在当前浏览器会话中；登录后会带入购买分析页。</p>
+          </section>
         </section>
       </div>
     </main>
@@ -507,7 +714,11 @@ function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip, isSettings }:
     scenes: [],
     styles: [],
     avoid_types: [],
-    budget_range: ""
+    budget_range: "",
+    budget_min: null,
+    budget_max: null,
+    currency: "CNY",
+    avoid_categories: []
   });
   const [scenesText, setScenesText] = useState("");
   const [stylesText, setStylesText] = useState("");
@@ -522,7 +733,11 @@ function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip, isSettings }:
         scenes: pref.scenes || [],
         styles: pref.styles || [],
         avoid_types: pref.avoid_types || [],
-        budget_range: pref.budget_range || ""
+        budget_range: pref.budget_range || "",
+        budget_min: pref.budget_min ?? null,
+        budget_max: pref.budget_max ?? null,
+        currency: "CNY",
+        avoid_categories: pref.avoid_categories || []
       });
       setScenesText((pref.scenes || []).join("，"));
       setStylesText((pref.styles || []).join("，"));
@@ -540,7 +755,11 @@ function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip, isSettings }:
         scenes: splitPreferenceList(scenesText),
         styles: splitPreferenceList(stylesText),
         avoid_types: splitPreferenceList(avoidText),
-        budget_range: form.budget_range
+        budget_range: form.budget_range,
+        budget_min: form.budget_min || null,
+        budget_max: form.budget_max || null,
+        currency: "CNY",
+        avoid_categories: form.avoid_categories || []
       });
       onSaved();
     } catch (err) {
@@ -571,6 +790,26 @@ function PreferencePrompt({ token, onAuthExpired, onSaved, onSkip, isSettings }:
         <input id="preference-avoid" value={avoidText} onChange={(event) => setAvoidText(event.target.value)} />
         <label htmlFor="preference-budget">预算区间</label>
         <input id="preference-budget" value={form.budget_range} onChange={(event) => setForm({ ...form, budget_range: event.target.value })} />
+        <div className="formGrid">
+          <label htmlFor="preference-budget-min">最低预算（元）</label>
+          <input id="preference-budget-min" type="number" min="0" step="0.01" value={form.budget_min || ""} onChange={(event) => setForm({ ...form, budget_min: event.target.value || null })} />
+          <label htmlFor="preference-budget-max">最高预算（元）</label>
+          <input id="preference-budget-max" type="number" min="0" step="0.01" value={form.budget_max || ""} onChange={(event) => setForm({ ...form, budget_max: event.target.value || null })} />
+        </div>
+        <fieldset className="checkGroup">
+          <legend>不考虑的类别</legend>
+          {preferenceCategories.map((item) => (
+            <label key={item.value}>
+              <input type="checkbox" checked={(form.avoid_categories || []).includes(item.value)} onChange={(event) => setForm({
+                ...form,
+                avoid_categories: event.target.checked
+                  ? [...(form.avoid_categories || []), item.value]
+                  : (form.avoid_categories || []).filter((value) => value !== item.value)
+              })} />
+              {item.label}
+            </label>
+          ))}
+        </fieldset>
         {error && <div className="alert" role="alert">{error}</div>}
         <button type="submit" className="primaryButton compact" disabled={busy}>保存偏好</button>
       </form>
@@ -650,19 +889,34 @@ function HomeView({ readyCount, onPurchaseImage, onPurchaseUrl, onReport, onOutf
   );
 }
 
-function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: {
+function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading, hasMore, onLoadMore, onFilterChange }: {
   garments: Garment[];
   onSelect: (garment: Garment) => void;
   onUpload: () => void;
-  onBatchDelete: (ids: string[]) => Promise<boolean>;
+  onBatchDelete: (ids: string[]) => Promise<BatchDeleteResult>;
   loading: boolean;
+  hasMore: boolean;
+  onLoadMore: () => void;
+  onFilterChange: (filters: WardrobeFilters) => void;
 }) {
   const [category, setCategory] = useState<"all" | Category>("all");
   const [search, setSearch] = useState("");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const pending = garments.filter((garment) => garment.status === "pending_review");
-  const ready = garments.filter((garment) => garment.status === "ready");
+  const [batchDeleteFailures, setBatchDeleteFailures] = useState<BatchDeleteResult["failed"]>([]);
+  const previousFilters = useRef(`${category}|${search}`);
+  useEffect(() => {
+    const key = `${category}|${search}`;
+    if (previousFilters.current === key) return;
+    previousFilters.current = key;
+    const timeout = window.setTimeout(() => onFilterChange({
+      category: category === "all" ? undefined : category,
+      q: search.trim() || undefined
+    }), 250);
+    return () => window.clearTimeout(timeout);
+  }, [category, search]);
+  const pending = garments.filter((garment) => garment.review_status === "pending_review" || (garment.status === "ready" && !isConfirmedGarment(garment)));
+  const ready = garments.filter(isConfirmedGarment);
   const filtered = useMemo(() => garments.filter((garment) => {
     const categoryMatches = category === "all" || garment.category === category;
     const text = [garment.category, garment.style, garment.material, ...garment.tags, ...garment.colors].join(" ").toLowerCase();
@@ -677,6 +931,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
   function exitSelectionMode() {
     setSelectionMode(false);
     setSelectedIds([]);
+    setBatchDeleteFailures([]);
   }
 
   async function handleBatchDelete() {
@@ -684,8 +939,10 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
     if (!window.confirm(`确定删除选中的 ${selectedIds.length} 件衣服吗？删除后将不会进入搭配推荐。`)) {
       return;
     }
-    const deleted = await onBatchDelete(selectedIds);
-    if (deleted) exitSelectionMode();
+    const result = await onBatchDelete(selectedIds);
+    setSelectedIds((current) => current.filter((id) => !result.deletedIds.includes(id)));
+    setBatchDeleteFailures(result.failed);
+    if (result.failed.length === 0) exitSelectionMode();
   }
 
   return (
@@ -693,7 +950,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
       <div className="pageHeader">
         <div>
           <h1 id="wardrobe-title">我的衣橱</h1>
-          <p>上传后的单品会直接进入衣橱；你可以随时编辑标签来优化搜索和搭配。</p>
+          <p>上传识别后的结果先由你确认，再进入已确认衣橱；你也可以随时修正标签。</p>
         </div>
         <div className="wardrobeActions">
           {garments.length > 0 && (
@@ -709,8 +966,8 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
       </div>
       {pending.length > 0 && (
         <div className="reviewBanner">
-          <strong>待编辑单品</strong>
-          <span>{pending.length} 件旧单品需要编辑标签后会自动转为已入库。</span>
+          <strong>待确认单品</strong>
+          <span>{pending.length} 件单品需要你核对，点击衣物后确认并加入衣橱。</span>
         </div>
       )}
       <div className="toolbar">
@@ -722,7 +979,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
       </div>
       <div className="segmented" aria-label="服装分类">
         {categories.map((item) => (
-          <button key={item.value} type="button" className={category === item.value ? "segment active" : "segment"} onClick={() => setCategory(item.value)}>
+          <button key={item.value} type="button" aria-pressed={category === item.value} className={category === item.value ? "segment active" : "segment"} onClick={() => setCategory(item.value)}>
             {item.label}
           </button>
         ))}
@@ -739,6 +996,17 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
           </div>
         </div>
       )}
+      {batchDeleteFailures.length > 0 && (
+        <div className="alert" role="alert">
+          <strong>{batchDeleteFailures.length} 件衣物删除失败，成功删除的项目已从列表移除：</strong>
+          <ul>
+            {batchDeleteFailures.map((failure) => {
+              const garment = garments.find((item) => item.id === failure.id);
+              return <li key={failure.id}>{garment ? `${categoryLabel(garment.category)} ${garment.style || failure.id}` : failure.id}：{failure.message}</li>;
+            })}
+          </ul>
+        </div>
+      )}
       {loading && (
         <div className="garmentGrid">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -750,8 +1018,10 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
         <div className="emptyState">
           <Shirt size={34} aria-hidden="true" />
           <h2>还没有衣服</h2>
-          <p>上传几件常穿单品，AI 才能开始帮你搭配。</p>
-          <button type="button" className="primaryButton compact" onClick={onUpload}>开始上传</button>
+          <p>{category !== "all" || search ? "没有符合当前筛选条件的衣物。" : "上传几件常穿单品，AI 才能开始帮你搭配。"}</p>
+          {category !== "all" || search
+            ? <button type="button" className="secondaryButton compact" onClick={() => { setCategory("all"); setSearch(""); }}>清除筛选</button>
+            : <button type="button" className="primaryButton compact" onClick={onUpload}>开始上传</button>}
         </div>
       ) : (
         <>
@@ -768,6 +1038,7 @@ function WardrobeView({ garments, onSelect, onUpload, onBatchDelete, loading }: 
               />
             ))}
           </div>
+          {hasMore && <button type="button" className="secondaryButton compact loadMoreButton" onClick={onLoadMore}>加载更多衣物</button>}
         </>
       ))}
     </section>
@@ -809,7 +1080,7 @@ function GarmentCardBody({ garment }: { garment: Garment }) {
     <div className="cardBody">
       <div className="cardTitle">
         <strong>{categoryLabel(garment.category)}</strong>
-        <span className={`status ${garment.status}`}>{statusLabel(garment.status)}</span>
+        <span className={`status ${garment.status}`}>{isConfirmedGarment(garment) ? "已入库" : garment.review_status === "pending_review" || garment.status === "ready" ? "待确认" : statusLabel(garment.status)}</span>
       </div>
       <div className="metaLine">{garment.colors.join(" / ") || "未设置颜色"} · {garment.material || "未设置材质"}</div>
       <div className="tagRow">{garment.tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
@@ -825,80 +1096,185 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
 }) {
   const [mode, setMode] = useState<"plain" | "auto">("plain");
   const [items, setItems] = useState<UploadItem[]>([]);
-  const uploadRequestCounter = useRef(0);
-  const activeUploadRequestId = useRef(0);
+  const [recoveredTasksHasMore, setRecoveredTasksHasMore] = useState(false);
+  const [loadingMoreRecoveredTasks, setLoadingMoreRecoveredTasks] = useState(false);
+  const [recoveredTasksError, setRecoveredTasksError] = useState("");
+  const recoveredTaskCursor = useRef<string | null>(null);
+  const recoveredTasksControllers = useRef(new Set<AbortController>());
+  const controllers = useRef(new Map<string, AbortController>());
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    const controller = new AbortController();
+    recoveredTasksControllers.current.add(controller);
+    void (async () => {
+      try {
+        const result = await fetchAnalysisTasks(token, { limit: 50, signal: controller.signal });
+        const garmentTasks = result.items.filter((task) => task.kind === "garment_single" || task.kind === "garment_split");
+        if (!mounted.current || controller.signal.aborted) return;
+        recoveredTaskCursor.current = result.next_cursor;
+        setRecoveredTasksHasMore(result.has_more);
+        setItems(garmentTasks.map((task) => ({
+          id: task.id,
+          taskId: task.id,
+          name: "已提交的图片任务",
+          mode: task.kind === "garment_split" ? "split" : "single",
+          status: task.status,
+          task,
+          message: task.error?.code
+        })));
+        for (const task of garmentTasks) {
+          if (task.status === "succeeded") await loadTaskGarments(task);
+          else if (task.status === "queued" || task.status === "running") void pollTask(task.id, task.kind === "garment_split" ? "split" : "single", "已提交的图片任务");
+        }
+      } catch (err) {
+        if (!controller.signal.aborted && isAuthError(err)) onAuthExpired();
+      } finally {
+        recoveredTasksControllers.current.delete(controller);
+      }
+    })();
+    return () => {
+      mounted.current = false;
+      controller.abort();
+      recoveredTasksControllers.current.forEach((active) => active.abort());
+      recoveredTasksControllers.current.clear();
+      controllers.current.forEach((entry) => entry.abort());
+      controllers.current.clear();
+    };
+  }, [token]);
+
+  async function loadMoreRecoveredTasks() {
+    if (!recoveredTaskCursor.current || loadingMoreRecoveredTasks) return;
+    const controller = new AbortController();
+    recoveredTasksControllers.current.add(controller);
+    setLoadingMoreRecoveredTasks(true);
+    setRecoveredTasksError("");
+    try {
+      const result = await fetchAnalysisTasks(token, { cursor: recoveredTaskCursor.current, limit: 50, signal: controller.signal });
+      if (!mounted.current || controller.signal.aborted) return;
+      const garmentTasks = result.items.filter((task) => task.kind === "garment_single" || task.kind === "garment_split");
+      setItems((current) => {
+        const existingTaskIds = new Set(current.map((item) => item.taskId).filter((id): id is string => Boolean(id)));
+        const recovered = garmentTasks.filter((task) => !existingTaskIds.has(task.id)).map((task) => ({
+          id: task.id,
+          taskId: task.id,
+          name: "已提交的图片任务",
+          mode: task.kind === "garment_split" ? "split" as const : "single" as const,
+          status: task.status,
+          task,
+          message: task.error?.code
+        }));
+        return [...current, ...recovered];
+      });
+      recoveredTaskCursor.current = result.next_cursor;
+      setRecoveredTasksHasMore(result.has_more);
+      for (const task of garmentTasks) {
+        if (task.status === "succeeded") await loadTaskGarments(task);
+        else if (task.status === "queued" || task.status === "running") void pollTask(task.id, task.kind === "garment_split" ? "split" : "single", "已提交的图片任务");
+      }
+    } catch (err) {
+      if (mounted.current && !controller.signal.aborted) {
+        if (isAuthError(err)) onAuthExpired();
+        else setRecoveredTasksError(errorMessage(err));
+      }
+    } finally {
+      recoveredTasksControllers.current.delete(controller);
+      if (mounted.current && !controller.signal.aborted) setLoadingMoreRecoveredTasks(false);
+    }
+  }
+
+  async function loadTaskGarments(task: AnalysisTaskType) {
+    const ids = task.result_refs.filter((ref) => ref.resource_type === "garment").map((ref) => ref.id);
+    if (ids.length === 0) return [];
+    const garments = await Promise.all(ids.map((id) => getV2Garment(token, id)));
+    if (mounted.current) {
+      setItems((current) => current.map((item) => item.taskId === task.id ? { ...item, status: "succeeded", task, garments, message: undefined } : item));
+      onPending(garments);
+    }
+    return garments;
+  }
+
+  async function pollTask(taskId: string, _taskMode: "single" | "split", _name: string) {
+    const controller = new AbortController();
+    controllers.current.set(taskId, controller);
+    try {
+      const completed = await waitForAnalysisTask(token, taskId, {
+        signal: controller.signal,
+        onUpdate: (task) => {
+          if (mounted.current) setItems((current) => current.map((item) => item.taskId === task.id ? { ...item, status: task.status, task, message: task.error?.code } : item));
+        }
+      });
+      if (completed.status === "succeeded") await loadTaskGarments(completed);
+      else if (mounted.current) setItems((current) => current.map((item) => item.taskId === taskId ? { ...item, status: completed.status, task: completed, message: completed.error?.code || (completed.action_required ? "需要人工核验供应商任务状态" : undefined) } : item));
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError") && mounted.current) {
+        if (isAuthError(err)) onAuthExpired();
+        else setItems((current) => current.map((item) => item.taskId === taskId ? { ...item, message: errorMessage(err) } : item));
+      }
+    } finally {
+      controllers.current.delete(taskId);
+    }
+  }
+
+  async function submitFile(file: File, rowId: string, taskMode: "single" | "split") {
+    try {
+      const compressedFile = await compressImageFile(file);
+      const fingerprint = await fingerprintFile(compressedFile);
+      const key = await stableIdempotencyKey(token, `garment-${taskMode}`, fingerprint);
+      const task = await createGarmentUploadTask(token, compressedFile, taskMode, key);
+      if (!mounted.current) return;
+      setItems((current) => current.map((item) => item.id === rowId ? { ...item, taskId: task.id, status: task.status, task } : item));
+      await pollTask(task.id, taskMode, file.name);
+      await clearIdempotencyKey(token, `garment-${taskMode}`, fingerprint);
+    } catch (err) {
+      if (!mounted.current) return;
+      if (isAuthError(err)) onAuthExpired();
+      else setItems((current) => current.map((item) => item.id === rowId ? { ...item, status: "failed", message: errorMessage(err) } : item));
+    }
+  }
 
   async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
-    const requestId = uploadRequestCounter.current + 1;
-    uploadRequestCounter.current = requestId;
-    activeUploadRequestId.current = requestId;
-    const selectedItems = files.map((file, index) => ({
-      id: `${requestId}-${index}-${file.name}`,
-      requestId,
+    const taskMode = mode === "plain" ? "single" : "split";
+    const selectedItems: UploadItem[] = files.map((file) => ({
+      id: createIdempotencyKey(),
       name: file.name,
-      status: "上传中" as const
+      mode: taskMode,
+      status: "queued" as const
     }));
-    setItems(selectedItems);
-    if (mode === "plain" && files.length > 1) {
-      const selectedItemIds = new Set(selectedItems.map((item) => item.id));
-      setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? { ...item, status: "入库中" } : item));
-      try {
-        const compressedFiles = await Promise.all(files.map((file) => compressImageFile(file)));
-        const response = await batchUploadGarments(token, compressedFiles);
-        if (activeUploadRequestId.current !== requestId) return;
-        if (response.items.length !== files.length) {
-          setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? {
-            ...item,
-            status: "失败",
-            session: undefined,
-            garments: undefined,
-            message: "批量上传返回数量不一致，请重试。"
-          } : item));
-          return;
-        }
-        setItems((current) => current.map((item) => {
-          if (!selectedItemIds.has(item.id) || item.requestId !== requestId) return item;
-          const index = selectedItems.findIndex((selectedItem) => selectedItem.id === item.id);
-          if (index < 0 || index >= response.items.length) return { ...item, status: "失败", message: "批量上传返回数据不匹配，请重试。" };
-          const garment = response.items[index];
-          return { ...item, status: "已入库", garments: [garment], message: undefined };
-        }));
-        onPending(response.items);
-      } catch (err) {
-        if (activeUploadRequestId.current !== requestId) return;
-        if (isAuthError(err)) {
-          onAuthExpired();
-          return;
-        }
-        const message = errorMessage(err);
-        setItems((current) => current.map((item) => selectedItemIds.has(item.id) && item.requestId === requestId ? { ...item, status: "失败", message } : item));
+    setItems((current) => [...selectedItems, ...current]);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(3, files.length) }, async () => {
+      while (cursor < files.length) {
+        const index = cursor++;
+        await submitFile(files[index], selectedItems[index].id, taskMode);
       }
-      return;
+    });
+    await Promise.all(workers);
+    event.target.value = "";
+  }
+
+  async function retry(item: UploadItem) {
+    if (!item.taskId || !item.task?.error?.retryable) return;
+    try {
+      const retried = await retryAnalysisTask(token, item.taskId, createIdempotencyKey());
+      setItems((current) => current.map((row) => row.id === item.id ? { ...row, status: retried.status, task: retried, message: undefined } : row));
+      await pollTask(retried.id, item.mode, item.name);
+    } catch (err) {
+      if (isAuthError(err)) onAuthExpired();
+      else setItems((current) => current.map((row) => row.id === item.id ? { ...row, message: errorMessage(err) } : row));
     }
-    for (const [index, file] of files.entries()) {
-      const uploadItem = selectedItems[index];
-      setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: mode === "plain" ? "入库中" : "单品拆分中" } : item));
-      try {
-        if (mode === "plain") {
-          const garment = await uploadPlainGarment(token, file);
-          if (activeUploadRequestId.current !== requestId) return;
-          setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "已入库", garments: [garment] } : item));
-          onPending([garment]);
-        } else {
-          const session = await uploadGarmentPhoto(token, file);
-          if (activeUploadRequestId.current !== requestId) return;
-          setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "已入库", session, garments: session.garments } : item));
-          onPending(session.garments);
-        }
-      } catch (err) {
-        if (activeUploadRequestId.current !== requestId) return;
-        if (isAuthError(err)) {
-          onAuthExpired();
-          return;
-        }
-        setItems((current) => current.map((item) => item.id === uploadItem.id && item.requestId === requestId ? { ...item, status: "失败", message: errorMessage(err) } : item));
-      }
+  }
+
+  async function cancel(item: UploadItem) {
+    if (!item.taskId) return;
+    try {
+      const task = await cancelAnalysisTask(token, item.taskId);
+      setItems((current) => current.map((row) => row.id === item.id ? { ...row, status: task.status, task } : row));
+    } catch (err) {
+      if (isAuthError(err)) onAuthExpired();
+      else setItems((current) => current.map((row) => row.id === item.id ? { ...row, message: errorMessage(err) } : row));
     }
   }
 
@@ -907,7 +1283,7 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
       <div className="pageHeader">
         <div>
           <h1 id="upload-title">上传衣服</h1>
-          <p>{mode === "plain" ? "普通上传不调用拆分工作流，请上传单独一件衣服、包或饰品的图片；系统会直接用 VL 模型打标签。" : "自动识别适合整套或多单品照片，会调用 RunningHub 工作流并预留识别扣费接口。"}</p>
+          <p>{mode === "plain" ? "每张图片作为一件衣物识别，结果需要确认后才会进入已确认衣橱。" : "自动识别整套或多单品照片；任务会保存进度，页面刷新后可继续查看。"}</p>
         </div>
       </div>
       <div className="segmented" aria-label="上传模式">
@@ -918,21 +1294,26 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
       <label className="uploadBox" htmlFor="garment-upload">
         <UploadCloud size={34} aria-hidden="true" />
         <strong>{mode === "plain" ? "选择单件图片" : "选择整套或多单品照片"}</strong>
-        <span>{mode === "plain" ? "每张图片只放一件衣服、包或饰品；上传后打标签并直接入库" : "支持多人或多单品照片；单个文件失败不影响其他图片"}</span>
+        <span>{mode === "plain" ? "每张图片只放一件衣服、包或饰品；AI 结果待你确认" : "支持多人或多单品照片；每张图片独立排队、重试和恢复"}</span>
         <input id="garment-upload" aria-label={mode === "plain" ? "选择单件图片" : "选择整套或多单品照片"} type="file" accept="image/*" multiple onChange={handleFiles} />
       </label>
       <div className="uploadList">
         {items.map((item) => (
-          <div key={item.id} className="uploadItem">
+          <div key={item.id} className="uploadItem" aria-busy={item.status === "queued" || item.status === "running"}>
             <span>{item.name}</span>
-            <strong>{item.status === "已入库" ? (mode === "plain" ? "已入库，可编辑标签" : "单品拆分完成") : item.status}</strong>
-            {item.message && <small>{item.message}</small>}
-            {(item.session || item.garments) && (
+            <strong aria-live="polite">{taskStatusLabel(item.status, item.task)}</strong>
+            {item.message && <small role="status">{item.message}</small>}
+            {item.task?.action_required && <small>供应商结果需要人工核验。请保留任务记录，不要重新提交相同请求。</small>}
+            <div className="buttonRow">
+              {(item.status === "queued" || item.status === "running") && item.taskId && <button type="button" className="secondaryButton compact" onClick={() => void cancel(item)}>取消任务</button>}
+              {item.status === "failed" && item.task?.error?.retryable && <button type="button" className="secondaryButton compact" onClick={() => void retry(item)}>重试此项</button>}
+            </div>
+            {item.garments && item.garments.length > 0 && (
               <div className="uploadPreview">
                 <div>
-                  <strong>已入库单品</strong>
+                  <strong>识别结果</strong>
                   <div className="miniGrid">
-                    {(item.garments || item.session?.garments || []).map((garment) => <GarmentCard key={garment.id} garment={garment} onSelect={onConfirm} />)}
+                    {item.garments.map((garment) => <GarmentCard key={garment.id} garment={garment} onSelect={onConfirm} />)}
                   </div>
                 </div>
               </div>
@@ -940,23 +1321,27 @@ function UploadView({ token, onAuthExpired, onPending, onConfirm }: {
           </div>
         ))}
       </div>
+      {recoveredTasksError && <div className="alert" role="alert">{recoveredTasksError}</div>}
+      {recoveredTasksHasMore && <button type="button" className="secondaryButton compact loadMoreButton" disabled={loadingMoreRecoveredTasks} onClick={() => void loadMoreRecoveredTasks()}>{loadingMoreRecoveredTasks ? "正在加载" : "加载更多历史任务"}</button>}
     </section>
   );
 }
 
-function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onSaved }: {
+function PurchaseAnalysisView({ token, entryMode, initialUrl, onAuthExpired, onAnalyzed, onSaved }: {
   token: string;
   entryMode: PurchaseEntryMode;
+  initialUrl?: string;
   onAuthExpired: () => void;
   onAnalyzed: () => void;
   onSaved: (garment: Garment) => void;
 }) {
   const [url, setUrl] = useState("");
-  const [candidate, setCandidate] = useState<PurchaseCandidate | null>(null);
+  const [candidate, setCandidate] = useState<CandidateV2 | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [imageUploadVisible, setImageUploadVisible] = useState(entryMode === "image");
   const [saveMessage, setSaveMessage] = useState("");
+  const taskPanelRef = useRef<PurchaseTaskControls>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
   const canAnalyze = /^https?:\/\/\S+\.\S+/.test(url.trim());
   const showImageUpload = entryMode === "image" || imageUploadVisible;
@@ -966,6 +1351,13 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
     if (entryMode === "url") urlInputRef.current?.focus();
   }, [entryMode]);
 
+  useEffect(() => {
+    if (initialUrl) {
+      setUrl(initialUrl);
+      setError("已恢复登录前填写的商品链接，确认后可继续分析。");
+    }
+  }, [initialUrl]);
+
   async function handleAnalyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -973,9 +1365,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
     setSaveMessage("");
     setImageUploadVisible(false);
     try {
-      const result = await analyzePurchaseUrl(token, url.trim());
-      setCandidate(result);
-      onAnalyzed();
+      await taskPanelRef.current?.start(url.trim());
     } catch (err) {
       if (isAuthError(err)) {
         onAuthExpired();
@@ -999,10 +1389,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
     setBusy(true);
     setError("");
     try {
-      const compressedFile = await compressImageFile(file);
-      const result = await analyzePurchaseImage(token, compressedFile, url.trim());
-      setCandidate(result);
-      onAnalyzed();
+      await taskPanelRef.current?.start(url.trim(), file);
       setImageUploadVisible(entryMode === "image");
     } catch (err) {
       if (isAuthError(err)) {
@@ -1029,7 +1416,11 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
     setBusy(true);
     setError("");
     try {
-      const garment = await savePurchaseCandidate(token, candidate.id);
+      const fingerprint = `${candidate.id}:${candidate.revision}`;
+      const key = await stableIdempotencyKey(token, "purchase-save", fingerprint);
+      const result = await saveV2Candidate(token, candidate.id, candidate.revision, key);
+      const garment = await getV2Garment(token, result.garment_id);
+      setCandidate({ ...candidate, ownership_state: "linked", owned_garment_id: result.garment_id, revision: result.revision });
       setSaveMessage("已加入衣橱");
       onSaved(garment);
     } catch (err) {
@@ -1075,15 +1466,21 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
           </label>
         )}
       </form>
+      <ResumablePurchasePanel ref={taskPanelRef} embedded token={token} url={url} onAuthExpired={onAuthExpired} onAnalyzed={onAnalyzed} onCandidate={setCandidate} onError={(message) => {
+        if (["product_image_not_found", "page_fetch_failed", "image_download_failed", "invalid_url"].includes(message)) {
+          setImageUploadVisible(true);
+          setError("未能自动找到商品图片，请上传商品图继续分析。");
+        } else setError(message);
+      }} />
       {candidate && (
         <article className={`outfitResult purchaseResult recommendation-${candidate.recommendation}`}>
           <div className="purchaseResultGrid">
-            <BlurImage className="purchaseImage" src={candidate.image_url} alt={`${candidate.title || "商品"} 图片`} />
+            {candidate.image_url && <BlurImage className="purchaseImage" src={candidate.image_url} alt={`${candidate.title || "商品"} 图片`} />}
             <div className="purchaseSummary">
               <div className="resultHeader">
                 <strong>{candidate.title || candidate.domain || "商品候选"}</strong>
                 <span className={`status recommendationBadge ${candidate.recommendation}`}>
-                  {recommendationLabel(candidate.recommendation)} · {candidate.score}
+                  {recommendationLabel(candidate.recommendation)} · {candidate.score === null ? "依据不足，暂不生成总分" : candidate.score}
                 </span>
               </div>
               <section aria-labelledby="purchase-conclusion">
@@ -1100,19 +1497,19 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
           <section aria-labelledby="purchase-scores">
             <h2 id="purchase-scores">分项评分</h2>
             <div className="analysisStats">
-              <span>重复风险 {Math.round(Number(candidate.analysis.score_breakdown.duplicate_risk || candidate.analysis.duplicate_score || 0))}</span>
-              <span>衣橱缺口 {Math.round(Number(candidate.analysis.score_breakdown.wardrobe_gap || candidate.analysis.wardrobe_gap_score || 0))}</span>
-              <span>搭配潜力 {Math.round(Number(candidate.analysis.score_breakdown.outfit_potential || candidate.analysis.pairing_score || 0))}</span>
-              <span>场景匹配 {Math.round(Number(candidate.analysis.score_breakdown.scene_match || 0))}</span>
-              <span>闲置风险 {Math.round(Number(candidate.analysis.score_breakdown.idle_risk || candidate.analysis.idle_risk || 0))}</span>
+              <span>重复风险 {displayScore(candidate.analysis.score_breakdown?.duplicate_risk)}</span>
+              <span>衣橱缺口 {displayScore(candidate.analysis.score_breakdown?.wardrobe_gap)}</span>
+              <span>搭配潜力 {displayScore(candidate.analysis.score_breakdown?.outfit_potential)}</span>
+              <span>场景匹配 {displayScore(candidate.analysis.score_breakdown?.scene_match)}</span>
+              <span>闲置风险 {displayScore(candidate.analysis.score_breakdown?.idle_risk)}</span>
             </div>
           </section>
           <section aria-labelledby="purchase-reasons">
             <h2 id="purchase-reasons">推荐与风险理由</h2>
             <p>{candidate.reason_summary}</p>
             <div className="tagRow">
-              {candidate.analysis.pros.map((reason) => <span key={`pro-${reason}`}>优点：{reason}</span>)}
-              {candidate.analysis.cons.map((reason) => <span key={`con-${reason}`}>风险：{reason}</span>)}
+              {candidate.analysis.pros?.map((reason) => <span key={`pro-${reason}`}>优点：{reason}</span>)}
+              {candidate.analysis.cons?.map((reason) => <span key={`con-${reason}`}>风险：{reason}</span>)}
             </div>
           </section>
           <section aria-labelledby="purchase-similar">
@@ -1133,10 +1530,10 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
           </section>
           <section aria-labelledby="purchase-outfits">
             <h2 id="purchase-outfits">可搭配方案</h2>
-            {candidate.analysis.outfit_ideas.length > 0 ? (
+            {candidate.analysis.outfit_ideas && candidate.analysis.outfit_ideas.length > 0 ? (
               <div className="miniGrid">
-                {candidate.analysis.outfit_ideas.map((idea) => (
-                  <div key={idea.scene} className="similarItem">
+                {candidate.analysis.outfit_ideas.map((idea, index) => (
+                  <div key={purchaseOutfitIdeaKey(idea, index)} className="similarItem">
                     <strong>{idea.scene}</strong>
                     <span>{idea.reason}</span>
                     {idea.items.map((item) => (
@@ -1151,7 +1548,7 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
           </section>
           <section aria-labelledby="purchase-idle-risk">
             <h2 id="purchase-idle-risk">闲置风险</h2>
-            <p>{candidate.analysis.idle_risk_detail.level}：{candidate.analysis.idle_risk_detail.reason}</p>
+            <p>{candidate.analysis.idle_risk_detail ? `${candidate.analysis.idle_risk_detail.level}：${candidate.analysis.idle_risk_detail.reason}` : "依据不足，暂不能判断闲置风险"}</p>
           </section>
           <section aria-labelledby="purchase-price">
             <h2 id="purchase-price">价格建议</h2>
@@ -1159,12 +1556,15 @@ function PurchaseAnalysisView({ token, entryMode, onAuthExpired, onAnalyzed, onS
               {candidate.analysis.product_price?.current && (
                 <span>页面价格 ¥{candidate.analysis.product_price.current}</span>
               )}
-              <span>建议价 ¥{candidate.analysis.suggested_price.ideal}</span>
-              <span>可入手区间 ¥{candidate.analysis.suggested_price.min} - ¥{candidate.analysis.suggested_price.max}</span>
+              {candidate.analysis.suggested_price ? <>
+                <span>建议价 ¥{candidate.analysis.suggested_price.ideal}</span>
+                <span>可入手区间 ¥{candidate.analysis.suggested_price.min} - ¥{candidate.analysis.suggested_price.max}</span>
+              </> : <span>依据不足，暂不生成建议价格</span>}
+              {candidate.actual_price === null && !candidate.analysis.product_price?.current && <span>价格未知，暂不能比较预算</span>}
             </div>
           </section>
           <div className="buttonRow">
-            <button type="button" className="primaryButton compact" disabled={busy || candidate.status === "saved"} onClick={handleSave}>
+            <button type="button" className="primaryButton compact" disabled={busy || candidate.ownership_state !== "never_saved"} onClick={handleSave}>
               <Check size={18} aria-hidden="true" />
               加入衣橱
             </button>
@@ -1528,7 +1928,7 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
     setBusy(true);
     setError("");
     try {
-      const saved = await updateGarment(token, garment.id, {
+      const saved = !isConfirmedGarment(garment) ? await confirmV2Garment(token, garment.id, splitValues(form.tags)) : await updateGarment(token, garment.id, {
         tags: splitValues(form.tags)
       } as Partial<Garment>);
       onSaved(saved);
@@ -1574,13 +1974,13 @@ function DetailView({ token, garment, onSaved, onDeleted }: {
       </div>
       <form className="detailForm" onSubmit={handleSubmit}>
         <h1 id="detail-title">编辑单品标签</h1>
-        <p>单品已经入库。这里只保留标签修改，用来影响搜索、筛选和后续搭配偏好。</p>
+        <p>{isConfirmedGarment(garment) ? "单品已经入库。标签用于搜索、筛选和后续搭配偏好。" : "识别完成，请核对单品信息和标签。确认确实拥有后，才能用于购买分析和搭配。"}</p>
         <label htmlFor="tags">标签</label>
         <input id="tags" value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} />
         {error && <div className="alert" role="alert">{error}</div>}
         <button type="submit" className="primaryButton stickyAction" disabled={busy}>
           <Check size={18} aria-hidden="true" />
-          保存标签
+          {isConfirmedGarment(garment) ? "保存标签" : "确认并加入衣橱"}
         </button>
         <button type="button" className="dangerButton" disabled={busy} onClick={handleDelete}>
           <Trash2 size={18} aria-hidden="true" />
@@ -1612,7 +2012,7 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit, onHistor
   const [feedbackMessage, setFeedbackMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const readyGarments = garments.filter((garment) => garment.status === "ready");
+  const readyGarments = garments.filter(isConfirmedGarment);
 
   async function loadWeather(lat: number, lon: number, placeLabel?: string) {
     setWeatherStatus("loading");
@@ -1671,6 +2071,13 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit, onHistor
     try {
       const updated = await setOutfitFavorite(token, currentOutfit.id, true);
       setCurrentOutfit(updated);
+      await createV2Feedback(token, {
+        target_type: "outfit",
+        target_id: currentOutfit.id,
+        snapshot_revision: currentOutfit.result_revision || 1,
+        value: "helpful",
+        occasion: currentOutfit.occasion
+      }, createIdempotencyKey());
       setFeedbackMessage("已记录反馈");
     } catch (err) {
       setError(errorMessage(err));
@@ -1679,17 +2086,30 @@ function OutfitView({ token, garments, currentOutfit, setCurrentOutfit, onHistor
     }
   }
 
-  function handleDislike() {
+  async function handleDislike() {
     if (!dislikeReason) {
       setFeedbackMessage("请选择不喜欢原因");
       return;
     }
+    if (!currentOutfit) return;
+    setBusy(true);
+    setError("");
     try {
-      const feedback = JSON.parse(localStorage.getItem("aiwardrobe_outfit_feedback") || "{}");
-      feedback[currentOutfit?.id || "unknown"] = { reason: dislikeReason, timestamp: Date.now() };
-      localStorage.setItem("aiwardrobe_outfit_feedback", JSON.stringify(feedback));
-    } catch { /* localStorage may be unavailable */ }
-    setFeedbackMessage("已记录反馈（本次会话有效）");
+      const reasonCode = dislikeReason === "风格不适合" ? "style_mismatch" : dislikeReason === "场景不匹配" ? "other" : "other";
+      await createV2Feedback(token, {
+        target_type: "outfit",
+        target_id: currentOutfit.id,
+        snapshot_revision: currentOutfit.result_revision || 1,
+        value: "not_helpful",
+        reason_code: reasonCode,
+        occasion: currentOutfit.occasion
+      }, createIdempotencyKey());
+      setFeedbackMessage("反馈已保存，会用于之后的搭配建议。");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleFixed() {
@@ -1883,12 +2303,19 @@ function ManualPicker({ garments, selectedIds, setSelectedIds, name, setName, on
   );
 }
 
-function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete }: {
+function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete, onPurchaseHistory, onWear, wearEvents, hasMore, onLoadMore, wearEventsHasMore, onLoadMoreWearEvents }: {
   outfits: Outfit[];
   onFavorites: () => void;
   onAll: () => void;
   onOpen: (outfit: Outfit) => void;
   onDelete: (id: string) => void;
+  onPurchaseHistory: () => void;
+  onWear: (outfit: Outfit) => void;
+  wearEvents: Record<string, WearEvent>;
+  hasMore: boolean;
+  onLoadMore: () => void;
+  wearEventsHasMore: boolean;
+  onLoadMoreWearEvents: () => void;
 }) {
   return (
     <section className="pageSection" aria-labelledby="history-title">
@@ -1901,6 +2328,7 @@ function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete }: {
       <div className="buttonRow">
         <button type="button" className="secondaryButton compact" onClick={onAll}>全部历史</button>
         <button type="button" className="secondaryButton compact" onClick={onFavorites}>只看收藏</button>
+        <button type="button" className="secondaryButton compact" onClick={onPurchaseHistory}>购买决策记录</button>
       </div>
       {outfits.length === 0 ? (
         <div className="emptyState">
@@ -1921,6 +2349,9 @@ function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete }: {
                   {outfit.is_favorite && <span>已收藏</span>}
                 </div>
               </button>
+              <button type="button" className="secondaryButton compact" aria-pressed={Boolean(wearEvents[outfit.id])} onClick={() => onWear(outfit)}>
+                {wearEvents[outfit.id] ? "撤销穿着记录" : "记录穿着"}
+              </button>
               <button type="button" className="iconDangerButton" aria-label="删除搭配" onClick={() => onDelete(outfit.id)}>
                 <Trash2 size={17} aria-hidden="true" />
               </button>
@@ -1928,6 +2359,8 @@ function HistoryView({ outfits, onFavorites, onAll, onOpen, onDelete }: {
           ))}
         </div>
       )}
+      {hasMore && <button type="button" className="secondaryButton compact loadMoreButton" onClick={onLoadMore}>加载更多搭配</button>}
+      {wearEventsHasMore && <button type="button" className="secondaryButton compact loadMoreButton" onClick={onLoadMoreWearEvents}>加载更多穿着记录</button>}
     </section>
   );
 }
@@ -1993,7 +2426,86 @@ function formatShoppingError(error: unknown) {
 }
 
 function isAuthError(error: unknown) {
-  return error instanceof Error && /invalid bearer token|not authenticated|could not validate/i.test(error.message);
+  return error instanceof ApiError ? error.status === 401 : error instanceof Error && /invalid bearer token|not authenticated|could not validate/i.test(error.message);
+}
+
+function isConfirmedGarment(garment: Garment) {
+  return garment.status === "ready" && garment.review_status === "confirmed" && Boolean(garment.user_confirmed_at);
+}
+
+function displayScore(score: number | null | undefined) {
+  return score == null ? "依据不足" : Math.round(score);
+}
+
+function purchaseOutfitIdeaKey(idea: NonNullable<CandidateV2["analysis"]["outfit_ideas"]>[number], legacyIndex: number) {
+  const resources = idea.items.flatMap((item) => item.candidate_id ? [`candidate:${item.candidate_id}`] : item.garment_id ? [`garment:${item.garment_id}`] : []).sort();
+  return resources.length && resources.length === idea.items.length ? JSON.stringify([idea.scene, resources]) : JSON.stringify(["legacy", idea.scene, legacyIndex]);
+}
+
+function mergeOutfits(incoming: Outfit[], existing: Outfit[]) {
+  const byId = new Map(existing.map((outfit) => [outfit.id, outfit]));
+  incoming.forEach((outfit) => byId.set(outfit.id, outfit));
+  return Array.from(byId.values()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+function activeWearEvents(events: WearEvent[]) {
+  const activeByOutfit: Record<string, WearEvent> = {};
+  events.filter((event) => event.outfit_id && !event.revoked_at).forEach((event) => {
+    if (event.outfit_id && !activeByOutfit[event.outfit_id]) activeByOutfit[event.outfit_id] = event;
+  });
+  return activeByOutfit;
+}
+
+function taskStatusLabel(status: UploadItem["status"], task?: AnalysisTaskType) {
+  if (status === "queued") return "排队中";
+  if (status === "succeeded") return task?.kind === "garment_split" ? "单品拆分完成，待确认" : "识别完成，待确认";
+  if (status === "failed") return "失败，可查看原因或重试";
+  if (status === "cancelled") return "已取消";
+  const stages: Record<string, string> = {
+    validating: "校验图片中", downloading: "下载图片中", preprocessing: "预处理图片中",
+    recognizing: "识别中", scoring: "分析中", persisting: "保存结果中", awaiting_resolution: "等待供应商核验"
+  };
+  return stages[task?.stage || ""] || "处理中";
 }
 
 export default App;
+
+async function handleWearOutfit(
+  token: string,
+  outfit: Outfit,
+  existingEvent: WearEvent | undefined,
+  setWearEvents: (update: (events: Record<string, WearEvent>) => Record<string, WearEvent>) => void,
+  setNotice: (message: string) => void,
+  setError: (message: string) => void
+) {
+  setError("");
+  setNotice("");
+  try {
+    if (existingEvent) {
+      await revokeV2WearEvent(token, existingEvent.id);
+      setWearEvents((events) => {
+        const updated = { ...events };
+        delete updated[outfit.id];
+        return updated;
+      });
+      setNotice("穿着记录已撤销");
+      return;
+    }
+    const localDate = localDateString(new Date());
+    const event = await createV2WearEvent(token, {
+      local_date: localDate,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      outfit_id: outfit.id
+    }, createIdempotencyKey());
+    setWearEvents((events) => ({ ...events, [outfit.id]: event }));
+    setNotice("穿着记录已保存");
+  } catch (error) {
+    setError(errorMessage(error));
+  }
+}
+
+function localDateString(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}

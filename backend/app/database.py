@@ -1,7 +1,6 @@
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
-from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -49,41 +48,14 @@ def reset_database_connection() -> None:
 
 
 def init_db() -> None:
-    from app import models  # noqa: F401
-
     engine = get_engine()
-    Base.metadata.create_all(bind=engine)
-    _ensure_lightweight_columns(engine)
+    from app.migrations import require_current_schema, upgrade_database
 
-
-def _ensure_lightweight_columns(engine: Engine) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "users" not in tables:
-        return
-    user_columns = {column["name"] for column in inspector.get_columns("users")}
-    with engine.begin() as connection:
-        if "password_hash" not in user_columns:
-            connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(128)"))
-        if "garments" in tables:
-            garment_columns = {column["name"] for column in inspector.get_columns("garments")}
-            for name, ddl in {
-                "source_upload_id": "VARCHAR(36)",
-                "crop_box": "JSON",
-                "review_status": "VARCHAR(32) DEFAULT 'confirmed'",
-            }.items():
-                if name not in garment_columns:
-                    connection.execute(text(f"ALTER TABLE garments ADD COLUMN {name} {ddl}"))
-        if "outfits" in tables:
-            outfit_columns = {column["name"] for column in inspector.get_columns("outfits")}
-            for name, ddl in {
-                "name": "VARCHAR(160) DEFAULT ''",
-                "source": "VARCHAR(32) DEFAULT 'ai'",
-                "is_fixed": "BOOLEAN DEFAULT 0",
-                "weather_snapshot": "JSON",
-            }.items():
-                if name not in outfit_columns:
-                    connection.execute(text(f"ALTER TABLE outfits ADD COLUMN {name} {ddl}"))
+    settings = get_settings()
+    if settings.environment == "production" and not settings.testing:
+        require_current_schema(engine)
+    else:
+        upgrade_database(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

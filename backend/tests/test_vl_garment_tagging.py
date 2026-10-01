@@ -2,6 +2,7 @@ import json
 
 import anyio
 import pytest
+import httpx
 
 import app.ai as ai_module
 from app.ai import AiService
@@ -79,6 +80,8 @@ def test_vl_garment_tagging_uses_strict_chinese_json_prompt(monkeypatch: pytest.
     assert analysis.category == "top"
     assert analysis.colors == ["黑色"]
     assert analysis.style == "甜美"
+    assert analysis.analysis_source == "remote"
+    assert analysis.provider == "qwen"
     assert analysis.material == "针织"
     assert analysis.season == ["秋"]
     assert analysis.fit == "修身"
@@ -225,3 +228,51 @@ def test_vl_analysis_normalizes_unexpected_local_model_values(monkeypatch: pytes
     assert analysis.raw["version"] == "未知"
     assert analysis.raw["pant_length"] == "未知"
     assert analysis.raw["season"] == "春"
+
+
+def test_real_vl_timeout_is_reported_instead_of_returning_demo_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TimeoutAsyncClient:
+        def __init__(self, timeout: int) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ReadTimeout("provider timed out")
+
+    monkeypatch.setattr(ai_module.httpx, "AsyncClient", TimeoutAsyncClient)
+    settings = Settings(
+        ai_demo_mode=False,
+        ai_api_key="real-provider-key",
+        ai_base_url="https://vl.example.com/v1",
+        ai_model="vl-test",
+    )
+
+    async def run_analysis():
+        return await AiService(settings).analyze_garment("black-shirt.jpg", "image/jpeg", b"image bytes")
+
+    with pytest.raises(Exception) as error:
+        anyio.run(run_analysis, backend="asyncio")
+
+    assert getattr(error.value, "code", None) == "provider_timeout"
+
+
+def test_real_vl_without_credentials_does_not_return_demo_tags() -> None:
+    settings = Settings(
+        ai_demo_mode=False,
+        ai_api_key=None,
+        ai_base_url="https://api.example.com/v1",
+        ai_model="vl-test",
+    )
+
+    async def run_analysis():
+        return await AiService(settings).analyze_garment("black-shirt.jpg", "image/jpeg", b"image bytes")
+
+    with pytest.raises(Exception) as error:
+        anyio.run(run_analysis, backend="asyncio")
+
+    assert getattr(error.value, "code", None) == "provider_credentials_missing"

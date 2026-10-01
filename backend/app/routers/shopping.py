@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -56,13 +56,14 @@ async def recommend_shopping_items(
 )
 async def analyze_shopping_recommendation_item(
     item_id: str,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> ShoppingRecommendationItem:
     try:
         item = get_owned_recommendation_item(db, current_user, item_id)
-        return await analyze_recommendation_item(db, current_user, settings, item)
+        return await analyze_recommendation_item(db, current_user, settings, item, idempotency_key=idempotency_key)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Shopping recommendation item not found") from exc
     except RecommendationRateLimited as exc:

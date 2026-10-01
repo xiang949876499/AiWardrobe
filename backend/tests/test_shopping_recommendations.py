@@ -1,7 +1,8 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.models import Garment
-from tests.conftest import login
+from tests.conftest import jpeg_bytes, login
 
 
 def test_auto_gap_keywords_prioritize_missing_categories() -> None:
@@ -175,7 +176,7 @@ def test_analyze_item_creates_purchase_candidate(client: TestClient) -> None:
     body = analyzed.json()
     assert body["analysis_status"] == "analyzed"
     assert body["purchase_candidate_id"]
-    assert body["score"] >= 0
+    assert body["score"] is None
     assert body["reason_summary"]
 
 
@@ -243,6 +244,16 @@ def _upload_ready_garment(client: TestClient, token: str) -> None:
     response = client.post(
         "/uploads/plain-garment",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("white-shirt.jpg", b"existing image", "image/jpeg")},
+        files={"file": ("white-shirt.jpg", jpeg_bytes(), "image/jpeg")},
     )
     assert response.status_code == 201
+    assert response.json()["review_status"] == "pending_review"
+    confirmed = client.post(
+        f"/v2/garments/{response.json()['id']}/confirm",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"tags": response.json()["tags"]},
+    )
+    assert confirmed.status_code == 200
+
+
+pytestmark = pytest.mark.usefixtures("legacy_worker")

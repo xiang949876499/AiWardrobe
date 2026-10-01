@@ -164,6 +164,43 @@ class RunningHubClient:
             raise RunningHubError(str(payload.get("msg") or payload.get("message") or "RunningHub query failed"))
         return payload
 
+    async def submit_workflow(self, workflow, inputs=None, files=None) -> str:
+        values = dict(inputs or {})
+        for name, (filename, content_type, data) in (files or {}).items():
+            values[name] = await self.upload_file(filename, content_type, data)
+        return await self.create_task(workflow, values)
+
+    async def collect_workflow(self, task_id: str) -> dict[str, object]:
+        from app.provider_recovery import ProviderPending, ProviderTerminalFailure
+        result = await self.query_task(task_id)
+        status = str(result.get("status") or "").upper()
+        if status == "SUCCESS":
+            return result
+        if status in {"FAILED", "FAIL", "ERROR", "EXCEPTION"}:
+            raise ProviderTerminalFailure("provider_confirmed_failure")
+        raise ProviderPending("provider_pending")
+
+    async def submit_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes) -> str:
+        workflow = RunningHubWorkflow.from_file(self.settings.runninghub_garment_workflow_file)
+        workflow = await self._with_ai_app_demo_inputs(workflow)
+        values = {self._image_input_name(workflow): await self.upload_file(filename, content_type, image_bytes)}
+        return (await self.create_ai_app_task(workflow, values) if workflow.webapp_id
+                else await self.create_task(workflow, values))
+
+    async def collect_garment_recognition(self, task_id: str) -> list[RunningHubOutput]:
+        from app.provider_recovery import ProviderPending, ProviderTerminalFailure
+        payload = await self._post("/task/openapi/outputs", json={"apiKey": self._api_key(), "taskId": task_id})
+        message = str(payload.get("msg") or payload.get("message") or "")
+        if _looks_pending(message):
+            raise ProviderPending("provider_pending")
+        if str(payload.get("status") or "").upper() in {"FAILED", "FAIL", "ERROR", "EXCEPTION"} or message.upper() == "APIKEY_TASK_FAILED":
+            raise ProviderTerminalFailure("provider_confirmed_failure")
+        self._require_success(payload)
+        refs = self._extract_output_refs(payload)
+        if not refs:
+            raise ProviderPending("provider_pending")
+        return await self._download_outputs(refs)
+
     async def run_workflow(
         self,
         workflow: RunningHubWorkflow,

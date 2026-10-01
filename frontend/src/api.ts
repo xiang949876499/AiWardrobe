@@ -1,5 +1,8 @@
 import type {
   AuthResponse,
+  AnalysisTask,
+  CandidateV2,
+  DecisionFeedback,
   Garment,
   Occasion,
   Outfit,
@@ -9,11 +12,25 @@ import type {
   ShoppingRecommendationItem,
   UploadSession,
   UserPreference,
+  WearEvent,
   WardrobeReport,
   Weather
 } from "./types";
 
 const TOKEN_KEY = "aiwardrobe_token";
+const IDEMPOTENCY_PREFIX = "aiwardrobe_idempotency_v1:";
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+    readonly retryAfter: string | null
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -39,15 +56,305 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
   const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(errorDetail(body.detail));
+    const detail = body && typeof body === "object" ? (body as { detail?: unknown }).detail : undefined;
+    const errorRecord = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
+    const code = typeof errorRecord.code === "string" ? errorRecord.code : null;
+    throw new ApiError(errorDetail(detail), response.status, code, response.headers?.get?.("Retry-After") ?? null);
   }
   return body as T;
 }
 
 function errorDetail(detail: unknown): string {
   if (typeof detail === "string" && detail) return detail;
-  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    if (typeof record.code === "string") return record.code;
+    return JSON.stringify(detail);
+  }
   return "请求失败，请稍后重试";
+}
+
+export function createIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
+export async function fingerprintFile(file: File): Promise<string> {
+  const bytes = typeof file.arrayBuffer === "function" ? await file.arrayBuffer() : await readFileWithReader(file);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function fingerprintText(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function readFileWithReader(file: File): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("file_read_failed"));
+    reader.onload = () => reader.result instanceof ArrayBuffer ? resolve(reader.result) : reject(new Error("file_read_failed"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+export async function stableIdempotencyKey(token: string, operation: string, fingerprint: string): Promise<string> {
+  const account = await tokenPartition(token);
+  const storageKey = `${IDEMPOTENCY_PREFIX}${account}:${operation}:${fingerprint}`;
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (stored) {
+      const value = JSON.parse(stored) as { key?: string; createdAt?: number };
+      if (value.key && value.createdAt && Date.now() - value.createdAt < 24 * 60 * 60 * 1000) return value.key;
+    }
+    const key = createIdempotencyKey();
+    localStorage.setItem(storageKey, JSON.stringify({ key, createdAt: Date.now() }));
+    return key;
+  } catch {
+    return createIdempotencyKey();
+  }
+}
+
+export async function clearIdempotencyKey(token: string, operation: string, fingerprint: string): Promise<void> {
+  const account = await tokenPartition(token);
+  try { localStorage.removeItem(`${IDEMPOTENCY_PREFIX}${account}:${operation}:${fingerprint}`); } catch { /* storage is optional */ }
+}
+
+async function tokenPartition(token: string): Promise<string> {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+    return Array.from(new Uint8Array(digest).slice(0, 12), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    let hash = 2166136261;
+    for (const character of token) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+    return (hash >>> 0).toString(16);
+  }
+}
+
+export function createGarmentUploadTask(token: string, file: File, mode: "single" | "split", key: string) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("mode", mode);
+  return request<AnalysisTask>("/v2/tasks/garment-upload", {
+    method: "POST",
+    headers: { "Idempotency-Key": key },
+    body: form
+  }, token);
+}
+
+export function createPurchaseUrlTask(token: string, url: string, key: string) {
+  return request<AnalysisTask>("/v2/tasks/purchase-analysis", {
+    method: "POST",
+    headers: { "Idempotency-Key": key },
+    body: JSON.stringify({ url })
+  }, token);
+}
+
+export function createPurchaseImageTask(token: string, file: File, key: string, productUrl = "") {
+  const form = new FormData();
+  form.append("file", file);
+  if (productUrl) form.append("product_url", productUrl);
+  return request<AnalysisTask>("/v2/tasks/purchase-analysis", {
+    method: "POST",
+    headers: { "Idempotency-Key": key },
+    body: form
+  }, token);
+}
+
+export function fetchAnalysisTask(token: string, id: string, signal?: AbortSignal) {
+  return request<AnalysisTask>(`/v2/tasks/${encodeURIComponent(id)}`, { signal }, token);
+}
+
+export function fetchAnalysisTasks(token: string, filters: { status?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  const params = new URLSearchParams();
+  const { signal, ...query } = filters;
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  return request<{ items: AnalysisTask[]; next_cursor: string | null; has_more: boolean }>(
+    `/v2/tasks${params.size ? `?${params}` : ""}`,
+    { signal },
+    token
+  );
+}
+
+export async function waitForAnalysisTask(
+  token: string,
+  id: string,
+  options: { signal?: AbortSignal; intervalMs?: number; onUpdate?: (task: AnalysisTask) => void } = {}
+): Promise<AnalysisTask> {
+  const interval = options.intervalMs ?? 1500;
+  while (true) {
+    if (options.signal?.aborted) throw new DOMException("Task polling cancelled", "AbortError");
+    const task = await fetchAnalysisTask(token, id, options.signal);
+    options.onUpdate?.(task);
+    if (["succeeded", "failed", "cancelled"].includes(task.status) || (task.action_required && task.stage === "awaiting_resolution")) return task;
+    const delay = Math.max(500, Math.min(30000, (task.poll_after_seconds ?? interval / 1000) * 1000));
+    await wait(delay, options.signal);
+  }
+}
+
+export function reconcileAnalysisTask(token: string, id: string) {
+  return request<AnalysisTask>(`/v2/tasks/${encodeURIComponent(id)}/reconcile`, {
+    method: "POST", body: JSON.stringify({})
+  }, token);
+}
+
+function wait(delay: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Task polling cancelled", "AbortError"));
+    const timeout = window.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, delay);
+    const abort = () => {
+      window.clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      reject(new DOMException("Task polling cancelled", "AbortError"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export function fetchV2Candidates(token: string, filters: { decision_status?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  const params = new URLSearchParams();
+  const { signal, ...query } = filters;
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  return request<{ items: CandidateV2[]; next_cursor: string | null; has_more: boolean }>(`/v2/purchase/candidates${params.size ? `?${params}` : ""}`, { signal }, token);
+}
+
+export function fetchV2Candidate(token: string, id: string, signal?: AbortSignal) {
+  return request<CandidateV2>(`/v2/purchase/candidates/${encodeURIComponent(id)}`, { signal }, token);
+}
+
+export function getV2Garment(token: string, id: string, signal?: AbortSignal) {
+  return request<Garment>(`/v2/garments/${encodeURIComponent(id)}`, { signal }, token);
+}
+
+export function cancelAnalysisTask(token: string, id: string) {
+  return request<AnalysisTask>(`/v2/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({}) }, token);
+}
+
+export function retryAnalysisTask(token: string, id: string, key: string) {
+  return request<AnalysisTask>(`/v2/tasks/${encodeURIComponent(id)}/retry`, {
+    method: "POST",
+    headers: { "Idempotency-Key": key },
+    body: JSON.stringify({})
+  }, token);
+}
+
+export function saveV2Candidate(token: string, id: string, expectedRevision: number, key: string) {
+  return request<{ garment_id: string; candidate_id: string; ownership_state: string; revision: number }>(
+    `/v2/purchase/candidates/${encodeURIComponent(id)}/save`,
+    { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ expected_revision: expectedRevision, confirm_owned: true }) },
+    token
+  );
+}
+
+export async function confirmV2Garment(token: string, id: string, tags: string[]) {
+  await request(`/v2/garments/${encodeURIComponent(id)}/confirm`, {
+    method: "POST", body: JSON.stringify({ tags })
+  }, token);
+  return getV2Garment(token, id);
+}
+
+export function reanalyzeV2Candidate(token: string, id: string, key: string) {
+  return request<AnalysisTask>(`/v2/purchase/candidates/${encodeURIComponent(id)}/reanalyze`, {
+    method: "POST", headers: { "Idempotency-Key": key }
+  }, token);
+}
+
+export function createV2Feedback(token: string, body: {
+  target_type: "candidate" | "outfit";
+  target_id: string;
+  snapshot_revision: number;
+  value: "helpful" | "not_helpful";
+  reason_code?: string;
+  garment_ids?: string[];
+  occasion?: string;
+  exclude_next_time?: boolean;
+}, key: string) {
+  return request<DecisionFeedback>("/v2/feedback", {
+    method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(body)
+  }, token);
+}
+
+export function fetchV2Feedback(token: string, filters: { cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  const params = new URLSearchParams();
+  const { signal, ...query } = filters;
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  return request<{ items: DecisionFeedback[]; next_cursor: string | null; has_more: boolean }>(`/v2/feedback${params.size ? `?${params}` : ""}`, { signal }, token);
+}
+
+export function revokeV2Feedback(token: string, id: string) {
+  return request<void>(`/v2/feedback/${encodeURIComponent(id)}`, { method: "DELETE" }, token);
+}
+
+export function createV2WearEvent(token: string, body: {
+  local_date: string;
+  timezone: string;
+  outfit_id?: string;
+  garment_ids?: string[];
+  occasion?: string;
+}, key: string) {
+  return request<WearEvent>("/v2/wear-events", {
+    method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(body)
+  }, token);
+}
+
+export function fetchV2WearEvents(token: string, filters: { start?: string; end?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  const params = new URLSearchParams();
+  const { signal, ...query } = filters;
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  return request<{ items: WearEvent[]; next_cursor: string | null; has_more: boolean }>(`/v2/wear-events${params.size ? `?${params}` : ""}`, { signal }, token);
+}
+
+export function revokeV2WearEvent(token: string, id: string) {
+  return request<void>(`/v2/wear-events/${encodeURIComponent(id)}`, { method: "DELETE" }, token);
+}
+
+export function updateV2Candidate(token: string, id: string, body: Record<string, unknown>) {
+  return request<CandidateV2>(`/v2/purchase/candidates/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }, token);
+}
+
+export function decideV2Candidate(token: string, id: string, decisionStatus: string, expectedRevision: number) {
+  return request<CandidateV2>(`/v2/purchase/candidates/${encodeURIComponent(id)}/decision`, {
+    method: "PATCH",
+    body: JSON.stringify({ decision_status: decisionStatus, expected_revision: expectedRevision })
+  }, token);
+}
+
+export function fetchV2Garments(token: string, filters: { category?: string; tag?: string; color?: string; season?: string; q?: string; cursor?: string; limit?: number; status?: string; signal?: AbortSignal } = {}) {
+  const params = new URLSearchParams();
+  const { signal, ...query } = filters;
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  return request<{ items: Garment[]; next_cursor: string | null; has_more: boolean }>(`/v2/garments${params.size ? `?${params}` : ""}`, { signal }, token);
+}
+
+export function fetchV2Outfits(token: string, filters: { favorite?: boolean; fixed?: boolean; occasion?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  const params = new URLSearchParams();
+  const { signal, ...query } = filters;
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  return request<{ items: Outfit[]; next_cursor: string | null; has_more: boolean }>(`/v2/outfits${params.size ? `?${params}` : ""}`, { signal }, token);
+}
+
+export function linkV2Candidate(token: string, candidateId: string, garmentId: string, expectedRevision: number, key = createIdempotencyKey()) {
+  return request<Record<string, unknown>>(`/v2/purchase/candidates/${encodeURIComponent(candidateId)}/link-owned-garment`, {
+    method: "POST",
+    headers: { "Idempotency-Key": key },
+    body: JSON.stringify({ expected_revision: expectedRevision, garment_id: garmentId, confirm_owned: true })
+  }, token);
 }
 
 export function requestEmailCode(email: string) {

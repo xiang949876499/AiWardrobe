@@ -19,6 +19,7 @@ uploads/
 *.sqlite3
 .playwright-cli/
 output/
+.local-services/
 
 .DS_Store
 Thumbs.db

@@ -13,7 +13,12 @@ CATEGORY_LABELS = {
 
 
 def build_wardrobe_report(garments: list[Garment]) -> dict[str, object]:
-    ready = [garment for garment in garments if garment.status == "ready"]
+    ready = [
+        garment for garment in garments
+        if garment.status == "ready"
+        and garment.review_status == "confirmed"
+        and garment.user_confirmed_at is not None
+    ]
     category_counts = Counter(garment.category for garment in ready)
     color_counts = Counter(color for garment in ready for color in _normalized_colors(garment.colors))
     style_counts = Counter(garment.style for garment in ready if garment.style)

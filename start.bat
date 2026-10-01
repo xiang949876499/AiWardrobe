@@ -13,9 +13,11 @@ if "%MODE%"=="" set "MODE=local"
 if /i "%MODE%"=="local" goto local
 if /i "%MODE%"=="dev" goto local
 if /i "%MODE%"=="backend" goto backend
+if /i "%MODE%"=="worker" goto backend
 if /i "%MODE%"=="frontend" goto frontend
 if /i "%MODE%"=="docker" goto docker
 if /i "%MODE%"=="stop" goto stop
+if /i "%MODE%"=="stop-local" goto stop_local
 if /i "%MODE%"=="help" goto usage
 if /i "%MODE%"=="-h" goto usage
 if /i "%MODE%"=="--help" goto usage
@@ -29,7 +31,7 @@ goto usage
 title AiWardrobe Local Launcher
 echo.
 echo AiWardrobe one-click start
-echo Mode: local backend/frontend
+echo Mode: local API/worker/frontend
 echo.
 
 where python >nul 2>&1
@@ -120,8 +122,16 @@ if errorlevel 1 (
 )
 popd
 
-start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
-start "AiWardrobe Frontend" /D "%FRONTEND_DIR%" cmd /k "set VITE_BACKEND_TARGET=%BACKEND_URL%&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
+pushd "%BACKEND_DIR%"
+".venv\Scripts\python.exe" -m app.local_launcher local
+set "LOCAL_CODE=%ERRORLEVEL%"
+popd
+if not "%LOCAL_CODE%"=="0" (
+    echo [ERROR] Local services failed to start. See .local-services logs.
+    pause
+    exit /b %LOCAL_CODE%
+)
+
 timeout /t 5 /nobreak >nul
 start "" "%FRONTEND_URL%"
 
@@ -129,8 +139,8 @@ echo.
 echo Frontend: %FRONTEND_URL%
 echo Backend:  %BACKEND_URL%/docs
 echo.
-echo Backend and frontend are running in separate terminals.
-echo Close those terminals to stop local dev servers.
+echo API, worker and frontend are independent hidden processes.
+echo Logs and process IDs are in .local-services.
 echo.
 pause
 exit /b 0
@@ -197,7 +207,20 @@ if errorlevel 1 (
 :backend_ready
 popd
 
-start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+pushd "%BACKEND_DIR%"
+if /i "%MODE%"=="worker" (
+    ".venv\Scripts\python.exe" -m app.local_launcher worker
+) else (
+    ".venv\Scripts\python.exe" -m app.local_launcher backend
+)
+set "SERVICE_CODE=%ERRORLEVEL%"
+popd
+if not "%SERVICE_CODE%"=="0" (
+    echo [ERROR] Local service failed to start. See .local-services logs.
+    pause
+    exit /b %SERVICE_CODE%
+)
+
 echo Backend: %BACKEND_URL%/docs
 echo.
 pause
@@ -239,13 +262,15 @@ if errorlevel 1 (
 )
 popd
 
-start "AiWardrobe Frontend" /D "%FRONTEND_DIR%" cmd /k "set VITE_BACKEND_TARGET=%BACKEND_URL%&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
-timeout /t 5 /nobreak >nul
-start "" "%FRONTEND_URL%"
+set "VITE_BACKEND_TARGET=%BACKEND_URL%"
 echo Frontend: %FRONTEND_URL%
-echo.
-pause
-exit /b 0
+echo Press Ctrl+C in this console to stop the frontend.
+start "" "%FRONTEND_URL%"
+pushd "%FRONTEND_DIR%"
+cmd /c npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
+set "FRONTEND_CODE=%ERRORLEVEL%"
+popd
+exit /b %FRONTEND_CODE%
 
 :docker
 title AiWardrobe Docker Launcher
@@ -285,6 +310,17 @@ echo.
 pause
 exit /b 0
 
+:stop_local
+if not exist "%BACKEND_DIR%\.venv\Scripts\python.exe" (
+    echo [ERROR] Backend virtual environment was not found.
+    exit /b 1
+)
+pushd "%BACKEND_DIR%"
+".venv\Scripts\python.exe" -m app.local_launcher stop-local
+set "LOCAL_STOP_CODE=%ERRORLEVEL%"
+popd
+exit /b %LOCAL_STOP_CODE%
+
 :stop
 echo.
 echo Stopping Docker services...
@@ -304,13 +340,15 @@ exit /b %STOP_CODE%
 echo AiWardrobe startup script
 echo.
 echo Usage:
-echo   start.bat             Start the local backend and frontend
-echo   start.bat local       Start the local backend and frontend
+echo   start.bat             Start the local API, worker and frontend
+echo   start.bat local       Start the local API, worker and frontend
 echo   start.bat dev         Alias for local
 echo   start.bat backend     Start only the local FastAPI backend
+echo   start.bat worker      Start only the independent task worker
 echo   start.bat frontend    Start only the local Vite frontend
 echo   start.bat docker      Start the full stack with Docker Compose
 echo   start.bat stop        Stop Docker Compose services
+echo   start.bat stop-local  Stop verified local service processes
 echo   start.bat help        Show this help
 echo.
 exit /b 0

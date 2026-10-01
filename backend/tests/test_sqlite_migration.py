@@ -124,3 +124,19 @@ def test_rejects_sqlite_database_url_in_production(monkeypatch) -> None:
         assert "SQLite is only allowed for development or tests" in str(exc)
     else:
         raise AssertionError("Expected production SQLite DATABASE_URL to be rejected")
+
+
+def test_rejects_weak_jwt_secret_in_production() -> None:
+    from app.config import Settings
+
+    try:
+        Settings(
+            environment="production",
+            testing=False,
+            database_url="postgresql+psycopg://user:pass@localhost/db",
+            jwt_secret="short-secret",
+        )
+    except ValueError as exc:
+        assert "JWT_SECRET" in str(exc)
+    else:
+        raise AssertionError("Expected weak production JWT secret to be rejected")

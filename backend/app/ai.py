@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,6 +13,48 @@ from app.models import Garment
 from app.runninghub import RunningHubClient, RunningHubWorkflow
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_provider_usage(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    usage = {
+        key: count
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        if isinstance((count := value.get(key)), int) and not isinstance(count, bool) and count >= 0
+    }
+    return usage or None
+
+
+def _safe_reported_cost(value: dict[str, object]) -> dict[str, str] | None:
+    cost = value.get("cost", value.get("total_cost"))
+    currency = value.get("cost_currency")
+    amount: object = cost
+    if isinstance(cost, dict):
+        amount = cost.get("amount")
+        currency = cost.get("currency", currency)
+    if not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
+        return None
+    try:
+        normalized = Decimal(str(amount))
+    except (InvalidOperation, ValueError):
+        return None
+    if not normalized.is_finite() or normalized < 0:
+        return None
+    return {"amount": format(normalized, "f"), "currency": currency.upper()}
+
+
+def _provider_error(error: Exception) -> "AiAnalysisError":
+    if isinstance(error, httpx.TimeoutException):
+        return AiAnalysisError("provider_timeout", retryable=True)
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
+        if status_code == 429 or status_code >= 500:
+            return AiAnalysisError("provider_unavailable", retryable=True)
+        return AiAnalysisError("provider_rejected_request")
+    if isinstance(error, (json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError)):
+        return AiAnalysisError("provider_response_invalid")
+    return AiAnalysisError("provider_request_failed", retryable=True)
 
 VL_REQUIRED_FIELDS = [
     "category",
@@ -85,6 +128,18 @@ class AiAnalysis:
     tags: list[str]
     confidence: float
     raw: dict[str, object]
+    analysis_source: str = "remote"
+    provider: str | None = None
+    model_version: str | None = None
+    provider_usage: dict[str, int] | None = None
+    reported_cost: dict[str, str] | None = None
+
+
+class AiAnalysisError(Exception):
+    def __init__(self, code: str, *, retryable: bool = False) -> None:
+        self.code = code
+        self.retryable = retryable
+        super().__init__(code)
 
 
 @dataclass(frozen=True)
@@ -98,19 +153,27 @@ class AiService:
         self.settings = settings
 
     async def analyze_garment(self, filename: str, content_type: str, image_bytes: bytes) -> AiAnalysis:
-        if self.settings.garment_ai_provider == "runninghub" and self.settings.runninghub_api_key:
+        if self.settings.ai_demo_mode:
+            return self._demo_analysis(filename)
+
+        if self.settings.garment_ai_provider == "runninghub":
+            if not self.settings.runninghub_api_key:
+                raise AiAnalysisError("provider_credentials_missing")
             try:
                 return await self._runninghub_analysis(filename, content_type, image_bytes)
-            except Exception:
-                logger.exception("RunningHub garment analysis failed; falling back to demo analysis")
-                return self._demo_analysis(filename)
-        if self.settings.ai_demo_mode or not self._can_use_remote_garment_ai():
-            return self._demo_analysis(filename)
+            except Exception as exc:
+                error = _provider_error(exc)
+                logger.warning("RunningHub garment analysis failed (%s)", error.code)
+                raise error from exc
+
+        if not self._can_use_remote_garment_ai():
+            raise AiAnalysisError("provider_credentials_missing")
         try:
             return await self._remote_analysis(content_type, image_bytes)
-        except Exception:
-            logger.exception("VL garment analysis failed; falling back to demo analysis")
-            return self._demo_analysis(filename)
+        except Exception as exc:
+            error = _provider_error(exc)
+            logger.warning("VL garment analysis failed (%s)", error.code)
+            raise error from exc
 
     async def detect_garments(self, filename: str, content_type: str, image_bytes: bytes) -> list[DetectedGarment]:
         name = filename.lower()
@@ -182,6 +245,9 @@ class AiService:
             tags=["通勤", "休闲"],
             confidence=0.82,
             raw=raw,
+            analysis_source="demo",
+            provider=None,
+            model_version=None,
         )
 
     async def _remote_analysis(self, content_type: str, image_bytes: bytes) -> AiAnalysis:
@@ -235,7 +301,8 @@ class AiService:
                 json=payload,
             )
             response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+        response_payload = response.json()
+        content = response_payload["choices"][0]["message"]["content"]
         parsed = _complete_vl_payload(json.loads(content))
         logger.info("VL garment analysis returned fields: %s", sorted(parsed.keys()))
         category = _normalize_vl_category(str(parsed.get("category", "上衣")))
@@ -255,6 +322,11 @@ class AiService:
             tags=_compact_unknowns([sub_category, pattern, sleeve_length, pant_length, collar_type, style]),
             confidence=float(parsed.get("confidence", 0.7)),
             raw=parsed,
+            analysis_source="remote",
+            provider=self.settings.garment_ai_provider,
+            model_version=self.settings.ai_model,
+            provider_usage=_safe_provider_usage(response_payload.get("usage")),
+            reported_cost=_safe_reported_cost(response_payload),
         )
 
     async def _runninghub_analysis(self, filename: str, content_type: str, image_bytes: bytes) -> AiAnalysis:
@@ -270,7 +342,7 @@ class AiService:
         )
         parsed = _complete_vl_payload(json.loads(_extract_runninghub_text_result(result)))
         logger.info("RunningHub garment analysis returned fields: %s", sorted(parsed.keys()))
-        return _analysis_from_vl_payload(parsed)
+        return _analysis_from_vl_payload(parsed, provider="runninghub")
 
     def _runninghub_garment_workflow_path(self) -> Path:
         workflow_path = Path(self.settings.runninghub_garment_workflow_file)
@@ -292,6 +364,11 @@ class AiService:
             match = next((garment for garment in garments if garment.category == category), None)
             if match:
                 selected.append(match)
+        required_id = str((preferences or {}).get("required_garment_id") or "")
+        required = next((garment for garment in garments if garment.id == required_id), None)
+        if required is not None:
+            selected = [item for item in selected if item.category != required.category]
+            selected.insert(0, required)
         if len(selected) < 3:
             selected = garments[:3]
 
@@ -346,6 +423,12 @@ class AiService:
         ]
         weather_context = json.dumps(weather or {}, ensure_ascii=False)
         preference_context = json.dumps(preferences or {}, ensure_ascii=False)
+        required_id = str((preferences or {}).get("required_garment_id") or "")
+        required_text = (
+            f"The finished outfit MUST include garment_id {required_id}. "
+            if required_id
+            else ""
+        )
         payload = {
             "model": self._outfit_model(),
             "response_format": {"type": "json_object"},
@@ -356,6 +439,7 @@ class AiService:
                         "Generate one full outfit from this wardrobe. Return JSON with "
                         "items [{garment_id, category, reason}] and explanation. "
                         "Only choose garment_id values from the wardrobe; do not invent or rewrite image URLs. "
+                        f"{required_text}"
                         f"Occasion: {occasion}; season: {season}; temperature: {temperature}; "
                         f"weather: {weather_context}; "
                         f"user_preferences: {preference_context}; "
@@ -421,7 +505,12 @@ class AiService:
         return {"type": "json_object"}
 
 
-def _analysis_from_vl_payload(parsed: dict[str, object]) -> AiAnalysis:
+def _analysis_from_vl_payload(
+    parsed: dict[str, object],
+    *,
+    provider: str = "qwen",
+    model_version: str | None = None,
+) -> AiAnalysis:
     category = _normalize_vl_category(str(parsed.get("category", "上衣")))
     sub_category = _string_value(parsed, "sub_category")
     pattern = _string_value(parsed, "pattern")
@@ -439,6 +528,9 @@ def _analysis_from_vl_payload(parsed: dict[str, object]) -> AiAnalysis:
         tags=_compact_unknowns([sub_category, pattern, sleeve_length, pant_length, collar_type, style]),
         confidence=float(parsed.get("confidence", 0.7)),
         raw=parsed,
+        analysis_source="remote",
+        provider=provider,
+        model_version=model_version,
     )
 
 

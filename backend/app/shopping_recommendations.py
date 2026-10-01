@@ -9,14 +9,12 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.ai import AiService
 from app.commerce import CommerceProduct
 from app.config import Settings
+from app.legacy_tasks import compatibility_key, wait_for_tasks, require_completed
+from app.task_service import create_task
 from app.models import Garment, PurchaseCandidate, ShoppingRecommendationItem, ShoppingRecommendationRun, User
-from app.preferences import preference_context
-from app.purchase_analysis import analyze_purchase, explain_purchase
 from app.rate_limit import RateLimitResult, check_rate_limit
-from app.storage import StorageService
 from app.taobao_client import TaobaoClientError, get_taobao_client
 from app.wardrobe_report import build_wardrobe_report
 
@@ -93,10 +91,10 @@ async def create_recommendation_run(
     items = [_item_from_product(run, current_user, product) for product in products[:9]]
     db.add_all(items)
     db.flush()
-    for item in items[:3]:
-        await analyze_recommendation_item(db, current_user, settings, item, consume_limit=False)
     run.status = "ready"
     db.commit()
+    for item in items[:3]:
+        await analyze_recommendation_item(db, current_user, settings, item, consume_limit=False, wait=False)
     return _load_run(db, run.id)
 
 
@@ -106,6 +104,8 @@ async def analyze_recommendation_item(
     settings: Settings,
     item: ShoppingRecommendationItem,
     consume_limit: bool = True,
+    *, idempotency_key: str | None = None,
+    wait: bool = True,
 ) -> ShoppingRecommendationItem:
     if item.user_id != current_user.id:
         raise LookupError("shopping_item_not_found")
@@ -114,65 +114,13 @@ async def analyze_recommendation_item(
     reused = _reuse_existing_analysis(db, current_user, item)
     if reused is not None:
         return reused
-    if consume_limit:
-        limit = check_rate_limit(db, scope="shopping_item_analysis", key=current_user.id, limit=5, window_seconds=60)
-        if not limit.allowed:
-            db.rollback()
-            raise RecommendationRateLimited("analysis_rate_limited", limit.reset_at)
-
-    try:
-        item.analysis_status = "analyzing"
-        db.flush()
-        image_bytes, content_type = _product_image_payload(settings, item)
-        suffix = _suffix_for_image(content_type, item.image_url)
-        stored = StorageService(settings).save_bytes(image_bytes, suffix=suffix, prefix="purchase")
-        analysis = await AiService(settings).analyze_garment(
-            filename=_analysis_filename(item),
-            content_type=content_type,
-            image_bytes=image_bytes,
-        )
-        ready_garments = _ready_garments(db, current_user)
-        decision = analyze_purchase(analysis, ready_garments, preference_context(db, current_user.id))
-        reason_summary = await explain_purchase(settings, decision, analysis)
-        candidate = PurchaseCandidate(
-            user_id=current_user.id,
-            product_url=item.product_url,
-            source_image_url=item.image_url,
-            image_url=stored.url,
-            image_key=stored.key,
-            thumbnail_url=stored.url,
-            title=item.title,
-            domain=urlparse(item.product_url).netloc.lower() or item.platform,
-            category=analysis.category,
-            colors=analysis.colors,
-            style=analysis.style,
-            material=analysis.material,
-            season=analysis.season,
-            fit=analysis.fit,
-            tags=analysis.tags,
-            ai_result=analysis.raw,
-            ai_confidence=analysis.confidence,
-            similar_items=[similar.__dict__ for similar in decision.similar_items],
-            recommendation=decision.recommendation,
-            score=decision.score,
-            reason_summary=reason_summary,
-            analysis=decision.analysis,
-            status="ready",
-        )
-        db.add(candidate)
-        db.flush()
-        item.purchase_candidate_id = candidate.id
-        item.recommendation = decision.recommendation
-        item.score = decision.score
-        item.reason_summary = reason_summary
-        item.analysis_status = "analyzed"
-    except Exception:
-        item.analysis_status = "failed"
-        item.purchase_candidate_id = None
-        item.recommendation = None
-        item.score = None
-        item.reason_summary = ""
-    db.commit()
+    parameters = {"item_id": item.id}
+    key = compatibility_key(current_user.id, "recommendation_item", parameters, idempotency_key, db=db)
+    task = create_task(db, current_user, "recommendation_item", parameters, key,
+                       input_refs={"recommendation_item_id": item.id}, queue_limit=settings.task_user_queue_limit)
+    if wait:
+        await wait_for_tasks(db, [task])
+        require_completed([task])
     db.refresh(item)
     return item
 
@@ -185,7 +133,12 @@ def get_owned_recommendation_item(db: Session, current_user: User, item_id: str)
 
 
 def _auto_gap_keywords(garments: list[Garment]) -> list[str]:
-    ready = [garment for garment in garments if garment.status == "ready"]
+    ready = [
+        garment for garment in garments
+        if garment.status == "ready"
+        and garment.review_status == "confirmed"
+        and garment.user_confirmed_at is not None
+    ]
     counts = {category: 0 for category in READY_CATEGORIES}
     colors: set[str] = set()
     seasons: set[str] = set()
@@ -243,7 +196,12 @@ def _recent_cached_run(db: Session, current_user: User, target: str) -> Shopping
 def _ready_garments(db: Session, current_user: User) -> list[Garment]:
     return list(
         db.execute(
-            select(Garment).where(Garment.user_id == current_user.id, Garment.status == "ready")
+            select(Garment).where(
+                Garment.user_id == current_user.id,
+                Garment.status == "ready",
+                Garment.review_status == "confirmed",
+                Garment.user_confirmed_at.is_not(None),
+            )
         ).scalars()
     )
 
@@ -318,7 +276,12 @@ def _load_run(db: Session, run_id: str) -> ShoppingRecommendationRun:
 def _attach_wardrobe_gap_context(db: Session, run: ShoppingRecommendationRun) -> None:
     ready_garments = list(
         db.execute(
-            select(Garment).where(Garment.user_id == run.user_id, Garment.status == "ready")
+            select(Garment).where(
+                Garment.user_id == run.user_id,
+                Garment.status == "ready",
+                Garment.review_status == "confirmed",
+                Garment.user_confirmed_at.is_not(None),
+            )
         ).scalars()
     )
     report = build_wardrobe_report(ready_garments)
@@ -353,13 +316,31 @@ def _rate_limit_payload(limit: RateLimitResult) -> dict[str, object]:
 
 def _product_image_payload(settings: Settings, item: ShoppingRecommendationItem) -> tuple[bytes, str]:
     if settings.shopping_recommendation_demo_mode:
-        return f"demo image for {item.title}".encode("utf-8"), "image/jpeg"
+        from io import BytesIO
+
+        from PIL import Image
+
+        output = BytesIO()
+        Image.new("RGB", (32, 32), (245, 238, 240)).save(output, format="JPEG")
+        return output.getvalue(), "image/jpeg"
     raise TaobaoClientError("image_download_failed")
 
 
 def _analysis_filename(item: ShoppingRecommendationItem) -> str:
     words = re.sub(r"[^a-zA-Z0-9]+", "-", item.title.lower()).strip("-")
     return f"{words or item.platform_item_id}.jpg"
+
+
+def _decimal_price(value: str | None):
+    from decimal import Decimal, InvalidOperation
+
+    if not value:
+        return None
+    try:
+        amount = Decimal(value.replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return amount if amount.is_finite() and amount >= 0 else None
 
 
 def _suffix_for_image(content_type: str, source_image_url: str) -> str:

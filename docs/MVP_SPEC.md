@@ -1,57 +1,43 @@
-# AiWardrobe MVP Product and UI/UX Spec
+# AiWardrobe MVP 产品规范
 
-## Goal
+## 目标
 
-AiWardrobe is an AI buy-before-you-buy wardrobe web app. Users register and log in, analyze a product URL or product image before purchase, get a structured buy/consider/skip recommendation, and improve those recommendations by adding wardrobe items and lightweight style preferences.
+AiWardrobe 是购买前的 AI 衣橱决策助手。用户分析商品链接或图片，将候选与已确认衣橱、偏好和历史决定对照，再记录是否考虑购买或确认已拥有。衣物管理、搭配、穿着记录和衣橱报告为决策提供上下文。
 
-## MVP Scope
+## MVP 范围
 
-- Email/password registration, login, and JWT session handling.
-- Cloud wardrobe with garment photos, editable metadata, and reportable wardrobe coverage.
-- Single and batch upload API support, with frontend preview/progress and client-side image compression.
-- AI garment analysis for category, colors, style, material, season, fit, confidence, and tag suggestions.
-- Manual correction with user edits taking priority over AI results.
-- Outfit generation for work, date, sport, formal, and casual occasions, including optional target garment selection.
-- Outfit explanation, history, favorite/fixed state, delete, and local useful/not-useful feedback.
-- Purchase analysis from a generic product URL or product image, with product image extraction, AI garment tagging, wardrobe comparison, structured scoring, duplicate risk, idle risk, outfit potential, scene match, suggested price, next actions, manual product image fallback, and save-to-wardrobe.
-- Wardrobe report with totals, category/color/style distributions, scene coverage, duplicate risks, low-use items, gaps, avoid categories, and suggested categories.
-- Wardrobe gaps for Taobao/Tmall through demo data or configured application-level Taobao credentials, with gap explanations, avoid guidance, recommendation groups, cached candidate runs, item analysis, rate limits, and save-to-wardrobe through purchase candidates.
-- Lightweight user preferences covering primary goal, scenes, styles, avoid types, and budget range.
+- 邮箱/密码注册登录和 Bearer JWT 会话。
+- 商品 URL/图片分析，以持久后台任务执行，可轮询、刷新恢复、取消及安全重试；不确定的远端提交不会自动重提。
+- 购买候选历史、结构化证据与决策、修正、重新分析、确认拥有并关联到衣橱。
+- 私有衣物资产、单件/多件识别、编辑 AI 标签和明确确认后加入可信衣橱。
+- 衣橱分类和服务端搜索/游标分页；购买决策与搭配历史、收藏、反馈及穿着记录可跨会话查看或撤销。
+- 可解释的衣橱报告、衣橱缺口和商品推荐、基础结构化偏好。
+- 通过图像/视觉 provider 识别衣物并记录来源；只有显式启用 Demo 时返回 Demo 结果，真实调用失败保持为明确错误。
 
-Out of scope for v1: payments, social/community, automatic purchase, platform-specific shopping scraping outside official/configured APIs, price tracking, virtual try-on, outfit calendar, shared wardrobes, WeChat mini-program implementation, complex brand recognition, and background removal.
+## 架构
 
-## Architecture
+- 后端：FastAPI、SQLAlchemy、Pydantic；生产 PostgreSQL，开发与测试允许 SQLite。
+- 前端：React、Vite、TypeScript 和手写 CSS。
+- 图片：本地私有存储或非公开 S3 兼容对象存储。短期资产 URL 需所有者授权，不公开挂载私人目录。
+- 数据库：生产部署前显式运行版本化 schema migration；独立 worker 处理持久任务并与 API 共享数据库、存储和 provider 配置。
+- API：保留同步旧路由兼容；新分析走 `/v2/tasks`，衣物/搭配/候选/反馈/穿着支持带用户与筛选绑定的游标接口。
+- 购买规则使用证据覆盖度、用户约束和真实上下文。资料不足时显示信息不足，不编造精确分数或建议价；每次分析保留版本化快照。
 
-- Backend: FastAPI, SQLAlchemy, Postgres in production, SQLite-compatible local tests.
-- Frontend: React + Vite + TypeScript, mobile-first responsive web.
-- Storage: S3-compatible object storage, with local storage fallback for development and tests.
-- AI: OpenAI-compatible multimodal API, with demo fallback when no API key is configured.
-- Purchase candidates: URL-derived or manually uploaded product images are stored separately as `PurchaseCandidate` records until the user saves them as ready `Garment` records. `PurchaseCandidateResponse.analysis` contains structured decision fields and backfills legacy rows.
-- Shopping recommendations: `ShoppingRecommendationRun` and `ShoppingRecommendationItem` records track target, keywords, cache reuse, analysis status, wardrobe gaps, avoid categories, recommendation groups, linked purchase candidates, and per-item failures.
-- Preferences: `UserPreference` stores one lightweight preference row per user and is injected into purchase analysis and outfit prompts when available.
+## UI 方向
 
-## UI/UX Direction
+- 明亮、简洁的衣橱管理界面，玫瑰色作为主色，响应式手机底栏和桌面侧栏。
+- 使用 Lucide 图标，不用 emoji 作为界面图标。表单有可见标签，导航和任务状态支持键盘与读屏语义。
+- 上传任务显示阶段、错误和安全操作；筛选无结果、资料不足、失败及远端提交未知状态必须清楚区分。
 
-- Flat, light SaaS interface with rose/pink primary accents, neutral surfaces, and restrained gold CTA use.
-- Plus Jakarta Sans typography.
-- Lucide icons only; no emoji UI icons.
-- Mobile bottom navigation for home, wardrobe, outfit, report, and history.
-- Desktop sidebar navigation.
-- All form controls have labels, visible focus states, and keyboard-accessible actions.
-- Cards keep 8px or smaller radius, clear borders, and no layout-shifting hover effects.
+## 不在首版范围
 
-## Acceptance
+支付、自动下单、社区、虚拟试衣、共享衣橱、微信小程序、价格追踪、复杂日历和非官方购物平台抓取。
 
-- A new user can register with email/password and reach the wardrobe.
-- An existing user can log in with email/password.
-- A user can upload garment photos, receive AI attributes, and save manual corrections.
-- A user can filter wardrobe items by category, tag, color, or season.
-- A user with enough ready garments can generate an outfit, save it as favorite, and view it in history.
-- A user can generate an outfit around a specified owned garment.
-- A user can submit a product URL or product image, receive a recommend/consider/skip purchase analysis, see total score, score breakdown, risks, similar wardrobe items, outfit ideas, price guidance, and next actions, then save the candidate into the wardrobe.
-- If URL image extraction fails, the UI offers manual product image upload and continues analysis.
-- A user can view wardrobe report totals, distributions, duplicate risks, low-use items, gaps, and avoid categories.
-- A user can open wardrobe gaps, choose a target, see what is missing or overrepresented before product cards, fetch Taobao/Tmall candidates, analyze pending items, see recommendation scores and similar wardrobe items, and save useful analyzed items into the wardrobe.
-- A user is prompted for lightweight preferences after enough wardrobe context or a completed purchase analysis, and can save or skip the prompt.
-- Recommendation refreshes, Taobao searches, and item analysis are rate-limited with readable UI feedback.
-- The UI works at mobile and desktop widths without horizontal overflow.
+## 验收要点
+
+- 用户可注册登录、提交商品链接/图片并恢复任务，查看真实结构化候选，明确做决定或确认已拥有。
+- AI 衣物标签保持待确认，用户可修正、确认或删除；不能把 provider 失败伪装成 Demo 成功。
+- 候选、衣物和搭配资源按用户隔离；关键列表使用服务端游标，图片从私有资产路由读取。
+- 反馈和穿着事件跨设备保存、支持幂等撤销；观察数据不够时报告不声称长期闲置。
+- 重复同一幂等请求不会创建重复资源，版本冲突有明确错误；远端提交未知时阻止盲目重试。
+- 当前实现范围、测试结果和未验证环境见[实施计划](superpowers/plans/2026-10-01-aiwardrobe-optimization.md)；API 使用见[v2 API guide](api-v2.md)。

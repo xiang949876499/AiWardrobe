@@ -737,6 +737,11 @@ button:disabled {
   gap: 10px;
 }
 
+.loadMoreButton {
+  display: flex;
+  margin: 16px auto 0;
+}
+
 .uploadItem,
 .historyItem,
 .controlPanel,
@@ -1087,6 +1092,110 @@ button:disabled {
   *::after {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
+  }
+}
+
+.guestPreview,
+.candidateSnapshots {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-50);
+}
+
+.feedbackEventRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border, #eadde2);
+}
+
+.feedbackEventRow span {
+  color: var(--muted, #6b5d63);
+  font-size: 0.9rem;
+}
+
+.guestPreview h2,
+.candidateSnapshots h2 {
+  margin-top: 0;
+  font-size: 1rem;
+}
+
+.guestPreview input,
+.candidateHistoryBody select {
+  width: 100%;
+  min-height: 2.75rem;
+}
+
+.candidateHistoryItem {
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.candidateHistoryBody {
+  min-width: 0;
+  flex: 1;
+}
+
+.purchaseHistoryImage,
+.candidateTaskResult img {
+  width: 7rem;
+  height: 7rem;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--color-neutral-100);
+}
+
+.candidateTaskResult {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.candidateTaskResult p {
+  margin: 0.35rem 0;
+}
+
+.checkGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+}
+
+.checkGroup legend {
+  padding: 0 0.25rem;
+}
+
+.checkGroup label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.resumablePurchasePanel input[type="file"] {
+  max-width: 100%;
+}
+
+@media (max-width: 600px) {
+  .candidateHistoryItem,
+  .candidateTaskResult {
+    flex-direction: column;
+  }
+
+  .purchaseHistoryImage,
+  .candidateTaskResult img {
+    width: 100%;
+    height: auto;
+    max-height: 20rem;
+    aspect-ratio: 1;
   }
 }
 

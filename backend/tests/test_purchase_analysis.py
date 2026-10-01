@@ -1,3 +1,4 @@
+import pytest
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -5,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.ai import AiAnalysis
 from app.models import Garment
 from app.schemas import PurchaseCandidateResponse
-from tests.conftest import login
+from tests.conftest import jpeg_bytes, login
 
 
 def _purchase_candidate_payload(analysis: dict[str, object], **overrides: object) -> dict[str, object]:
@@ -162,11 +163,17 @@ def test_similarity_scoring_identifies_near_duplicates() -> None:
 
 def test_purchase_analysis_creates_candidate_without_creating_garment(monkeypatch, client: TestClient) -> None:
     token = login(client)
-    client.post(
+    existing = client.post(
         "/garments/upload",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("black-shirt.jpg", b"existing image", "image/jpeg")},
+        files={"file": ("black-shirt.jpg", jpeg_bytes(), "image/jpeg")},
+    ).json()
+    confirmed = client.patch(
+        f"/garments/{existing['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"tags": existing["tags"]},
     )
+    assert confirmed.status_code == 200
 
     async def fake_extract_product(url: str):
         from app.product_extraction import ExtractedProductImage
@@ -174,14 +181,14 @@ def test_purchase_analysis_creates_candidate_without_creating_garment(monkeypatc
         return ExtractedProductImage(
             product_url=url,
             source_image_url="https://shop.example.com/black-shirt.jpg",
-            image_bytes=b"candidate image",
+            image_bytes=jpeg_bytes(),
             content_type="image/jpeg",
             title="Black Shirt",
             domain="shop.example.com",
             price="129.00",
         )
 
-    import app.routers.purchase as purchase_router
+    import app.task_worker as purchase_router
 
     monkeypatch.setattr(purchase_router, "extract_product_image", fake_extract_product)
 
@@ -191,22 +198,29 @@ def test_purchase_analysis_creates_candidate_without_creating_garment(monkeypatc
         json={"url": "https://shop.example.com/products/black-shirt"},
     )
 
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "ready"
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "evidence_insufficient"
+    detail = client.get(f"/v2/purchase/candidates/{response.json()['detail']['candidate_id']}",
+                        headers={"Authorization": f"Bearer {token}"})
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["analysis_status"] == "ready"
     assert body["product_url"] == "https://shop.example.com/products/black-shirt"
-    assert body["source_image_url"] == "https://shop.example.com/black-shirt.jpg"
-    assert body["image_url"].startswith("/static/uploads/purchase/")
+    assert body["image_url"].startswith("/v2/assets/")
     assert body["recommendation"] in ["recommend", "consider", "skip"]
     assert body["similar_items"]
     analysis = body["analysis"]
     assert analysis["conclusion"] in ["recommend", "consider", "skip"]
     assert analysis["score"] == body["score"]
-    assert analysis["product_price"] == {"current": "129.00", "currency": "CNY", "source": "product_page"}
+    assert body["actual_price"] == "129.00"
+    assert body["currency"] == "CNY"
     assert analysis["dimensions"]["duplicate_risk"] >= 0
-    assert analysis["dimensions"]["outfit_potential"] >= 0
-    assert analysis["idle_risk_detail"]["level"] in ["低", "中", "高"]
-    assert analysis["suggested_price"]["ideal"] > 0
+    # One confirmed top establishes duplicate comparison, not a complete outfit.
+    assert analysis["dimensions"]["outfit_potential"] is None
+    assert analysis["idle_risk_detail"] is None
+    assert analysis["outfit_ideas"] == []
+    assert body["score"] is None
+    assert analysis["suggested_price"] is None
     assert "analyze_another" in analysis["next_actions"]
 
     listed = client.get("/garments", headers={"Authorization": f"Bearer {token}"})
@@ -230,11 +244,98 @@ def test_purchase_analysis_exposes_score_breakdown() -> None:
 
     decision = analyze_purchase(candidate, [])
 
-    assert decision.analysis["dimensions"]["gap_fill"] == decision.analysis["wardrobe_gap_score"]
-    assert decision.analysis["score_breakdown"]["wardrobe_gap"] >= 0
+    assert decision.score is None
+    assert decision.recommendation == "consider"
+    assert decision.analysis["dimensions"]["gap_fill"] is None
+    assert decision.analysis["score_breakdown"] is None
+    assert decision.analysis["suggested_price"] is None
     assert decision.analysis["match_scenes"]
-    assert decision.analysis["pros"]
-    assert decision.analysis["next_actions"] == ["save", "share", "analyze_another", "upload_wardrobe"]
+    assert decision.analysis["cons"]
+    assert decision.analysis["next_actions"] == ["upload_wardrobe", "analyze_another"]
+
+
+def test_purchase_hard_constraints_apply_without_wardrobe_and_unknown_price_stays_null() -> None:
+    from app.purchase_analysis import analyze_purchase
+
+    candidate = AiAnalysis(
+        category="top",
+        colors=["black"],
+        style="casual",
+        material="cotton",
+        season=["summer"],
+        fit="regular",
+        tags=["basic"],
+        confidence=0.9,
+        raw={},
+    )
+
+    avoided = analyze_purchase(candidate, [], {"avoid_categories": ["top"]})
+    over_budget = analyze_purchase(
+        candidate,
+        [],
+        {"budget_max": 100},
+        actual_price="129.00",
+        currency="CNY",
+    )
+    unknown_price = analyze_purchase(candidate, [], {"budget_max": 100})
+
+    assert avoided.recommendation == "skip"
+    assert avoided.score is None
+    assert "category_avoided" in avoided.evidence["hard_constraints"]
+    assert over_budget.recommendation == "skip"
+    assert "over_budget" in over_budget.evidence["hard_constraints"]
+    assert unknown_price.recommendation == "consider"
+    assert unknown_price.score is None
+    assert unknown_price.analysis["suggested_price"] is None
+    assert unknown_price.coverage["dimensions"]["budget_match"] is None
+
+
+def test_purchase_analysis_reports_provider_failure_without_saving_candidate(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    from app.ai import AiAnalysisError
+    from app.database import get_session_factory
+    from app.models import PurchaseCandidate
+
+    token = login(client)
+
+    async def fake_extract_product(url: str):
+        from app.product_extraction import ExtractedProductImage
+
+        return ExtractedProductImage(
+            product_url=url,
+            source_image_url="https://shop.example.com/failure.jpg",
+            image_bytes=jpeg_bytes(),
+            content_type="image/jpeg",
+            title="Failure Candidate",
+            domain="shop.example.com",
+        )
+
+    class FailedAiService:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def analyze_garment(self, **kwargs):
+            raise AiAnalysisError("provider_timeout", retryable=True)
+
+    import app.task_worker as purchase_router
+
+    monkeypatch.setattr(purchase_router, "extract_product_image", fake_extract_product)
+    monkeypatch.setattr(purchase_router, "AiService", FailedAiService)
+    response = client.post(
+        "/purchase/analyze",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://shop.example.com/products/failure"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "analysis_pending"
+    task = client.get(f"/v2/tasks/{response.json()['detail']['task_id']}", headers={"Authorization": f"Bearer {token}"}).json()
+    assert task["error"]["code"] == "provider_timeout"
+    assert task["submission_status"] == "unknown"
+    with get_session_factory()() as db:
+        assert db.query(PurchaseCandidate).count() == 0
 
 
 def test_purchase_candidate_response_backfills_legacy_analysis_shape() -> None:
@@ -286,7 +387,7 @@ def test_purchase_candidate_response_backfills_legacy_analysis_shape() -> None:
     assert analysis.wardrobe_gap_score == 70
     assert analysis.pairing_score == 55
     assert analysis.decision_factors == ["legacy factor"]
-    assert analysis.suggested_price.ideal > 0
+    assert analysis.suggested_price is None
     assert "analyze_another" in analysis.next_actions
 
 
@@ -468,6 +569,17 @@ def test_purchase_candidate_response_prefers_nested_scores_over_zero_top_level_p
 
 def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: TestClient) -> None:
     token = login(client)
+    existing = client.post(
+        "/garments/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("owned-shirt.jpg", jpeg_bytes(), "image/jpeg")},
+    ).json()
+    confirmed = client.patch(
+        f"/garments/{existing['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"tags": existing["tags"]},
+    )
+    assert confirmed.status_code == 200
 
     async def fake_extract_product(url: str):
         from app.product_extraction import ExtractedProductImage
@@ -475,20 +587,23 @@ def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: Test
         return ExtractedProductImage(
             product_url=url,
             source_image_url="https://shop.example.com/blue-jeans.jpg",
-            image_bytes=b"candidate image",
+            image_bytes=jpeg_bytes(),
             content_type="image/jpeg",
             title="Blue Jeans",
             domain="shop.example.com",
         )
 
-    import app.routers.purchase as purchase_router
+    import app.task_worker as purchase_router
 
     monkeypatch.setattr(purchase_router, "extract_product_image", fake_extract_product)
-    candidate = client.post(
+    insufficient = client.post(
         "/purchase/analyze",
         headers={"Authorization": f"Bearer {token}"},
         json={"url": "https://shop.example.com/products/blue-jeans"},
-    ).json()
+    )
+    assert insufficient.status_code == 409
+    candidate = client.get(f"/v2/purchase/candidates/{insufficient.json()['detail']['candidate_id']}",
+                           headers={"Authorization": f"Bearer {token}"}).json()
 
     saved = client.post(
         f"/purchase/candidates/{candidate['id']}/save",
@@ -498,8 +613,12 @@ def test_save_purchase_candidate_creates_ready_garment(monkeypatch, client: Test
     assert saved.status_code == 201
     garment = saved.json()
     assert garment["status"] == "ready"
-    assert garment["image_url"] == candidate["image_url"]
-    assert garment["image_key"] == candidate["image_key"]
+    assert garment["image_url"].startswith("/v2/assets/")
+    assert garment["image_key"] == ""
+    assert garment["image_url"].split("/content")[0] == candidate["image_url"].split("/content")[0]
 
     listed = client.get("/garments", headers={"Authorization": f"Bearer {token}"})
     assert listed.json()["items"][0]["id"] == garment["id"]
+
+
+pytestmark = pytest.mark.usefixtures("legacy_worker")

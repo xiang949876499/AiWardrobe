@@ -1,5 +1,7 @@
 # Purchase Analysis Design
 
+> Historical design (2026-06-16). Current task, ownership, nullable response and private-image contracts are in the [v2 API guide](../../api-v2.md) and [optimization Spec](2026-10-01-aiwardrobe-optimization-spec.md); the synchronous/public-image examples below are historical.
+
 ## Goal
 
 Add a purchase analysis feature to AiWardrobe. The user enters a product URL, the system extracts the clothing item from the product page, compares it with the user's current wardrobe, and returns a clear purchase recommendation.

@@ -15,11 +15,17 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 60 * 24 * 7
     email_code_minutes: int = 10
+    task_user_running_limit: int = 2
+    task_user_queue_limit: int = 20
+    provider_hourly_submission_limit: int = 20
+    provider_concurrency_limit: int = 4
+    task_capacity_retry_delay_seconds: int = 30
 
     frontend_origin: str = "http://localhost:5173"
 
     storage_driver: str = "local"
     local_upload_dir: str = "uploads"
+    local_private_asset_dir: str = "private-assets"
     s3_endpoint_url: str | None = None
     s3_bucket: str = "aiwardrobe"
     s3_region: str = "auto"
@@ -76,9 +82,12 @@ class Settings(BaseSettings):
     runninghub_tryon_workflow_file: str = "workflows/ai_tryon.json"
 
     @model_validator(mode="after")
-    def reject_sqlite_in_production(self) -> "Settings":
+    def validate_production_security(self) -> "Settings":
         if self.database_url.startswith("sqlite") and self.environment == "production" and not self.testing:
             raise ValueError("SQLite is only allowed for development or tests; set DATABASE_URL to Postgres in production")
+        if self.environment == "production" and not self.testing:
+            if self.jwt_secret.strip().lower() in {"", "change-me"} or len(self.jwt_secret.encode("utf-8")) < 32:
+                raise ValueError("JWT_SECRET must be configured with at least 32 bytes in production")
         return self
 
 

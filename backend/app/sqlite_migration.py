@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base
+from app.migrations import upgrade_database
 from app.models import Garment, Outfit, UploadSession, User, WeatherCache
 
 
@@ -30,7 +31,7 @@ def migrate_sqlite_to_database(source_url: str, target_url: str | None = None) -
     target_url = target_url or get_settings().database_url
     source_engine = create_engine(source_url, connect_args={"check_same_thread": False})
     target_engine = create_engine(target_url)
-    Base.metadata.create_all(target_engine)
+    upgrade_database(target_engine)
 
     with Session(source_engine) as source, Session(target_engine) as target:
         user_id_map: dict[str, str] = {}

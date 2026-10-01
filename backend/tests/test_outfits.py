@@ -1,13 +1,14 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import login
+from tests.conftest import jpeg_bytes, login
 
 
 def _create_garment(client: TestClient, token: str, filename: str, category: str) -> str:
     created = client.post(
         "/garments/upload",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": (filename, b"fake image bytes", "image/jpeg")},
+        files={"file": (filename, jpeg_bytes(), "image/jpeg")},
     ).json()
     patched = client.patch(
         f"/garments/{created['id']}",
@@ -42,6 +43,29 @@ def test_generates_outfit_and_saves_history(client: TestClient) -> None:
     assert history.json()["items"][0]["id"] == outfit["id"]
 
 
+def test_generate_outfit_does_not_use_unconfirmed_ai_garments(client: TestClient) -> None:
+    token = login(client)
+    uploaded = client.post(
+        "/garments/batch-upload",
+        headers={"Authorization": f"Bearer {token}"},
+        files=[
+                ("files", ("white-shirt.jpg", jpeg_bytes(), "image/jpeg")),
+                ("files", ("blue-jeans.jpg", jpeg_bytes(), "image/jpeg")),
+                ("files", ("black-shoes.jpg", jpeg_bytes(), "image/jpeg")),
+        ],
+    )
+    assert uploaded.status_code == 201
+
+    response = client.post(
+        "/outfits/generate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"occasion": "casual"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "no_valid_combination"
+
+
 def test_generated_outfit_uses_database_image_urls_even_when_ai_hallucinates(monkeypatch, client: TestClient) -> None:
     token = login(client)
     top_id = _create_garment(client, token, "shirt.jpg", "top")
@@ -51,11 +75,12 @@ def test_generated_outfit_uses_database_image_urls_even_when_ai_hallucinates(mon
     async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None, preferences=None):
         return [
             {
-                "garment_id": top_id,
-                "category": "top",
+                "garment_id": garment.id,
+                "category": garment.category,
                 "image_url": "http://localhost:9100/aiwardrobe/missing.png",
-                "reason": "AI returned a stale URL",
             }
+            for garment in garments
+            if garment.category in {"top", "bottom", "shoes"}
         ], "AI 搭配"
 
     import app.routers.outfits as outfits_module
@@ -69,10 +94,10 @@ def test_generated_outfit_uses_database_image_urls_even_when_ai_hallucinates(mon
     )
 
     assert generated.status_code == 201
-    item = generated.json()["items"][0]
-    assert item["garment_id"] == top_id
-    assert item["image_url"] != "http://localhost:9100/aiwardrobe/missing.png"
-    assert item["image_url"].startswith("/static/uploads/garments/")
+    items = generated.json()["items"]
+    assert {item["category"] for item in items} == {"top", "bottom", "shoes"}
+    assert all(item["image_url"] != "http://localhost:9100/aiwardrobe/missing.png" for item in items)
+    assert all(item["image_url"].startswith("/v2/assets/") for item in items)
 
 
 def test_generated_outfit_includes_target_garment_even_when_ai_omits_it(monkeypatch, client: TestClient) -> None:
@@ -100,10 +125,8 @@ def test_generated_outfit_includes_target_garment_even_when_ai_omits_it(monkeypa
         json={"occasion": "work", "season": "spring", "temperature": 22, "garment_id": target_id},
     )
 
-    assert generated.status_code == 201
-    item_ids = [item["garment_id"] for item in generated.json()["items"]]
-    assert target_id in item_ids
-    assert item_ids[0] == target_id
+    assert generated.status_code == 409
+    assert generated.json()["detail"]["code"] == "no_valid_combination"
 
 
 def test_generating_outfit_derives_season_when_client_omits_it(monkeypatch, client: TestClient) -> None:
@@ -113,14 +136,15 @@ def test_generating_outfit_derives_season_when_client_omits_it(monkeypatch, clie
     _create_garment(client, token, "loafers.jpg", "shoes")
     seen: dict[str, str] = {}
 
-    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None):
+    async def fake_generate_outfit(self, garments, occasion, season, temperature, weather=None, preferences=None):
         seen["season"] = season
         return [
             {
-                "garment_id": garments[0].id,
-                "category": garments[0].category,
-                "reason": "ok",
+                "garment_id": garment.id,
+                "category": garment.category,
             }
+            for garment in garments
+            if garment.category in {"top", "bottom", "shoes"}
         ], "AI 搭配"
 
     import app.routers.outfits as outfits_module
@@ -148,8 +172,8 @@ def test_generating_outfit_requires_enough_ready_garments(client: TestClient) ->
         json={"occasion": "work", "season": "spring", "temperature": 22},
     )
 
-    assert generated.status_code == 400
-    assert generated.json()["detail"] == "Not enough ready garments to generate an outfit"
+    assert generated.status_code == 409
+    assert generated.json()["detail"]["code"] == "no_valid_combination"
 
 
 def test_favorites_outfit(client: TestClient) -> None:
@@ -205,3 +229,6 @@ def test_deletes_outfit_from_history_and_favorites(client: TestClient) -> None:
     favorites = client.get("/outfits/history?favorite=true", headers={"Authorization": f"Bearer {token}"})
     assert history.json()["items"] == []
     assert favorites.json()["items"] == []
+
+
+pytestmark = pytest.mark.usefixtures("legacy_worker")

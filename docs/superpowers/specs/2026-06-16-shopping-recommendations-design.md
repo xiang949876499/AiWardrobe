@@ -1,5 +1,7 @@
 # Shopping Recommendations Design
 
+> Historical design (2026-06-16). Current analysis creation uses durable tasks and bounded compatibility adapters; see the [v2 API guide](../../api-v2.md) and [optimization Spec](2026-10-01-aiwardrobe-optimization-spec.md).
+
 ## Goal
 
 Add a shopping recommendation page to AiWardrobe. The user clicks a recommendation entry, the system searches Taobao/Tmall products through the application's configured Taobao Open Platform/Taobao affiliate credentials, compares candidates with the user's current wardrobe, and helps the user save useful items into the wardrobe.

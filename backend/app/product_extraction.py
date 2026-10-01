@@ -6,6 +6,10 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.image_inputs import ImageInputError, prepare_image
+from app.safe_http import SafeHTTPTransport
+from app.url_safety import UnsafeURL, validate_url_syntax
+
 
 class ProductExtractionError(Exception):
     def __init__(self, code: str, message: str) -> None:
@@ -30,6 +34,47 @@ class ExtractedProductImage:
     title: str
     domain: str
     price: str | None = None
+
+
+@dataclass(frozen=True)
+class DownloadedPublicImage:
+    image_url: str
+    image_bytes: bytes
+    content_type: str
+
+
+async def download_public_image(url: str) -> DownloadedPublicImage:
+    """Fetch one public image using the same DNS-pinned SSRF protections as product URLs."""
+    try:
+        validate_url_syntax(url)
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=False,
+            trust_env=False,
+            transport=SafeHTTPTransport(),
+        ) as client:
+            image_url, image_bytes, content_type = await _fetch_limited(
+                client,
+                url,
+                accept="image/*",
+                max_bytes=10 * 1024 * 1024,
+                allowed_content_types={"image/jpeg", "image/png", "image/webp"},
+            )
+    except ProductExtractionError:
+        raise
+    except UnsafeURL as exc:
+        raise ProductExtractionError(exc.code, "Image URL is not a safe public web address") from exc
+    except httpx.HTTPError as exc:
+        raise ProductExtractionError("image_fetch_failed", "Image could not be fetched") from exc
+    try:
+        prepared = prepare_image(image_bytes, content_type)
+    except ImageInputError as exc:
+        raise ProductExtractionError(exc.code, "Selected product image is invalid or unsupported") from exc
+    return DownloadedPublicImage(
+        image_url=image_url,
+        image_bytes=prepared.data,
+        content_type=prepared.content_type,
+    )
 
 
 @dataclass(frozen=True)
@@ -142,41 +187,100 @@ def select_product_metadata(html: str, product_url: str) -> ProductMetadata:
 
 
 async def extract_product_image(url: str) -> ExtractedProductImage:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ProductExtractionError("invalid_url", "Product URL must be an absolute http(s) URL")
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml",
-    }
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
-            page = await client.get(url)
-            page.raise_for_status()
-            metadata = select_product_metadata(page.text, str(page.url))
-            image = await client.get(metadata.image_url, headers={"Accept": "image/*"})
-            image.raise_for_status()
+        validate_url_syntax(url)
+    except UnsafeURL as exc:
+        raise ProductExtractionError(exc.code, "Product URL is not a safe public web address") from exc
+
+    try:
+        transport = SafeHTTPTransport()
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            )
+        }
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=False,
+            trust_env=False,
+            headers=headers,
+            transport=transport,
+        ) as client:
+            page_url, page_bytes, page_content_type = await _fetch_limited(
+                client,
+                url,
+                accept="text/html,application/xhtml+xml",
+                max_bytes=2 * 1024 * 1024,
+                allowed_content_types={"text/html", "application/xhtml+xml"},
+            )
+            if page_content_type not in {"text/html", "application/xhtml+xml"}:
+                raise ProductExtractionError("invalid_product_page", "Product URL did not return an HTML page")
+            page_text = page_bytes.decode("utf-8", errors="replace")
+            metadata = select_product_metadata(page_text, page_url)
+            image_url, image_bytes, content_type = await _fetch_limited(
+                client,
+                metadata.image_url,
+                accept="image/*",
+                max_bytes=10 * 1024 * 1024,
+                allowed_content_types={"image/jpeg", "image/png", "image/webp"},
+            )
     except ProductExtractionError:
         raise
+    except UnsafeURL as exc:
+        raise ProductExtractionError(exc.code, "Product page redirected to an unsafe destination") from exc
     except httpx.HTTPError as exc:
         raise ProductExtractionError("page_fetch_failed", "Product page could not be fetched") from exc
-
-    content_type = image.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
-    if not content_type.startswith("image/"):
-        raise ProductExtractionError("image_download_failed", "Selected product image is not an image")
+    try:
+        prepared = prepare_image(image_bytes, content_type)
+    except ImageInputError as exc:
+        raise ProductExtractionError(exc.code, "Selected product image is invalid or unsupported") from exc
     return ExtractedProductImage(
         product_url=url,
-        source_image_url=metadata.image_url,
-        image_bytes=image.content,
-        content_type=content_type,
+        source_image_url=image_url,
+        image_bytes=prepared.data,
+        content_type=prepared.content_type,
         title=metadata.title,
         domain=metadata.domain,
         price=metadata.price,
     )
+
+
+async def _fetch_limited(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    accept: str,
+    max_bytes: int,
+    allowed_content_types: set[str],
+) -> tuple[str, bytes, str]:
+    current_url = url
+    for redirects in range(4):
+        try:
+            validate_url_syntax(current_url)
+        except UnsafeURL as exc:
+            raise ProductExtractionError(exc.code, "URL is not a safe public web address") from exc
+        async with client.stream("GET", current_url, headers={"Accept": accept}) as response:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not location or redirects == 3:
+                    raise ProductExtractionError("too_many_redirects", "Product URL redirected too many times")
+                current_url = urljoin(current_url, location)
+                continue
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type not in allowed_content_types:
+                raise ProductExtractionError("unsupported_remote_content_type", "Downloaded content has an unsupported type")
+            content_length = response.headers.get("content-length")
+            if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+                raise ProductExtractionError("remote_content_too_large", "Downloaded content exceeded its size limit")
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise ProductExtractionError("remote_content_too_large", "Downloaded content exceeded its size limit")
+            return str(response.url), bytes(body), content_type
+    raise ProductExtractionError("too_many_redirects", "Product URL redirected too many times")
 
 
 def _is_blocked_or_homepage(title: str, parsed_url, html: str) -> bool:

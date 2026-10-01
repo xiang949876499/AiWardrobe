@@ -28,6 +28,26 @@ class ComfyUIClient:
         self.settings = settings
         self.base_url = settings.comfyui_base_url.rstrip("/")
 
+    async def submit_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes) -> str:
+        async with httpx.AsyncClient(timeout=self.settings.comfyui_poll_timeout_seconds) as client:
+            uploaded = await self._upload_image(client, filename, content_type, image_bytes)
+            return await self._queue_prompt(client, self._garment_prompt(uploaded["name"]))
+
+    async def collect_garment_recognition(self, prompt_id: str) -> list[ComfyUIOutput]:
+        from app.provider_recovery import ProviderPending, ProviderTerminalFailure
+        async with httpx.AsyncClient(timeout=self.settings.comfyui_poll_timeout_seconds) as client:
+            response = await client.get(f"{self.base_url}/history/{prompt_id}")
+            response.raise_for_status()
+            entry = response.json().get(prompt_id) or {}
+            status = entry.get("status") or {}
+            if status.get("status_str") == "error":
+                raise ProviderTerminalFailure("provider_confirmed_failure")
+            recorded_prompt = entry.get("prompt") or []
+            prompt = recorded_prompt[2] if isinstance(recorded_prompt, list) and len(recorded_prompt) > 2 and isinstance(recorded_prompt[2], dict) else {}
+            if not _has_expected_outputs(entry, _save_image_node_ids(prompt)):
+                raise ProviderPending("provider_pending")
+            return await self._download_outputs(client, prompt, entry)
+
     async def run_garment_recognition(self, filename: str, content_type: str, image_bytes: bytes) -> list[ComfyUIOutput]:
         async with httpx.AsyncClient(timeout=self.settings.comfyui_poll_timeout_seconds) as client:
             uploaded = await self._upload_image(client, filename, content_type, image_bytes)

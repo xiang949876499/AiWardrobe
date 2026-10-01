@@ -1,8 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "./App";
+import type { Garment, AnalysisTask } from "./types";
+import purchaseContracts from "./test/purchase-contract-fixtures.json";
 
 const garment = {
   id: "garment-1",
@@ -22,6 +24,7 @@ const garment = {
   ai_confidence: 0.82,
   status: "ready",
   review_status: "confirmed",
+  user_confirmed_at: "2026-05-21T00:00:00Z",
   created_at: "2026-05-21T00:00:00Z",
   updated_at: "2026-05-21T00:00:00Z"
 };
@@ -34,7 +37,8 @@ const pendingGarment = {
   image_key: "garments/crops/top.jpg",
   thumbnail_url: "/static/uploads/crops/top.jpg",
   status: "ready",
-  review_status: "confirmed",
+  review_status: "pending_review",
+  user_confirmed_at: null,
   crop_box: { x: 10, y: 20, width: 300, height: 400 }
 };
 
@@ -259,8 +263,75 @@ function mockFetchOnce(body: unknown, status = 200) {
   } as Response);
 }
 
+function mockDurablePurchaseApi(candidate: unknown = purchaseCandidate, failUrl = false, restored = false) {
+  const result = { ...purchaseCandidate, asset_id: "asset-1", analysis_source: "remote", actual_price: null, currency: null,
+    decision_status: "considering", analysis_status: "ready", ownership_state: "never_saved", owned_garment_id: null,
+    revision: 1, snapshot_revision: 1, stale: false, coverage: {}, evidence: {}, ...(candidate as object) };
+  const task: AnalysisTask = { ...taskRecord("purchase-task", "garment_single", "succeeded"), kind: "purchase_url", result_refs: [{ resource_type: "purchase_candidate", id: purchaseCandidate.id }] };
+  let currentTask = task;
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.startsWith("/v2/garments?")) return new Response(JSON.stringify({ items: [garment], has_more: false, next_cursor: null }));
+    if (path === "/v2/tasks?limit=50") return new Response(JSON.stringify({ items: restored ? [task] : [], has_more: false, next_cursor: null }));
+    if (path === "/v2/tasks/purchase-analysis") {
+      const image = init?.body instanceof FormData;
+      currentTask = failUrl && !image ? { ...task, status: "failed", error: { code: "product_image_not_found", retryable: false }, result_refs: [] } : { ...task, kind: image ? "purchase_image" : "purchase_url" };
+      return new Response(JSON.stringify(currentTask), { status: 202 });
+    }
+    if (path === "/v2/tasks/purchase-task") return new Response(JSON.stringify(currentTask));
+    if (path === `/v2/purchase/candidates/${purchaseCandidate.id}`) return new Response(JSON.stringify(result));
+    if (path.endsWith("/save")) return new Response(JSON.stringify({ garment_id: "saved-purchase", candidate_id: purchaseCandidate.id, ownership_state: "linked", revision: 2 }), { status: 201 });
+    if (path === "/v2/garments/saved-purchase") return new Response(JSON.stringify({ ...garment, id: "saved-purchase" }));
+    // Also exercise nullable rendering against the pre-fix direct path during RED.
+    if (path === "/purchase/analyze" || path === "/purchase/analyze-image") return new Response(JSON.stringify(result), { status: 201 });
+    return new Response(JSON.stringify({ detail: { code: "unexpected_test_request", path } }), { status: 500 });
+  });
+}
+
+function taskRecord(id: string, kind: "garment_single" | "garment_split", status: "queued" | "succeeded", resultIds: string[] = []): AnalysisTask {
+  return {
+    id,
+    kind,
+    status,
+    stage: status === "succeeded" ? "persisting" : "validating",
+    submission_status: status === "succeeded" ? "completed" : "not_submitted",
+    cancel_requested: false,
+    action_required: false,
+    attempt_count: 1,
+    error: null,
+    result_refs: resultIds.map((id) => ({ resource_type: "garment", id })),
+    poll_after_seconds: status === "succeeded" ? null : 1,
+    created_at: "2026-05-21T00:00:00Z",
+    updated_at: "2026-05-21T00:00:01Z"
+  };
+}
+
+function mockTaskUploadApi(results: Array<Array<Record<string, unknown> & { id: string }>>) {
+  let nextTask = 0;
+  const tasks = new Map<string, ReturnType<typeof taskRecord>>();
+  const garments = new Map(results.flat().map((item) => [item.id, item]));
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url === "/v2/tasks?limit=50") return new Response(JSON.stringify({ items: [], next_cursor: null, has_more: false }));
+    if (url === "/v2/tasks/garment-upload") {
+      const index = nextTask++;
+      const kind = (init?.body as FormData).get("mode") === "split" ? "garment_split" : "garment_single";
+      const resultIds = (results[index] || []).map((item) => item.id);
+      const created = taskRecord(`task-${index}`, kind, "queued");
+      tasks.set(created.id, taskRecord(created.id, kind, "succeeded", resultIds));
+      return new Response(JSON.stringify(created), { status: 202 });
+    }
+    const taskMatch = url.match(/^\/v2\/tasks\/(task-\d+)$/);
+    if (taskMatch) return new Response(JSON.stringify(tasks.get(taskMatch[1])));
+    const garmentMatch = url.match(/^\/v2\/garments\/([^/?]+)$/);
+    if (garmentMatch) return new Response(JSON.stringify(garments.get(garmentMatch[1]) || {}));
+    return new Response(JSON.stringify({ detail: { code: "unexpected_test_request", path: url } }), { status: 500 });
+  });
+}
+
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   vi.stubGlobal("fetch", vi.fn());
   vi.stubGlobal("navigator", {
     ...navigator,
@@ -277,6 +348,90 @@ afterEach(() => {
 });
 
 describe("AiWardrobe app", () => {
+  test("renders distinct purchase outfits sharing a scene without duplicate React keys", async () => {
+    const user = userEvent.setup();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockDurablePurchaseApi({ ...purchaseCandidate, analysis: { ...purchaseCandidate.analysis, outfit_ideas: [
+      { scene: "周末", reason: "组合一", items: [{ candidate_id: "candidate-1", category: "top", reason: "候选" }, { garment_id: "bottom-1", category: "bottom", reason: "下装一" }] },
+      { scene: "周末", reason: "组合二", items: [{ candidate_id: "candidate-1", category: "top", reason: "候选" }, { garment_id: "bottom-2", category: "bottom", reason: "下装二" }] },
+      { scene: "周末", reason: "旧快照组合", items: [{ category: "shoes", image_url: "/legacy-shoes.jpg", reason: "旧鞋子" }] }
+    ] } });
+    try {
+      render(<App />);
+      await user.click(await screen.findByRole("button", { name: "上传商品图" }));
+      await user.upload(await screen.findByLabelText("上传商品图片"), new File(["image"], "product.jpg", { type: "image/jpeg" }));
+      expect(await screen.findByText("组合一")).toBeInTheDocument();
+      expect(screen.getByText("组合二")).toBeInTheDocument();
+      expect(screen.getByText("旧快照组合")).toBeInTheDocument();
+      expect(errors.mock.calls.filter((args) => args.some((value) => String(value).includes("same key")))).toHaveLength(0);
+    } finally { errors.mockRestore(); }
+  });
+
+  test.each(Object.entries(purchaseContracts))("renders backend nullable %s purchase contract through the default durable entry", async (scenario, contract) => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockDurablePurchaseApi(contract);
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "粘贴商品链接" }));
+    await user.type(screen.getByLabelText("商品链接"), purchaseCandidate.product_url);
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    expect(await screen.findByRole("heading", { name: "价格建议" })).toBeInTheDocument();
+    expect(screen.queryByText(/建议价 ¥/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/依据不足/).length).toBeGreaterThan(0);
+    if (contract.score === null) {
+      expect(screen.getByText(/暂不生成总分/)).toBeInTheDocument();
+      expect(screen.getByText("重复风险 依据不足")).toBeInTheDocument();
+      expect(screen.queryByText("重复风险 0")).not.toBeInTheDocument();
+    }
+    if (scenario === "hard_constraint") expect(screen.getAllByText(/超过你的预算/).length).toBeGreaterThan(0);
+    if (scenario === "unknown_price") expect(screen.getByText("价格未知，暂不能比较预算")).toBeInTheDocument();
+    const creation = vi.mocked(fetch).mock.calls.find(([input]) => String(input) === "/v2/tasks/purchase-analysis");
+    expect(creation).toBeDefined();
+    expect(new Headers(creation?.[1]?.headers).get("Idempotency-Key")).toMatch(/^[a-f0-9-]{36}$/i);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith("/purchase/analyze"))).toBe(false);
+  });
+
+  test("ready pending-review and unconfirmed legacy garments require confirmation and never appear in outfit selectors", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    const legacy = { ...garment, id: "legacy-1", style: "旧资料", user_confirmed_at: null };
+    const pending = { ...pendingGarment, style: "待确认款" };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?")) return new Response(JSON.stringify({ items: [garment, pending, legacy], has_more: false, next_cursor: null }));
+      if (path === "/v2/garments/garment-pending/confirm") return new Response(JSON.stringify({ id: pending.id, status: "ready", review_status: "confirmed", tags: pending.tags }));
+      if (path === "/v2/garments/garment-pending") return new Response(JSON.stringify({ ...pending, review_status: "confirmed", user_confirmed_at: "2026-10-01T00:00:00Z" }));
+      if (path.startsWith("/weather")) return new Response(JSON.stringify({ temperature: 22, condition: "Cloudy", city: "当前位置" }));
+      return new Response(JSON.stringify({ items: [], has_more: false, next_cursor: null }));
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    expect(await screen.findByText("待确认单品")).toBeInTheDocument();
+    expect(within(screen.getByRole("button", { name: "编辑上衣 待确认款" })).getByText("待确认")).toBeInTheDocument();
+    expect(within(screen.getByRole("button", { name: "编辑上衣 旧资料" })).getByText("待确认")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "搭配" }));
+    await user.click(screen.getByRole("checkbox", { name: "想把某件衣服搭出来" }));
+    expect(within(screen.getByLabelText("指定单品")).getAllByRole("option")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "自己搭配" }));
+    expect(screen.queryByRole("checkbox", { name: /待确认款|旧资料/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    await user.click(screen.getByRole("button", { name: "编辑上衣 待确认款" }));
+    await user.click(await screen.findByRole("button", { name: "确认并加入衣橱" }));
+    expect(await screen.findByText("我的衣橱")).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/garments/garment-pending/confirm")).toBe(true);
+  });
+
+  test("opening default purchase entry restores existing successful task result", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockDurablePurchaseApi(purchaseContracts.insufficient, false, true);
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "粘贴商品链接" }));
+    expect(await screen.findByRole("heading", { name: "购买结论" })).toBeInTheDocument();
+    expect(screen.getByText(/暂不生成总分/)).toBeInTheDocument();
+  });
+
   test("logged-in app opens on the buy-before home screen", async () => {
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [garment, secondGarment] });
@@ -289,6 +444,7 @@ describe("AiWardrobe app", () => {
   });
 
   test("main navigation exposes the five core entries without AI try-on", async () => {
+    const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
 
@@ -300,6 +456,10 @@ describe("AiWardrobe app", () => {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
     expect(screen.queryByRole("button", { name: "AI 换装" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    const wardrobeHeading = await screen.findByRole("heading", { name: "我的衣橱" });
+    await waitFor(() => expect(document.activeElement).toBe(wardrobeHeading));
+    expect(screen.getByRole("button", { name: "衣橱" })).toHaveAttribute("aria-current", "page");
   });
 
   test("shows a skippable preference panel after three ready garments and saves it", async () => {
@@ -388,16 +548,7 @@ describe("AiWardrobe app", () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
-    mockFetchOnce({
-      id: "upload-1",
-      original_image_url: "/static/uploads/original.jpg",
-      original_image_key: "garments/original.jpg",
-      status: "ready",
-      error_message: null,
-      garments: [pendingGarment, secondGarment, { ...garment, id: "garment-shoes", category: "shoes", image_url: "/static/uploads/crops/shoes.jpg", thumbnail_url: "/static/uploads/crops/shoes.jpg", image_key: "garments/crops/shoes.jpg", style: "运动" }],
-      created_at: "2026-05-21T00:00:00Z",
-      updated_at: "2026-05-21T00:00:00Z"
-    }, 201);
+    mockTaskUploadApi([[pendingGarment, secondGarment, { ...garment, id: "garment-shoes", category: "shoes", image_url: "/v2/assets/shoes/content", thumbnail_url: "/v2/assets/shoes/content", image_key: "", style: "运动" }]]);
 
     render(<App />);
 
@@ -409,29 +560,53 @@ describe("AiWardrobe app", () => {
     const file = new File(["fake image"], "multi-look.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择整套或多单品照片"), file);
 
-    expect(await screen.findByText("单品拆分完成")).toBeInTheDocument();
-    expect(screen.getByText("已入库单品")).toBeInTheDocument();
+    expect(await screen.findByText("单品拆分完成，待确认")).toBeInTheDocument();
+    expect(screen.getByText("识别结果")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /编辑下装/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /编辑鞋子/ })).toBeInTheDocument();
     expect(screen.queryByAltText("multi-look.jpg 原图")).not.toBeInTheDocument();
-    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/uploads/garment-photo");
+    const uploadCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === "/v2/tasks/garment-upload");
+    expect(uploadCall).toBeDefined();
+    expect(new Headers(uploadCall?.[1]?.headers).get("Idempotency-Key")).toBeTruthy();
+    expect((uploadCall?.[1]?.body as FormData).get("mode")).toBe("split");
+  });
+
+  test("preserves a guest purchase link through registration", async () => {
+    const user = userEvent.setup();
+    mockFetchOnce({
+      access_token: "token",
+      token_type: "bearer",
+      user: { id: "user-1", email: "guest@example.com", created_at: "2026-05-21T00:00:00Z", updated_at: "2026-05-21T00:00:00Z" }
+    });
+    mockFetchOnce({ items: [] });
+    render(<App />);
+
+    const productUrl = "https://shop.example.com/products/summer-shirt";
+    await user.type(screen.getByLabelText("填写商品链接，登录后继续"), productUrl);
+    await user.type(screen.getByLabelText("邮箱"), "guest@example.com");
+    await user.type(screen.getByLabelText("密码"), "correct-horse-123");
+    await user.click(screen.getByRole("button", { name: "注册账号" }));
+
+    expect(await screen.findByRole("heading", { name: "购买分析" })).toBeInTheDocument();
+    expect(screen.getByLabelText("商品链接")).toHaveValue(productUrl);
+    expect(screen.getByText("已恢复登录前填写的商品链接，确认后可继续分析。")).toBeInTheDocument();
   });
 
   test("plain upload creates a ready tagged garment without auto split workflow", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
-    mockFetchOnce({
+    mockTaskUploadApi([[{
       ...pendingGarment,
       id: "plain-1",
       source_upload_id: null,
-      image_url: "/static/uploads/plain.jpg",
-      image_key: "garments/plain.jpg",
-      thumbnail_url: "/static/uploads/plain.jpg",
+      image_url: "/v2/assets/plain/content",
+      image_key: "",
+      thumbnail_url: "/v2/assets/plain/content",
       crop_box: null,
       ai_result: { source: "plain_upload" }
-    }, 201);
+    }]]);
 
     render(<App />);
 
@@ -439,20 +614,21 @@ describe("AiWardrobe app", () => {
     await user.click(screen.getByRole("button", { name: "衣橱" }));
     await screen.findByText("我的衣橱");
     await user.click(screen.getByRole("button", { name: "上传衣服" }));
-    expect(screen.getByText(/普通上传不调用拆分工作流/)).toBeInTheDocument();
+    expect(screen.getByText(/每张图片作为一件衣物识别/)).toBeInTheDocument();
     const file = new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择单件图片"), file);
 
-    expect(await screen.findByText("已入库，可编辑标签")).toBeInTheDocument();
+    expect(await screen.findByText("识别完成，待确认")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
-    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/uploads/plain-garment");
+    const uploadCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === "/v2/tasks/garment-upload");
+    expect((uploadCall?.[1]?.body as FormData).get("mode")).toBe("single");
   });
 
-  test("plain multi-file upload uses the batch upload endpoint", async () => {
+  test("plain multi-file upload creates independent recoverable tasks", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
-    mockFetchOnce({ items: [garment, secondGarment] }, 201);
+    mockTaskUploadApi([[garment], [secondGarment]]);
 
     render(<App />);
 
@@ -463,51 +639,26 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText(/上传 3 件常穿衣物即可提升分析准确度/)).toBeInTheDocument();
 
     const files = [
-      new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" }),
-      new File(["fake image"], "single-pants.jpg", { type: "image/jpeg" })
+      new File(["shirt image"], "single-shirt.jpg", { type: "image/jpeg" }),
+      new File(["pants image"], "single-pants.jpg", { type: "image/jpeg" })
     ];
     await user.upload(screen.getByLabelText("选择单件图片"), files);
 
-    expect(await screen.findAllByText("已入库，可编辑标签")).toHaveLength(2);
+    await waitFor(() => {
+      expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/v2/tasks/garment-upload")).toHaveLength(2);
+    }, { timeout: 5000 });
+    expect(await screen.findAllByText("识别完成，待确认")).toHaveLength(2);
     expect(screen.getByRole("button", { name: /编辑上衣/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /编辑下装/ })).toBeInTheDocument();
-    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/garments/batch-upload");
-    const requestBody = vi.mocked(fetch).mock.calls[1][1]?.body;
-    expect(requestBody).toBeInstanceOf(FormData);
-    expect((requestBody as FormData).getAll("files")).toEqual(files);
-  });
-
-  test("plain batch upload fails every row when the backend returns a mismatched item count", async () => {
-    const user = userEvent.setup();
-    localStorage.setItem("aiwardrobe_token", "token");
-    mockFetchOnce({ items: [] });
-    mockFetchOnce({ items: [garment] }, 201);
-
-    render(<App />);
-
-    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
-    await user.click(screen.getByRole("button", { name: "衣橱" }));
-    await screen.findByText("我的衣橱");
-    await user.click(screen.getByRole("button", { name: "上传衣服" }));
-
-    const files = [
-      new File(["fake image"], "single-shirt.jpg", { type: "image/jpeg" }),
-      new File(["fake image"], "single-pants.jpg", { type: "image/jpeg" })
-    ];
-    await user.upload(screen.getByLabelText("选择单件图片"), files);
-
-    expect(await screen.findAllByText("失败")).toHaveLength(2);
-    expect(screen.queryByText("已入库，可编辑标签")).not.toBeInTheDocument();
-    expect(screen.getByText("single-shirt.jpg")).toBeInTheDocument();
-    expect(screen.getByText("single-pants.jpg")).toBeInTheDocument();
-    expect(screen.getAllByText("批量上传返回数量不一致，请重试。")).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: /编辑上衣/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /编辑下装/ })).not.toBeInTheDocument();
+    const uploadCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/v2/tasks/garment-upload");
+    expect(uploadCalls).toHaveLength(2);
+    expect(uploadCalls.every(([, options]) => new Headers(options?.headers).has("Idempotency-Key"))).toBe(true);
   });
 
   test("clears stale session when auto upload rejects the bearer token", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "stale-token");
+    mockFetchOnce({ items: [] });
     mockFetchOnce({ items: [] });
     mockFetchOnce({ detail: "Invalid bearer token" }, 401);
 
@@ -518,7 +669,8 @@ describe("AiWardrobe app", () => {
     await screen.findByText("我的衣橱");
     await user.click(screen.getByRole("button", { name: "上传衣服" }));
     await user.click(screen.getByRole("button", { name: "自动识别" }));
-    const file = new File(["fake image"], "multi-look.jpg", { type: "image/jpeg" });
+
+    const file = new File(["fake image"], "look.jpg", { type: "image/jpeg" });
     await user.upload(screen.getByLabelText("选择整套或多单品照片"), file);
 
     expect(await screen.findByRole("button", { name: "注册账号" })).toBeInTheDocument();
@@ -573,6 +725,130 @@ describe("AiWardrobe app", () => {
     expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/garments/garment-2");
     expect(vi.mocked(fetch).mock.calls[1][1]).toEqual(expect.objectContaining({ method: "DELETE" }));
     expect(vi.mocked(fetch).mock.calls[2][1]).toEqual(expect.objectContaining({ method: "DELETE" }));
+  });
+
+  test("partial batch delete reports each failed item and removes successful items", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const items = [
+      { ...garment, id: "top-1", style: "top-one" },
+      { ...secondGarment, id: "bottom-1", style: "bottom-one" },
+      { ...shoesGarment, id: "shoes-1", style: "shoes-one" },
+      { ...garment, id: "top-2", style: "top-two" },
+      { ...secondGarment, id: "bottom-2", style: "bottom-two" }
+    ];
+    const deleteOutcomes: Record<string, { status: number; body: unknown }> = {
+      "/garments/top-1": { status: 204, body: {} },
+      "/garments/bottom-1": { status: 403, body: { detail: { code: "delete_denied" } } },
+      "/garments/shoes-1": { status: 204, body: {} },
+      "/garments/top-2": { status: 503, body: { detail: { code: "delete_unavailable" } } },
+      "/garments/bottom-2": { status: 204, body: {} }
+    };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/garments?limit=50") return new Response(JSON.stringify({ items, next_cursor: null, has_more: false }));
+      const outcome = deleteOutcomes[path];
+      if (!outcome) return new Response(JSON.stringify({ detail: { code: "unexpected_request" } }), { status: 500 });
+      return {
+        ok: outcome.status >= 200 && outcome.status < 300,
+        status: outcome.status,
+        json: async () => outcome.body
+      } as Response;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    await screen.findByText("我的衣橱");
+    await user.click(screen.getByRole("button", { name: "批量管理" }));
+    for (const item of items) {
+      await user.click(screen.getByRole("checkbox", { name: `选择 ${item.category} ${item.id}` }));
+    }
+    await user.click(screen.getByRole("button", { name: "删除所选" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("2 件衣物删除失败");
+    expect(screen.getByRole("alert")).toHaveTextContent("下装 bottom-one：delete_denied");
+    expect(screen.getByRole("alert")).toHaveTextContent("上衣 top-two：delete_unavailable");
+    expect(screen.getAllByRole("checkbox", { name: /选择/ })).toHaveLength(2);
+    expect(screen.getByRole("checkbox", { name: "选择 bottom bottom-1" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "选择 top top-2" })).toBeChecked();
+  });
+
+  test("wardrobe and outfit history load server cursor pages", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/garments?limit=50") return new Response(JSON.stringify({ items: [garment], next_cursor: "garment-next", has_more: true }));
+      if (path === "/v2/garments?cursor=garment-next&limit=50") return new Response(JSON.stringify({ items: [secondGarment], next_cursor: null, has_more: false }));
+      if (path === "/v2/garments?q=white&limit=50") return new Response(JSON.stringify({ items: [garment], next_cursor: null, has_more: false }));
+      if (path === "/v2/outfits?limit=50") return new Response(JSON.stringify({ items: [], next_cursor: "outfit-next", has_more: true }));
+      if (path === "/v2/outfits?cursor=outfit-next&limit=50") return new Response(JSON.stringify({ items: [], next_cursor: null, has_more: false }));
+      if (path === "/v2/wear-events?limit=100") return new Response(JSON.stringify({ items: [], next_cursor: "wear-next", has_more: true }));
+      if (path === "/v2/wear-events?cursor=wear-next&limit=100") return new Response(JSON.stringify({
+        items: [{ id: "wear-older", outfit_id: "outfit-old", worn_at: "2026-09-01T00:00:00Z", garment_ids: ["garment-1"], garment_count: 1 }],
+        next_cursor: null,
+        has_more: false
+      }));
+      return new Response(JSON.stringify({ detail: { code: "unexpected_request", path } }), { status: 500 });
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "衣橱" }));
+    await screen.findByRole("button", { name: "加载更多衣物" });
+    await user.click(screen.getByRole("button", { name: "加载更多衣物" }));
+    expect(await screen.findByRole("button", { name: /编辑下装/ })).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("搜索标签、颜色、材质"), "white");
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/garments?q=white&limit=50")).toBe(true));
+
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByRole("button", { name: "加载更多搭配" });
+    await user.click(screen.getByRole("button", { name: "加载更多搭配" }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/outfits?cursor=outfit-next&limit=50")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "加载更多穿着记录" }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/wear-events?cursor=wear-next&limit=100")).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "加载更多穿着记录" })).not.toBeInTheDocument());
+  });
+
+  test("upload view restores older analysis tasks through the server cursor", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/garments?limit=50") return new Response(JSON.stringify({ items: [], next_cursor: null, has_more: false }));
+      if (path === "/v2/tasks?limit=50") return new Response(JSON.stringify({ items: [], next_cursor: "upload-task-next", has_more: true }));
+      if (path === "/v2/tasks?cursor=upload-task-next&limit=50") return new Response(JSON.stringify({
+        items: [{
+          id: "garment-task-older",
+          kind: "garment_single",
+          status: "failed",
+          stage: "recognizing",
+          submission_status: "failed",
+          cancel_requested: false,
+          action_required: false,
+          attempt_count: 1,
+          error: { code: "provider_unavailable", retryable: false },
+          result_refs: [],
+          poll_after_seconds: null,
+          created_at: "2026-09-01T00:00:00Z",
+          updated_at: "2026-09-01T00:00:00Z"
+        }],
+        next_cursor: null,
+        has_more: false
+      }));
+      return new Response(JSON.stringify({ detail: { code: "unexpected_request", path } }), { status: 500 });
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(await screen.findByRole("button", { name: "上传衣服" }));
+    await user.click(await screen.findByRole("button", { name: "加载更多历史任务" }));
+
+    expect(await screen.findByText("已提交的图片任务")).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/tasks?cursor=upload-task-next&limit=50")).toBe(true);
+    expect(screen.queryByRole("button", { name: "加载更多历史任务" })).not.toBeInTheDocument();
   });
 
   test("outfit page fetches weather and saves a manual fixed outfit", async () => {
@@ -701,6 +977,7 @@ describe("AiWardrobe app", () => {
       weather_snapshot: { temperature: 23 },
       created_at: "2026-05-27T00:00:00Z"
     });
+    mockFetchOnce({ id: "feedback-1" }, 201);
 
     render(<App />);
 
@@ -722,7 +999,7 @@ describe("AiWardrobe app", () => {
 
     await user.selectOptions(screen.getByLabelText("不喜欢原因"), "颜色不合适");
     await user.click(screen.getByRole("button", { name: "不喜欢" }));
-    expect(screen.getByText("已记录反馈（本次会话有效）")).toBeInTheDocument();
+    expect(await screen.findByText("反馈已保存，会用于之后的搭配建议。")).toBeInTheDocument();
   });
 
   test("falls back to default city weather when geolocation is unavailable", async () => {
@@ -834,6 +1111,7 @@ describe("AiWardrobe app", () => {
         }
       ]
     });
+    mockFetchOnce({ items: [], next_cursor: null, has_more: false });
     mockFetchOnce({}, 204);
 
     render(<App />);
@@ -846,33 +1124,61 @@ describe("AiWardrobe app", () => {
 
     await waitFor(() => expect(screen.queryByText("周一通勤 · 31°C")).not.toBeInTheDocument());
     expect(screen.getByText("还没有搭配历史")).toBeInTheDocument();
-    expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/outfits/outfit-1");
-    expect(vi.mocked(fetch).mock.calls[2][1]).toEqual(expect.objectContaining({ method: "DELETE" }));
+    expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/outfits/outfit-1");
+    expect(vi.mocked(fetch).mock.calls[3][1]).toEqual(expect.objectContaining({ method: "DELETE" }));
+  });
+
+  test("records and revokes an outfit wear event", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    mockFetchOnce({ items: [] });
+    mockFetchOnce({ items: [{
+      id: "outfit-wear-1",
+      name: "周一通勤",
+      occasion: "work",
+      season: "spring",
+      temperature: 22,
+      items: [],
+      explanation: "适合上班",
+      source: "manual",
+      is_favorite: false,
+      is_fixed: false,
+      weather_snapshot: null,
+      created_at: "2026-05-21T00:00:00Z"
+    }] });
+    mockFetchOnce({ items: [], next_cursor: null, has_more: false });
+    mockFetchOnce({
+      id: "wear-event-1",
+      local_date: new Date().toLocaleDateString("en-CA"),
+      timezone: "UTC",
+      outfit_id: "outfit-wear-1",
+      occasion: "work",
+      items: [],
+      revoked_at: null,
+      created_at: "2026-10-01T00:00:00Z"
+    }, 201);
+    mockFetchOnce({}, 204);
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByText("周一通勤 · 22°C");
+    await user.click(screen.getByRole("button", { name: "记录穿着" }));
+    expect(await screen.findByRole("button", { name: "撤销穿着记录" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "撤销穿着记录" }));
+
+    expect(await screen.findByRole("button", { name: "记录穿着" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("穿着记录已撤销")).toBeInTheDocument();
+    expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/v2/wear-events");
+    expect(vi.mocked(fetch).mock.calls[3][1]).toEqual(expect.objectContaining({ method: "POST", headers: expect.any(Headers) }));
+    expect(String(vi.mocked(fetch).mock.calls[4][0])).toBe("/v2/wear-events/wear-event-1");
+    expect(vi.mocked(fetch).mock.calls[4][1]).toEqual(expect.objectContaining({ method: "DELETE" }));
   });
 
   test("purchase analysis submits a product URL and saves the candidate to wardrobe", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
-    mockFetchOnce({ items: [garment] });
-    mockFetchOnce(purchaseCandidate, 201);
-    mockFetchOnce({
-      primary_goal: "",
-      scenes: [],
-      styles: [],
-      avoid_types: [],
-      budget_range: ""
-    });
-    mockFetchOnce({
-      ...garment,
-      id: "saved-purchase",
-      image_url: purchaseCandidate.image_url,
-      image_key: purchaseCandidate.image_key,
-      thumbnail_url: purchaseCandidate.thumbnail_url,
-      colors: ["black"],
-      tags: ["T-shirt", "casual"],
-      created_at: "2026-06-16T00:00:00Z",
-      updated_at: "2026-06-16T00:00:00Z"
-    }, 201);
+    mockDurablePurchaseApi();
 
     render(<App />);
 
@@ -887,15 +1193,13 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText("86%")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "加入衣橱" }));
 
-    await waitFor(() => expect(String(vi.mocked(fetch).mock.calls[3][0])).toBe("/purchase/candidates/candidate-1/save"));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/purchase/candidates/candidate-1/save")).toBe(true));
   });
 
   test("purchase analysis offers manual image upload when URL extraction fails", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
-    mockFetchOnce({ items: [] });
-    mockFetchOnce({ detail: "product_image_not_found" }, 400);
-    mockFetchOnce({ ...purchaseCandidate, id: "manual-candidate", source_image_url: "manual.jpg" }, 201);
+    mockDurablePurchaseApi(purchaseCandidate, true);
 
     render(<App />);
 
@@ -909,14 +1213,13 @@ describe("AiWardrobe app", () => {
     await user.upload(screen.getByLabelText("上传商品图片"), file);
 
     expect(await screen.findByText("Black Shirt")).toBeInTheDocument();
-    expect(String(vi.mocked(fetch).mock.calls[2][0])).toBe("/purchase/analyze-image");
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/v2/tasks/purchase-analysis")).toHaveLength(2);
   });
 
   test("home product image upload analyzes immediately and shows the full purchase result", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");
-    mockFetchOnce({ items: [] });
-    mockFetchOnce(purchaseCandidate, 201);
+    mockDurablePurchaseApi();
 
     render(<App />);
 
@@ -940,7 +1243,7 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText("建议价 ¥150")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "加入衣橱" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "再分析一件" })).toBeInTheDocument();
-    expect(String(vi.mocked(fetch).mock.calls[1][0])).toBe("/purchase/analyze-image");
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) => String(input) === "/v2/tasks/purchase-analysis" && init?.body instanceof FormData)).toBe(true);
   });
 
   test("shopping recommendations loads products and saves analyzed items", async () => {

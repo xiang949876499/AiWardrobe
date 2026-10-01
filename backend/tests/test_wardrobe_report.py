@@ -1,8 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
+from datetime import datetime, timezone
 
 from app.models import Garment
 from app.wardrobe_report import build_wardrobe_report
-from tests.conftest import login
+from tests.conftest import jpeg_bytes, login
 
 
 def _garment(
@@ -26,6 +28,7 @@ def _garment(
         tags=["casual"],
         status=status,
         review_status="confirmed",
+        user_confirmed_at=datetime.now(timezone.utc),
     )
 
 
@@ -48,9 +51,16 @@ def test_wardrobe_report_summarizes_categories_colors_and_duplicates(client: Tes
         upload = client.post(
             "/uploads/plain-garment",
             headers={"Authorization": f"Bearer {token}"},
-            files={"file": (name, b"image", "image/jpeg")},
+            files={"file": (name, jpeg_bytes(), "image/jpeg")},
         )
         assert upload.status_code == 201
+        assert upload.json()["review_status"] == "pending_review"
+        confirmed = client.post(
+            f"/v2/garments/{upload.json()['id']}/confirm",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+        assert confirmed.status_code == 200
 
     response = client.get("/reports/wardrobe", headers={"Authorization": f"Bearer {token}"})
 
@@ -121,3 +131,6 @@ def test_wardrobe_report_summary_distinguishes_uploaded_but_not_ready_items() ->
     assert report["ready_total"] == 0
     assert "已有 2 件上传记录" in str(report["summary"])
     assert "待入库完成后" in str(report["summary"])
+
+
+pytestmark = pytest.mark.usefixtures("legacy_worker")

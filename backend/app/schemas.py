@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator
@@ -43,6 +44,25 @@ class UserPreferenceUpdate(BaseModel):
     styles: list[str] = Field(default_factory=list)
     avoid_types: list[str] = Field(default_factory=list)
     budget_range: str = ""
+    budget_min: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    budget_max: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    currency: str = "CNY"
+    avoid_categories: list[str] = Field(default_factory=list, max_length=6)
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        if value != "CNY":
+            raise ValueError("unsupported_currency")
+        return value
+
+    @field_validator("avoid_categories")
+    @classmethod
+    def validate_avoid_categories(cls, values: list[str]) -> list[str]:
+        allowed = {"top", "bottom", "outerwear", "dress", "shoes", "bag", "accessory"}
+        if set(values) - allowed:
+            raise ValueError("invalid_avoid_category")
+        return values
 
 
 class UserPreferenceResponse(UserPreferenceUpdate):
@@ -79,7 +99,12 @@ class GarmentResponse(BaseModel):
     ai_result: dict[str, object]
     ai_confidence: float
     status: GarmentStatus
-    review_status: str = "confirmed"
+    review_status: str = "pending_review"
+    analysis_source: str = "legacy_unknown"
+    provider: str | None = None
+    model_version: str | None = None
+    analyzed_at: datetime | None = None
+    user_confirmed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -142,6 +167,9 @@ class WardrobeReportResponse(BaseModel):
     wardrobe_gaps: list[WardrobeGapResponse]
     avoid_categories: list[str]
     suggested_categories: list[str]
+    wear_data_status: Literal["none", "insufficient", "available"] = "none"
+    wear_days: int = 0
+    wear_tracking_started_at: datetime | None = None
 
 
 class PurchaseAnalyzeRequest(BaseModel):
@@ -156,19 +184,20 @@ class SimilarPurchaseItem(BaseModel):
 
 
 class PurchaseScoreBreakdown(BaseModel):
-    duplicate_risk: int
-    wardrobe_gap: int
-    outfit_potential: int
-    scene_match: int
-    idle_risk: int
+    duplicate_risk: int | None = None
+    wardrobe_gap: int | None = None
+    outfit_potential: int | None = None
+    scene_match: int | None = None
+    idle_risk: int | None = None
 
 
 class PurchaseAnalysisDimensions(BaseModel):
-    outfit_potential: int
-    scene_match: int
-    gap_fill: int
-    duplicate_risk: int
-    idle_risk: int
+    outfit_potential: int | None = None
+    scene_match: int | None = None
+    gap_fill: int | None = None
+    duplicate_risk: int | None = None
+    idle_risk: int | None = None
+    budget_match: bool | None = None
 
 
 class PurchaseSuggestedPrice(BaseModel):
@@ -185,26 +214,28 @@ class PurchaseProductPrice(BaseModel):
 
 class PurchaseAnalysisDetail(BaseModel):
     conclusion: PurchaseRecommendation
-    score: int
+    score: int | None
     summary: str
     dimensions: PurchaseAnalysisDimensions
-    duplicate_risk: int
-    idle_risk: int
-    outfit_potential: int
+    duplicate_risk: int | None
+    idle_risk: int | None
+    outfit_potential: int | None
     match_scenes: list[str]
-    suggested_price: PurchaseSuggestedPrice
+    suggested_price: PurchaseSuggestedPrice | None = None
     product_price: PurchaseProductPrice | None = None
-    score_breakdown: PurchaseScoreBreakdown
+    score_breakdown: PurchaseScoreBreakdown | None
     pros: list[str]
     cons: list[str]
     outfit_ideas: list[dict[str, object]]
-    idle_risk_detail: dict[str, str]
+    idle_risk_detail: dict[str, str] | None
     next_actions: list[str]
-    duplicate_score: int
-    wardrobe_gap_score: int
-    pairing_score: int
+    duplicate_score: int | None
+    wardrobe_gap_score: int | None
+    pairing_score: int | None
     decision_factors: list[str]
     similar_items: list[SimilarPurchaseItem] = Field(default_factory=list)
+    coverage: dict[str, object] = Field(default_factory=dict)
+    evidence: dict[str, object] = Field(default_factory=dict)
 
 
 class PurchaseCandidateResponse(BaseModel):
@@ -229,7 +260,7 @@ class PurchaseCandidateResponse(BaseModel):
     ai_confidence: float
     similar_items: list[SimilarPurchaseItem]
     recommendation: PurchaseRecommendation
-    score: int
+    score: int | None
     reason_summary: str
     analysis: PurchaseAnalysisDetail
     status: PurchaseCandidateStatus
@@ -249,6 +280,35 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
     analysis = dict(value) if isinstance(value, dict) else {}
     raw_dimensions = analysis.get("dimensions") if isinstance(analysis.get("dimensions"), dict) else {}
     raw_breakdown = analysis.get("score_breakdown") if isinstance(analysis.get("score_breakdown"), dict) else {}
+    coverage = analysis.get("coverage") if isinstance(analysis.get("coverage"), dict) else {}
+    recommendation = _analysis_recommendation(analysis.get("conclusion") or response_data.get("recommendation"))
+    summary = str(analysis.get("summary") or response_data.get("reason_summary") or "")
+    if coverage.get("status") == "insufficient":
+        analysis.update({
+            "conclusion": recommendation,
+            "score": None,
+            "summary": summary,
+            "dimensions": {
+                "outfit_potential": raw_dimensions.get("outfit_potential"),
+                "scene_match": raw_dimensions.get("scene_match"),
+                "gap_fill": raw_dimensions.get("gap_fill"),
+                "duplicate_risk": raw_dimensions.get("duplicate_risk"),
+                "idle_risk": raw_dimensions.get("idle_risk"),
+                "budget_match": raw_dimensions.get("budget_match"),
+            },
+            "duplicate_risk": raw_dimensions.get("duplicate_risk"),
+            "idle_risk": raw_dimensions.get("idle_risk"),
+            "outfit_potential": raw_dimensions.get("outfit_potential"),
+            "score_breakdown": analysis.get("score_breakdown"),
+            "idle_risk_detail": analysis.get("idle_risk_detail") if raw_dimensions.get("idle_risk") is not None else None,
+            "duplicate_score": raw_dimensions.get("duplicate_risk"),
+            "wardrobe_gap_score": raw_dimensions.get("gap_fill"),
+            "pairing_score": raw_dimensions.get("outfit_potential"),
+            "pros": _analysis_str_list(analysis.get("pros")),
+            "cons": _analysis_str_list(analysis.get("cons")),
+            "similar_items": response_data.get("similar_items") or [],
+        })
+        return analysis
     duplicate_score = _first_analysis_int(
         analysis,
         raw_breakdown,
@@ -282,8 +342,6 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
         68,
     )
     score = _analysis_int(analysis, "score", int(response_data.get("score") or 0))
-    recommendation = _analysis_recommendation(analysis.get("conclusion") or response_data.get("recommendation"))
-    summary = str(analysis.get("summary") or response_data.get("reason_summary") or "")
     decision_factors = _analysis_str_list(analysis.get("decision_factors"))
 
     default_dimensions = {
@@ -312,7 +370,7 @@ def _normalize_purchase_analysis(value: object, response_data: dict[str, object]
     _set_int_default_or_replace_zero(analysis, "idle_risk", idle_risk)
     _set_int_default_or_replace_zero(analysis, "outfit_potential", pairing_score)
     analysis.setdefault("match_scenes", ["日常"])
-    analysis.setdefault("suggested_price", _legacy_suggested_price(response_data.get("category"), score))
+    analysis.setdefault("suggested_price", None)
     analysis["score_breakdown"] = score_breakdown
     default_pros, default_cons = _pros_cons(recommendation, duplicate_score, gap_score, pairing_score)
     analysis.setdefault("pros", default_pros)
@@ -554,3 +612,38 @@ class WeatherResponse(BaseModel):
     precipitation: float
     wind_speed: float
     cached: bool
+
+
+class ProviderOperationResponse(BaseModel):
+    operation_key: str
+    generation: int
+    provider: str
+    submission_status: str
+    error_code: str | None = None
+    duration_ms: int
+    usage: dict[str, int] | None = None
+    reported_cost: dict[str, str] | None = None
+
+
+class AnalysisTaskResponse(BaseModel):
+    id: str
+    kind: str
+    status: str
+    stage: str
+    submission_status: str
+    cancel_requested: bool
+    action_required: bool
+    attempt_count: int
+    operations: list[ProviderOperationResponse] = Field(default_factory=list)
+    stage_durations_ms: dict[str, int] = Field(default_factory=dict)
+    error: dict[str, object] | None = None
+    result_refs: list[dict[str, str]]
+    poll_after_seconds: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalysisTaskListResponse(BaseModel):
+    items: list[AnalysisTaskResponse]
+    next_cursor: str | None = None
+    has_more: bool = False

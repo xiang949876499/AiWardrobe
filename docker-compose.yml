@@ -40,8 +40,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set local http://minio:9000 minioadmin minioadmin &&
-      mc mb --ignore-existing local/aiwardrobe &&
-      mc anonymous set download local/aiwardrobe
+      mc mb --ignore-existing local/aiwardrobe
       "
 
   backend:
@@ -64,6 +63,32 @@ services:
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: ./backend
+    command: python -m app.task_worker
+    environment:
+      DATABASE_URL: postgresql+psycopg://aiwardrobe:aiwardrobe@postgres:5432/aiwardrobe
+      JWT_SECRET: docker-development-secret-with-at-least-thirty-two-bytes
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: aiwardrobe
+      S3_REGION: auto
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      AI_DEMO_MODE: "true"
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      GARMENT_AI_PROVIDER: ${GARMENT_AI_PROVIDER:-qwen}
+      PROVIDER_CONCURRENCY_LIMIT: ${PROVIDER_CONCURRENCY_LIMIT:-4}
+      PROVIDER_HOURLY_SUBMISSION_LIMIT: ${PROVIDER_HOURLY_SUBMISSION_LIMIT:-20}
     depends_on:
       postgres:
         condition: service_healthy

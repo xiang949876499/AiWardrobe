@@ -1,4 +1,4 @@
-export type Category = "top" | "bottom" | "outerwear" | "shoes" | "bag" | "accessory";
+export type Category = "top" | "bottom" | "outerwear" | "dress" | "shoes" | "bag" | "accessory";
 export type GarmentStatus = "uploaded" | "extracting" | "tagging" | "pending_review" | "processing" | "ready" | "failed";
 export type Occasion = "work" | "date" | "sport" | "formal" | "casual";
 export type PurchaseRecommendation = "recommend" | "consider" | "skip";
@@ -18,6 +18,10 @@ export type UserPreference = {
   styles: string[];
   avoid_types: string[];
   budget_range: string;
+  budget_min?: string | null;
+  budget_max?: string | null;
+  currency?: "CNY";
+  avoid_categories?: Category[];
 };
 
 export type Garment = {
@@ -38,6 +42,7 @@ export type Garment = {
   ai_confidence: number;
   status: GarmentStatus;
   review_status: "pending_review" | "confirmed" | string;
+  user_confirmed_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -83,6 +88,7 @@ export type Outfit = {
   is_favorite: boolean;
   is_fixed: boolean;
   weather_snapshot: Record<string, unknown> | null;
+  result_revision?: number;
   created_at: string;
 };
 
@@ -111,44 +117,47 @@ export type PurchaseCandidate = {
     matched_reasons: string[];
   }>;
   recommendation: PurchaseRecommendation;
-  score: number;
+  score: number | null;
   reason_summary: string;
   analysis: {
     conclusion: PurchaseRecommendation;
-    score: number;
+    score: number | null;
     summary: string;
     dimensions: {
-      outfit_potential: number;
-      scene_match: number;
-      gap_fill: number;
-      duplicate_risk: number;
-      idle_risk: number;
+      outfit_potential: number | null;
+      scene_match: number | null;
+      gap_fill: number | null;
+      duplicate_risk: number | null;
+      idle_risk: number | null;
+      budget_match?: boolean | null;
     };
-    duplicate_risk: number;
-    idle_risk: number;
-    outfit_potential: number;
+    duplicate_risk: number | null;
+    idle_risk: number | null;
+    outfit_potential: number | null;
     match_scenes: string[];
-    suggested_price: { min: number; ideal: number; max: number };
+    suggested_price: { min: number; ideal: number; max: number } | null;
     product_price?: { current: string; currency: string; source: string } | null;
     score_breakdown: {
-      duplicate_risk: number;
-      wardrobe_gap: number;
-      outfit_potential: number;
-      scene_match: number;
-      idle_risk: number;
-    };
+      duplicate_risk: number | null;
+      wardrobe_gap: number | null;
+      outfit_potential: number | null;
+      scene_match: number | null;
+      idle_risk: number | null;
+    } | null;
     pros: string[];
     cons: string[];
     outfit_ideas: Array<{
       scene: string;
-      items: Array<{ category: string; image_url: string; reason: string }>;
+      items: Array<{ category: string; image_url?: string; asset_id?: string; garment_id?: string; candidate_id?: string; reason: string }>;
+      seasons?: string[];
+      warnings?: string[];
       reason: string;
     }>;
-    idle_risk_detail: { level: "低" | "中" | "高"; reason: string };
+    idle_risk_detail: { level: string; reason: string } | null;
     next_actions: string[];
-    duplicate_score: number;
-    wardrobe_gap_score: number;
-    pairing_score: number;
+    duplicate_score: number | null;
+    wardrobe_gap_score: number | null;
+    pairing_score: number | null;
     decision_factors: string[];
     similar_items: Array<{
       garment_id: string;
@@ -222,4 +231,91 @@ export type AuthResponse = {
   access_token: string;
   token_type: string;
   user: User;
+};
+
+export type AnalysisTask = {
+  id: string;
+  kind: "garment_single" | "garment_split" | "purchase_url" | "purchase_image" | "recommendation_item" | "purchase_reanalysis";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  stage: "validating" | "downloading" | "preprocessing" | "recognizing" | "scoring" | "persisting" | "awaiting_resolution";
+  submission_status: "not_submitted" | "submitting" | "submitted" | "unknown" | "completed" | "failed";
+  cancel_requested: boolean;
+  action_required: boolean;
+  attempt_count: number;
+  stage_durations_ms?: Record<string, number>;
+  operations?: Array<{
+    operation_key: string;
+    generation: number;
+    provider: string;
+    submission_status: "not_submitted" | "submitting" | "submitted" | "unknown" | "completed" | "failed";
+    error_code: string | null;
+    duration_ms: number;
+    usage: Record<string, number> | null;
+    reported_cost: { amount: string; currency: string } | null;
+  }>;
+  error: { code: string; retryable: boolean } | null;
+  result_refs: Array<{ resource_type: string; id: string }>;
+  poll_after_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DecisionFeedback = {
+  id: string;
+  target_type: "candidate" | "outfit";
+  target_id: string;
+  snapshot_revision: number;
+  value: "helpful" | "not_helpful";
+  reason_code: string | null;
+  garment_ids: string[];
+  context: Record<string, unknown>;
+  revoked_at: string | null;
+  created_at: string;
+};
+
+export type WearEvent = {
+  id: string;
+  local_date: string;
+  timezone: string;
+  outfit_id: string | null;
+  occasion: string | null;
+  items: Array<{ garment_id: string; snapshot: Record<string, unknown> }>;
+  revoked_at: string | null;
+  created_at: string;
+};
+
+export type CandidateV2 = {
+  id: string;
+  title: string;
+  product_url: string;
+  domain: string;
+  asset_id: string | null;
+  image_url: string | null;
+  similar_items: Array<{ garment_id: string; image_url: string; similarity: number; matched_reasons: string[] }>;
+  category: Category;
+  colors: string[];
+  style: string;
+  material: string;
+  season: string[];
+  fit: string;
+  tags: string[];
+  analysis_source: "remote" | "manual" | "demo" | "legacy_unknown";
+  actual_price: string | null;
+  currency: string | null;
+  recommendation: PurchaseRecommendation;
+  score: number | null;
+  reason_summary: string;
+  analysis: Partial<PurchaseCandidate["analysis"]>;
+  coverage: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  decision_status: "considering" | "skipped" | "bought" | "returned";
+  analysis_status: string;
+  ownership_state: "never_saved" | "linked" | "removed" | "legacy_unlinked" | string;
+  owned_garment_id: string | null;
+  revision: number;
+  snapshot_revision: number | null;
+  stale: boolean;
+  created_at: string;
+  updated_at: string;
+  snapshots?: Array<Record<string, unknown>>;
 };

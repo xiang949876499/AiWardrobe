@@ -10,6 +10,7 @@ export default defineConfig({
     port: 5174,
     strictPort: true,
     proxy: {
+      "/v2": { target: backendTarget, changeOrigin: true },
       "/auth": { target: backendTarget, changeOrigin: true },
       "/garments": { target: backendTarget, changeOrigin: true },
       "^/uploads(?:/|$)": { target: backendTarget, changeOrigin: true },

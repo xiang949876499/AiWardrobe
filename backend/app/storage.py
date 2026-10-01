@@ -30,6 +30,25 @@ class StorageService:
             return self._save_s3(key, data, "image/jpeg")
         return self._save_local(key, data)
 
+    def read_legacy(self, key: str) -> bytes:
+        """Read an existing public-storage object for a controlled asset migration."""
+        if self.settings.storage_driver == "s3":
+            import boto3
+
+            client = boto3.client(
+                "s3",
+                endpoint_url=self.settings.s3_endpoint_url,
+                region_name=self.settings.s3_region,
+                aws_access_key_id=self.settings.s3_access_key_id,
+                aws_secret_access_key=self.settings.s3_secret_access_key,
+            )
+            return client.get_object(Bucket=self.settings.s3_bucket, Key=key)["Body"].read()
+        root = Path(self.settings.local_upload_dir).resolve()
+        target = (root / key).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("invalid_legacy_asset_key")
+        return target.read_bytes()
+
     def _save_local(self, key: str, data: bytes) -> StoredFile:
         upload_root = Path(self.settings.local_upload_dir)
         destination = upload_root / key

@@ -1,0 +1,591 @@
+{
+  "normal": {
+    "score": 23,
+    "recommendation": "skip",
+    "reason_summary": "Skip for now: near duplicate risk is high, and it adds limited new coverage with has limited pairing options.",
+    "analysis": {
+      "conclusion": "skip",
+      "score": 23,
+      "summary": "Skip for now: near duplicate risk is high, and it adds limited new coverage with has limited pairing options.",
+      "dimensions": {
+        "outfit_potential": 30,
+        "scene_match": 68,
+        "gap_fill": 35,
+        "duplicate_risk": 100,
+        "idle_risk": 82,
+        "budget_match": null
+      },
+      "duplicate_risk": 100,
+      "idle_risk": 82,
+      "outfit_potential": 30,
+      "match_scenes": [
+        "日常"
+      ],
+      "suggested_price": null,
+      "product_price": null,
+      "score_breakdown": {
+        "duplicate_risk": 100,
+        "wardrobe_gap": 35,
+        "outfit_potential": 30,
+        "scene_match": 68,
+        "idle_risk": 82
+      },
+      "pros": [
+        "可继续观察"
+      ],
+      "cons": [
+        "新增覆盖有限",
+        "可搭配方案偏少",
+        "已有相似单品",
+        "建议先跳过"
+      ],
+      "outfit_ideas": [
+        {
+          "scene": "日常",
+          "items": [
+            {
+              "candidate_id": "candidate-1",
+              "category": "top",
+              "reason": "待购买候选单品"
+            },
+            {
+              "garment_id": "fixture-bottom",
+              "category": "bottom",
+              "reason": "来自你已确认的衣橱",
+              "image_url": "/v2/assets/test/content"
+            },
+            {
+              "garment_id": "fixture-shoes",
+              "category": "shoes",
+              "reason": "来自你已确认的衣橱",
+              "image_url": "/v2/assets/test/content"
+            }
+          ],
+          "seasons": [
+            "summer"
+          ],
+          "warnings": [],
+          "reason": "候选与已确认的上衣、下装及鞋组成完整搭配。 季节标签存在共同交集。"
+        }
+      ],
+      "idle_risk_detail": {
+        "level": "高",
+        "reason": "重复或不好搭的概率偏高，建议冷静后再买。"
+      },
+      "next_actions": [
+        "save",
+        "share",
+        "analyze_another",
+        "upload_wardrobe"
+      ],
+      "duplicate_score": 100,
+      "wardrobe_gap_score": 35,
+      "pairing_score": 30,
+      "decision_factors": [
+        "top candidate",
+        "very similar item already owned",
+        "limited pairing support",
+        "confirmed_wardrobe_count:3",
+        "preference_adjustment:0",
+        "feedback_adjustment:0"
+      ],
+      "similar_items": [
+        {
+          "garment_id": "fixture-top",
+          "image_url": "/v2/assets/test/content",
+          "similarity": 100.0,
+          "matched_reasons": [
+            "same category",
+            "similar color",
+            "similar style",
+            "similar material",
+            "season overlap",
+            "similar fit",
+            "shared tags"
+          ]
+        },
+        {
+          "garment_id": "fixture-bottom",
+          "image_url": "/v2/assets/test/content",
+          "similarity": 70.0,
+          "matched_reasons": [
+            "similar color",
+            "similar style",
+            "similar material",
+            "season overlap",
+            "similar fit",
+            "shared tags"
+          ]
+        },
+        {
+          "garment_id": "fixture-shoes",
+          "image_url": "/v2/assets/test/content",
+          "similarity": 70.0,
+          "matched_reasons": [
+            "similar color",
+            "similar style",
+            "similar material",
+            "season overlap",
+            "similar fit",
+            "shared tags"
+          ]
+        }
+      ],
+      "coverage": {
+        "status": "sufficient",
+        "confirmed_garment_count": 3,
+        "dimensions": {
+          "duplicate_risk": true,
+          "gap_fill": true,
+          "outfit_potential": true,
+          "idle_risk": true,
+          "budget_match": null
+        },
+        "missing": []
+      },
+      "evidence": {
+        "rule_version": "purchase-v2-combinations",
+        "analysis_source": "remote",
+        "provider": null,
+        "model_version": null,
+        "confirmed_garment_ids": [
+          "fixture-top",
+          "fixture-bottom",
+          "fixture-shoes"
+        ],
+        "actual_price": "129.0",
+        "currency": "CNY",
+        "budget_max": null,
+        "hard_constraints": [],
+        "excluded_garment_ids": []
+      }
+    },
+    "actual_price": "129.00",
+    "coverage": {
+      "status": "sufficient",
+      "confirmed_garment_count": 3,
+      "dimensions": {
+        "duplicate_risk": true,
+        "gap_fill": true,
+        "outfit_potential": true,
+        "idle_risk": true,
+        "budget_match": null
+      },
+      "missing": []
+    },
+    "evidence": {
+      "rule_version": "purchase-v2-combinations",
+      "analysis_source": "remote",
+      "provider": null,
+      "model_version": null,
+      "confirmed_garment_ids": [
+        "fixture-top",
+        "fixture-bottom",
+        "fixture-shoes"
+      ],
+      "actual_price": "129.0",
+      "currency": "CNY",
+      "budget_max": null,
+      "hard_constraints": [],
+      "excluded_garment_ids": []
+    }
+  },
+  "insufficient": {
+    "score": null,
+    "recommendation": "consider",
+    "reason_summary": "资料不足：请先确认几件常穿衣物，再查看个人化购买建议。",
+    "analysis": {
+      "conclusion": "consider",
+      "score": null,
+      "summary": "请先录入并确认衣物，以便比较重复度和搭配覆盖。",
+      "dimensions": {
+        "outfit_potential": null,
+        "scene_match": null,
+        "gap_fill": null,
+        "duplicate_risk": null,
+        "idle_risk": null,
+        "budget_match": null
+      },
+      "duplicate_risk": null,
+      "idle_risk": null,
+      "outfit_potential": null,
+      "match_scenes": [
+        "日常"
+      ],
+      "suggested_price": null,
+      "product_price": null,
+      "score_breakdown": null,
+      "pros": [],
+      "cons": [
+        "已录入衣物不足，个人化建议暂不可用。"
+      ],
+      "outfit_ideas": [],
+      "idle_risk_detail": null,
+      "next_actions": [
+        "upload_wardrobe",
+        "analyze_another"
+      ],
+      "duplicate_score": null,
+      "wardrobe_gap_score": null,
+      "pairing_score": null,
+      "decision_factors": [
+        "insufficient_confirmed_wardrobe"
+      ],
+      "similar_items": [],
+      "coverage": {
+        "status": "insufficient",
+        "confirmed_garment_count": 0,
+        "dimensions": {
+          "duplicate_risk": false,
+          "gap_fill": false,
+          "outfit_potential": false,
+          "idle_risk": false,
+          "budget_match": null
+        },
+        "missing": [
+          "confirmed_wardrobe"
+        ]
+      },
+      "evidence": {
+        "rule_version": "purchase-v2-combinations",
+        "analysis_source": "remote",
+        "provider": null,
+        "model_version": null,
+        "confirmed_garment_ids": [],
+        "actual_price": null,
+        "currency": null,
+        "budget_max": null,
+        "hard_constraints": [],
+        "excluded_garment_ids": []
+      }
+    },
+    "actual_price": null,
+    "coverage": {
+      "status": "insufficient",
+      "confirmed_garment_count": 0,
+      "dimensions": {
+        "duplicate_risk": false,
+        "gap_fill": false,
+        "outfit_potential": false,
+        "idle_risk": false,
+        "budget_match": null
+      },
+      "missing": [
+        "confirmed_wardrobe"
+      ]
+    },
+    "evidence": {
+      "rule_version": "purchase-v2-combinations",
+      "analysis_source": "remote",
+      "provider": null,
+      "model_version": null,
+      "confirmed_garment_ids": [],
+      "actual_price": null,
+      "currency": null,
+      "budget_max": null,
+      "hard_constraints": [],
+      "excluded_garment_ids": []
+    }
+  },
+  "hard_constraint": {
+    "score": null,
+    "recommendation": "skip",
+    "reason_summary": "实际价格超过你的预算上限。",
+    "analysis": {
+      "conclusion": "skip",
+      "score": null,
+      "summary": "实际价格超过你的预算上限。",
+      "dimensions": {
+        "outfit_potential": null,
+        "scene_match": null,
+        "gap_fill": null,
+        "duplicate_risk": null,
+        "idle_risk": null,
+        "budget_match": null
+      },
+      "duplicate_risk": null,
+      "idle_risk": null,
+      "outfit_potential": null,
+      "match_scenes": [
+        "日常"
+      ],
+      "suggested_price": null,
+      "product_price": null,
+      "score_breakdown": null,
+      "pros": [],
+      "cons": [
+        "已录入衣物不足，个人化建议暂不可用。"
+      ],
+      "outfit_ideas": [],
+      "idle_risk_detail": null,
+      "next_actions": [
+        "upload_wardrobe",
+        "analyze_another"
+      ],
+      "duplicate_score": null,
+      "wardrobe_gap_score": null,
+      "pairing_score": null,
+      "decision_factors": [
+        "over_budget"
+      ],
+      "similar_items": [],
+      "coverage": {
+        "status": "sufficient",
+        "confirmed_garment_count": 3,
+        "dimensions": {
+          "duplicate_risk": true,
+          "gap_fill": true,
+          "outfit_potential": true,
+          "idle_risk": true,
+          "budget_match": false
+        },
+        "missing": [
+          "budget_match"
+        ]
+      },
+      "evidence": {
+        "rule_version": "purchase-v2-combinations",
+        "analysis_source": "remote",
+        "provider": null,
+        "model_version": null,
+        "confirmed_garment_ids": [
+          "fixture-top",
+          "fixture-bottom",
+          "fixture-shoes"
+        ],
+        "actual_price": "129.0",
+        "currency": "CNY",
+        "budget_max": "100.0",
+        "hard_constraints": [
+          "over_budget"
+        ],
+        "excluded_garment_ids": []
+      }
+    },
+    "actual_price": "129.00",
+    "coverage": {
+      "status": "sufficient",
+      "confirmed_garment_count": 3,
+      "dimensions": {
+        "duplicate_risk": true,
+        "gap_fill": true,
+        "outfit_potential": true,
+        "idle_risk": true,
+        "budget_match": false
+      },
+      "missing": [
+        "budget_match"
+      ]
+    },
+    "evidence": {
+      "rule_version": "purchase-v2-combinations",
+      "analysis_source": "remote",
+      "provider": null,
+      "model_version": null,
+      "confirmed_garment_ids": [
+        "fixture-top",
+        "fixture-bottom",
+        "fixture-shoes"
+      ],
+      "actual_price": "129.0",
+      "currency": "CNY",
+      "budget_max": "100.0",
+      "hard_constraints": [
+        "over_budget"
+      ],
+      "excluded_garment_ids": []
+    }
+  },
+  "unknown_price": {
+    "score": 23,
+    "recommendation": "skip",
+    "reason_summary": "Skip for now: near duplicate risk is high, and it adds limited new coverage with has limited pairing options.",
+    "analysis": {
+      "conclusion": "skip",
+      "score": 23,
+      "summary": "Skip for now: near duplicate risk is high, and it adds limited new coverage with has limited pairing options.",
+      "dimensions": {
+        "outfit_potential": 30,
+        "scene_match": 68,
+        "gap_fill": 35,
+        "duplicate_risk": 100,
+        "idle_risk": 82,
+        "budget_match": null
+      },
+      "duplicate_risk": 100,
+      "idle_risk": 82,
+      "outfit_potential": 30,
+      "match_scenes": [
+        "日常"
+      ],
+      "suggested_price": null,
+      "product_price": null,
+      "score_breakdown": {
+        "duplicate_risk": 100,
+        "wardrobe_gap": 35,
+        "outfit_potential": 30,
+        "scene_match": 68,
+        "idle_risk": 82
+      },
+      "pros": [
+        "可继续观察"
+      ],
+      "cons": [
+        "新增覆盖有限",
+        "可搭配方案偏少",
+        "已有相似单品",
+        "建议先跳过"
+      ],
+      "outfit_ideas": [
+        {
+          "scene": "日常",
+          "items": [
+            {
+              "candidate_id": "candidate-1",
+              "category": "top",
+              "reason": "待购买候选单品"
+            },
+            {
+              "garment_id": "fixture-bottom",
+              "category": "bottom",
+              "reason": "来自你已确认的衣橱",
+              "image_url": "/v2/assets/test/content"
+            },
+            {
+              "garment_id": "fixture-shoes",
+              "category": "shoes",
+              "reason": "来自你已确认的衣橱",
+              "image_url": "/v2/assets/test/content"
+            }
+          ],
+          "seasons": [
+            "summer"
+          ],
+          "warnings": [],
+          "reason": "候选与已确认的上衣、下装及鞋组成完整搭配。 季节标签存在共同交集。"
+        }
+      ],
+      "idle_risk_detail": {
+        "level": "高",
+        "reason": "重复或不好搭的概率偏高，建议冷静后再买。"
+      },
+      "next_actions": [
+        "save",
+        "share",
+        "analyze_another",
+        "upload_wardrobe"
+      ],
+      "duplicate_score": 100,
+      "wardrobe_gap_score": 35,
+      "pairing_score": 30,
+      "decision_factors": [
+        "top candidate",
+        "very similar item already owned",
+        "limited pairing support",
+        "confirmed_wardrobe_count:3",
+        "preference_adjustment:0",
+        "feedback_adjustment:0",
+        "user_preferences:{\"budget_max\": \"100\"}"
+      ],
+      "similar_items": [
+        {
+          "garment_id": "fixture-top",
+          "image_url": "/v2/assets/test/content",
+          "similarity": 100.0,
+          "matched_reasons": [
+            "same category",
+            "similar color",
+            "similar style",
+            "similar material",
+            "season overlap",
+            "similar fit",
+            "shared tags"
+          ]
+        },
+        {
+          "garment_id": "fixture-bottom",
+          "image_url": "/v2/assets/test/content",
+          "similarity": 70.0,
+          "matched_reasons": [
+            "similar color",
+            "similar style",
+            "similar material",
+            "season overlap",
+            "similar fit",
+            "shared tags"
+          ]
+        },
+        {
+          "garment_id": "fixture-shoes",
+          "image_url": "/v2/assets/test/content",
+          "similarity": 70.0,
+          "matched_reasons": [
+            "similar color",
+            "similar style",
+            "similar material",
+            "season overlap",
+            "similar fit",
+            "shared tags"
+          ]
+        }
+      ],
+      "coverage": {
+        "status": "sufficient",
+        "confirmed_garment_count": 3,
+        "dimensions": {
+          "duplicate_risk": true,
+          "gap_fill": true,
+          "outfit_potential": true,
+          "idle_risk": true,
+          "budget_match": null
+        },
+        "missing": []
+      },
+      "evidence": {
+        "rule_version": "purchase-v2-combinations",
+        "analysis_source": "remote",
+        "provider": null,
+        "model_version": null,
+        "confirmed_garment_ids": [
+          "fixture-top",
+          "fixture-bottom",
+          "fixture-shoes"
+        ],
+        "actual_price": null,
+        "currency": null,
+        "budget_max": "100.0",
+        "hard_constraints": [],
+        "excluded_garment_ids": []
+      }
+    },
+    "actual_price": null,
+    "coverage": {
+      "status": "sufficient",
+      "confirmed_garment_count": 3,
+      "dimensions": {
+        "duplicate_risk": true,
+        "gap_fill": true,
+        "outfit_potential": true,
+        "idle_risk": true,
+        "budget_match": null
+      },
+      "missing": []
+    },
+    "evidence": {
+      "rule_version": "purchase-v2-combinations",
+      "analysis_source": "remote",
+      "provider": null,
+      "model_version": null,
+      "confirmed_garment_ids": [
+        "fixture-top",
+        "fixture-bottom",
+        "fixture-shoes"
+      ],
+      "actual_price": null,
+      "currency": null,
+      "budget_max": "100.0",
+      "hard_constraints": [],
+      "excluded_garment_ids": []
+    }
+  }
+}

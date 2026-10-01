@@ -18,12 +18,11 @@ AiWardrobe keeps a candidate separate from a confirmed garment. The wardrobe onl
 ## 核心体验 / Core experience
 
 - 邮箱登录、JWT 会话与轻量级风格偏好。
-- 单件或批量衣物上传，支持客户端压缩、AI 识别和人工修正。
+- 单件或批量衣物上传，进入可恢复后台任务，逐项显示阶段、错误与重试；识别结果待用户确认。
 - 按场景、季节、温度和目标单品生成穿搭，支持历史与收藏。
-- 通过商品 URL 或图片创建购买候选，展示重复风险、闲置风险、搭配潜力、衣橱相似度、价格建议和下一步动作。
-- 将确认后的 PurchaseCandidate 保存为正式 Garment。
-- 输出衣橱分布、场景覆盖、重复风险、低利用单品、缺口和避购建议。
-- 使用 Open-Meteo 天气服务，以及 Demo 或已配置的 Taobao/Tmall 商品候选。
+- 通过商品 URL 或图片创建可恢复购买候选，查看依据、修正识别、记录购买/跳过/退货，并将确认拥有的候选关联到衣橱。
+- 购买候选、搭配历史、反馈与穿着记录持久保存；衣橱报告根据实际穿着事件计算利用情况，数据不足时不推断长期闲置。
+- 使用 Open-Meteo 天气服务，以及 Demo 或已配置的 Taobao/Tmall 商品搜索；推荐商品图片分析进入同一后台任务流程。
 
 ## 工作流 / How it works
 
@@ -43,7 +42,9 @@ Windows 下可使用一键启动：
 .\start.bat
 ~~~
 
-默认本地模式会启动 FastAPI 后端和 Vite 前端，使用 SQLite 与本地上传存储：
+默认本地模式会启动独立 FastAPI API、后台 worker 和 Vite 前端，共用数据库、私有存储及 provider 配置；未配置时使用 SQLite 与本地存储。进程隐藏运行，日志保存在 `.local-services/`。停止服务使用 `start.bat stop-local`，会校验进程身份后停止本次记录的服务。
+
+优化分支八项审核问题的修复与本地复验见[修复报告](docs/reviews/2026-10-01-optimization-fix-verification.md)；PostgreSQL 和真实供应商验证仍需在对应环境执行。[部署说明](docs/deployment-and-migrations.md)包含独立 worker、迁移与恢复操作。
 
 - 前端 / Frontend: http://localhost:5174
 - 后端 API / Backend API: http://127.0.0.1:8031/docs
@@ -52,8 +53,11 @@ Windows 下可使用一键启动：
 
 ~~~powershell
 .\start.bat backend
+.\start.bat worker
 .\start.bat frontend
 ~~~
+
+单独启动 API 不会消费任务，须另启 worker。
 
 手动启动后端：
 
@@ -61,7 +65,7 @@ Windows 下可使用一键启动：
 cd backend
 uv venv .venv --python python
 uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
-.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031
 ~~~
 
 手动启动前端：
@@ -80,6 +84,9 @@ npm run dev
 - POST /outfits/generate：按场景、季节、天气与目标单品生成搭配。
 - GET /reports/wardrobe：获取衣橱分布、缺口和风险报告。
 - GET 或 PUT /preferences/me：读取或修改风格偏好。
+- POST /v2/tasks/garment-upload 与 POST /v2/tasks/purchase-analysis：提交可恢复的衣物或购买分析任务；GET /v2/tasks 查询进度。
+- GET /v2/purchase/candidates：按游标查看购买记录；候选的修正、决定、关联衣橱和重新分析接口位于 `/v2/purchase/candidates/{id}`。
+- POST /v2/feedback 与 POST /v2/wear-events：保存搭配/候选反馈和实际穿着记录。
 
 ## 模型、商品与天气配置 / Providers
 
@@ -127,6 +134,30 @@ docker compose up --build
 - 后端 / Backend: http://localhost:8000
 - MinIO Console: http://localhost:9101
 - PostgreSQL: localhost:5432
+
+Docker Compose 会启动独立的 `worker` 服务处理图片与购买分析任务。生产环境需单独部署 worker，并与 API 服务共享数据库、存储和 provider 配置。
+
+## 数据库迁移与私有图片
+
+开发环境在应用启动时自动应用版本化 schema migrations。生产环境不会自动改表：部署前需使用与应用相同的 `DATABASE_URL` 执行迁移，并将 `ENVIRONMENT=production`、至少 32 字节的随机 `JWT_SECRET` 和 provider/storage 凭证配置好。
+
+~~~powershell
+cd backend
+python -m app.migrations upgrade
+python -m app.migrations current
+~~~
+
+从旧版本升级时，先备份数据库和图片存储，再用与 API 相同的数据库、存储配置运行私有图片迁移。默认只校验，不写入；检查输出中的失败记录后再明确应用：
+
+~~~powershell
+python -m app.asset_migration
+python -m app.asset_migration --apply
+python -m app.asset_migration
+~~~
+
+最后一次 dry-run 应显示 `scanned: 0` 且 `failed` 为空。生产 API 启动会拒绝旧 schema 或仍引用公开存储键的私人图片。升级期间保留数据库和对象存储备份；迁移失败时先修复失败记录再发布生产 API。
+
+更多设计与接口资料见 [系统架构](docs/architecture.md)、[v2 API guide](docs/api-v2.md) 和[文档索引](docs/README.md)。
 
 ## 验证 / Verify
 

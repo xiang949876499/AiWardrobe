@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import login
@@ -38,3 +39,6 @@ def test_put_preferences_upserts_current_user_preferences(client: TestClient) ->
     assert fetched.status_code == 200
     assert fetched.json()["styles"] == ["简约", "休闲"]
     assert fetched.json()["budget_range"] == "100-300"
+
+
+pytestmark = pytest.mark.usefixtures("legacy_worker")
