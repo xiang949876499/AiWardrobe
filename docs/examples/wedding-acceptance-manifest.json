@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "samples": [
+    {
+      "project_id": "REPLACE_PROJECT_1",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_1",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_2",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_2",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_3",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_3",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_4",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_4",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_5",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_5",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_6",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_6",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_7",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_7",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_8",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_8",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_9",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_9",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    },
+    {
+      "project_id": "REPLACE_PROJECT_10",
+      "version": 1,
+      "token_env": "WEDDING_ACCEPTANCE_ACTOR_10",
+      "adult_authorized": false,
+      "provider_scope_checked": false,
+      "materials_checked": false,
+      "commercial_music_checked": false,
+      "music_track_id": "REPLACE_LICENSED_TRACK",
+      "categories": {
+        "a_closeup": "REPLACE_CLOSEUP_SHOT",
+        "both": "REPLACE_BOTH_SHOT",
+        "side_turn": "REPLACE_TURN_SHOT",
+        "holding_hands": "REPLACE_HANDS_SHOT"
+      }
+    }
+  ]
+}
