@@ -1,5 +1,12 @@
 """Acceptance runner uses mocked application HTTP only; never dispatch providers."""
 import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import threading
+import time
 from email.message import Message
 from io import BytesIO
 
@@ -473,3 +480,102 @@ def test_failure_evidence_exposes_fixed_codes_never_private_provider_text():
     row = runner.assess(manifest()["samples"][0], snap, final_render(snap), evidence())
     assert row["failures"][0]["reason"] == "UNCLASSIFIED_SERVER_FAILURE"
     assert "private signed" not in json.dumps(row)
+
+
+def deadline_worker(tmp_path, phase):
+    """Inject blocking stdlib phases only inside the disposable HTTP process."""
+    driver = tmp_path / "worker.py"
+    entered, late = tmp_path / "entered", tmp_path / "late"
+    source = '''
+import http.client, io, json, pathlib, runpy, socket, ssl, sys, time
+scope = runpy.run_path(MODULE)
+entered, late = pathlib.Path(ENTERED), pathlib.Path(LATE)
+def block(*args, **kwargs):
+    entered.write_text(PHASE)
+    time.sleep(4)
+    late.write_text("would continue request")
+    raise OSError("synthetic slow phase")
+class File:
+    def __init__(self): self.lines = 0
+    def readline(self, limit=-1):
+        self.lines += 1
+        if self.lines == 1: return b"HTTP/1.1 200 OK\\r\\n"
+        if self.lines == 2 and PHASE == "headers":
+            entered.write_text(PHASE)
+            for _ in range(40): time.sleep(.1)
+            late.write_text("would finish headers")
+        return [b"", b"", b"Content-Type: application/json\\r\\n", b"Content-Length: 5\\r\\n", b"\\r\\n"][self.lines]
+    def read1(self, size=-1): return block()
+    def close(self): pass
+class Socket:
+    def setsockopt(self, *args): pass
+    def sendall(self, data): pass
+    def makefile(self, *args): return File()
+    def close(self): pass
+if PHASE == "dns": socket.getaddrinfo = block
+elif PHASE == "connect":
+    socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 9))] * 8
+    calls = []
+    def connect(*args):
+        calls.append(1); entered.write_text(str(len(calls)))
+        time.sleep(.25)
+        if len(calls) == 8: late.write_text("would finish addresses")
+        raise TimeoutError("synthetic connection delay")
+    socket.socket.connect = connect
+elif PHASE in ("tls", "headers", "body"):
+    socket.create_connection = lambda *args, **kwargs: Socket()
+    if PHASE == "tls": ssl.SSLContext.wrap_socket = block
+elif PHASE == "stdin": block()
+scope["http_worker_main"]()
+'''
+    prefix = "\n".join(f"{key} = {value!r}" for key, value in {
+        "MODULE": str(Path(runner.__file__).resolve()), "ENTERED": str(entered),
+        "LATE": str(late), "PHASE": phase}.items())
+    driver.write_text(prefix + "\n" + source)
+    return [sys.executable, "-I", "-B", str(driver)], entered, late
+
+
+@pytest.mark.parametrize("phase", ["dns", "connect", "tls", "headers", "body", "stdin"])
+def test_total_deadline_kills_every_http_phase_and_blocked_ipc(tmp_path, monkeypatch, phase):
+    command, entered, late = deadline_worker(tmp_path, phase)
+    monkeypatch.setattr(runner, "_http_worker_command", lambda: command, raising=False)
+    monkeypatch.setattr(runner, "TIMEOUT", 1.0)
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    children = []; original_popen = subprocess.Popen
+    def capture(*args, **kwargs):
+        child = original_popen(*args, **kwargs); children.append(child); return child
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    api = runner.Transport("https://127.0.0.1:9" if phase == "tls" else "http://127.0.0.1:9", "TOKEN", True)
+    started = time.monotonic()
+    with pytest.raises(runner.Rejected, match="RESPONSE_TIMEOUT"):
+        api.request("POST", "/data", {"padding": "x" * 131072}, "synthetic-key")
+    assert time.monotonic() - started < 2.5
+    assert entered.exists(), "regression must reach the selected phase"
+    if phase == "connect":
+        assert 2 <= int(entered.read_text()) < 8
+    assert len(children) == 1 and children[0].poll() is not None
+    assert not late.exists(), "killed worker must never resume a later paid submission"
+
+
+def test_cli_malformed_http_status_never_prints_private_marker_or_traceback(tmp_path):
+    path = tmp_path / "manifest.json"; path.write_text(json.dumps(manifest()))
+    server = socket.socket(); server.bind(("127.0.0.1", 0)); server.listen(1); server.settimeout(8)
+    port = server.getsockname()[1]
+    def malformed_status():
+        try:
+            connection, _ = server.accept()
+            with connection:
+                connection.recv(8192)
+                connection.sendall(b"HTTP/1.1 PRIVATE_MARKER_DO_NOT_LOG\\r\\n".replace(b"\\r\\n", b"\r\n"))
+        finally:
+            server.close()
+    thread = threading.Thread(target=malformed_status, daemon=True); thread.start()
+    result = subprocess.run([sys.executable, str(Path(runner.__file__).resolve()), "--manifest", str(path),
+                             "--stage", "preflight", "--base-url", f"http://127.0.0.1:{port}"],
+                            env={**os.environ, "WEDDING_ACTOR_0": "synthetic-only"},
+                            capture_output=True, text=True, timeout=10)
+    thread.join(2)
+    assert result.returncode == 2
+    assert json.loads(result.stdout) == {"status": "STOPPED", "reason": "TRANSPORT_FAILED"}
+    assert "PRIVATE_MARKER" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stdout + result.stderr and result.stderr == ""
