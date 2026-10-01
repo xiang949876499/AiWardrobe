@@ -24,7 +24,7 @@ AiWardrobe keeps a candidate separate from a confirmed garment. The wardrobe onl
 - 将确认后的 PurchaseCandidate 保存为正式 Garment。
 - 输出衣橱分布、场景覆盖、重复风险、低利用单品、缺口和避购建议。
 - 使用 Open-Meteo 天气服务，以及 Demo 或已配置的 Taobao/Tmall 商品候选。
-- 提供独立的实验性婚礼 MV 工作区：新人可上传照片、填写故事、共同审核镜头并导出带演示标记的本地样片。
+- 提供独立婚礼 MV 工作区：双方授权、照片与故事、AI 分镜和短镜头任务、共同审核、音乐与字幕、历史成片和私有导出；默认禁用外部模型。
 
 ## 工作流 / How it works
 
@@ -62,14 +62,14 @@ Windows 下可使用一键启动：
 cd backend
 uv venv .venv --python python
 uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
-.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031
 ~~~
 
 手动启动前端：
 
 ~~~powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ~~~
 
@@ -82,7 +82,7 @@ npm run dev
 - GET /reports/wardrobe：获取衣橱分布、缺口和风险报告。
 - GET 或 PUT /preferences/me：读取或修改风格偏好。
 
-婚礼 MV 的当前模型适配状态、运行方式、环境变量与接口列表见[婚礼 MV 运行说明](./docs/wedding-mv.md)。本地一键启动会额外启动婚礼 worker；婚礼演示输出不会伪装成真实 AI 视频。
+前端使用 Node 24.14.x（`>=24.14.0 <25`）。婚礼 MV 的固定模型、worker、音乐授权配置与接口见[运行说明](./docs/wedding-mv.md)，工程证据和待完成的真人付费验收见[完成核查](./docs/wedding-mv-completion-audit-2026-10-01.md)。本分支一键启动会额外启动婚礼 worker，使用 SQLite 演示数据库；正式制作使用 PostgreSQL 和私有存储。
 
 ## 模型、商品与天气配置 / Providers
 
@@ -123,6 +123,8 @@ OPEN_METEO_BASE_URL=https://api.open-meteo.com
 ~~~powershell
 docker compose up --build
 ~~~
+
+使用 Docker Compose 2.24 或以上；API 与婚礼 worker 共享 `.env`，实际授权音乐目录只读挂载。容器内的音乐目录、FFmpeg 与字体配置见婚礼运行说明。
 
 默认服务：
 

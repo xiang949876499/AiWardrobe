@@ -1,4 +1,6 @@
 .env
+/runtime/wedding-music/
+/acceptance/
 .venv/
 __pycache__/
 *.py[cod]

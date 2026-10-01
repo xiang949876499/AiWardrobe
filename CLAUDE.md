@@ -13,7 +13,7 @@ AiWardrobe is an AI wardrobe assistant with buy-before-you-buy analysis, wardrob
 - **Storage**: S3-compatible (MinIO in Docker, boto3 client), local filesystem fallback
 - **Database**: PostgreSQL in production, SQLite for local dev
 - **AI**: OpenAI-compatible multimodal API (`gpt-4o-mini`), with demo mode fallback
-- **Infrastructure**: Docker Compose (postgres, minio, minio-init, backend, frontend)
+- **Infrastructure**: Docker Compose (postgres, minio, minio-init, backend, wedding-worker, frontend)
 
 ## Commands
 
@@ -23,7 +23,8 @@ AiWardrobe is an AI wardrobe assistant with buy-before-you-buy analysis, wardrob
 cd backend
 uv venv .venv --python python
 uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
-.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031
+python -m app.wedding_worker --poll-seconds 2
 python -m pytest
 ```
 
@@ -31,7 +32,7 @@ python -m pytest
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 npm run build
 npm test
@@ -43,7 +44,7 @@ npm test
 docker compose up --build
 ```
 
-Services: frontend `:5173`, backend `:8000`, wedding worker, MinIO console `:9001`, Postgres `:5432`.
+Node `>=24.14.0 <25`. Local Vite `:5174` proxies to API `:8031`. Compose >=2.24: frontend `:5173`, backend `:8000`, wedding worker, MinIO console `:9101`, Postgres `:5432`. API/worker share `.env` and the read-only licensed music directory.
 
 ## Configuration
 
@@ -61,7 +62,7 @@ Copy `.env.example` to `.env`. Key env vars:
 
 ### Backend (`backend/app/`)
 
-- **`main.py`** - FastAPI app creation, middleware (CORS), router registration, startup event (DB tables)
+- **`main.py`** - FastAPI app creation, CORS/router registration and lifespan database/schema initialization
 - **`config.py`** - Pydantic `Settings` loading from env vars
 - **`database.py`** - SQLAlchemy engine/session factory, `get_db` dependency
 - **`models.py`** - domain models for users, preferences, garments, purchase candidates, shopping recommendation runs/items, rate limits, upload sessions, outfits, weather cache, and wedding projects/assets/jobs/reviews
@@ -69,7 +70,8 @@ Copy `.env.example` to `.env`. Key env vars:
 - **`security.py`** - bcrypt password hashing, JWT create/decode (HS256, 7-day expiry), email code HMAC
 - **`ai.py`** - garment analysis and outfit generation via OpenAI-compatible API; falls back to demo mode
 - **`storage.py`** - `LocalStorage` and `S3Storage` drivers behind a common interface
-- **`wedding_service.py`, `wedding_media.py`, `wedding_worker.py`** - separate wedding participant authorization/private storage, provider interfaces and media rendering, and durable background jobs; the worker initializes the database before polling
+- **`wedding_service.py`, `wedding_providers.py`, `wedding_creation.py`, `wedding_worker.py`** - separate participant authorization/private storage, fixed provider adapters and durable story/frame/video jobs
+- **`wedding_authoring.py`, `wedding_accounting.py`, `wedding_render_worker.py`, `wedding_retention.py`** - scoped original-photo/identity gates, music and immutable history, account receipts, leased FFmpeg rendering and reference-aware cleanup
 - **`preferences.py`** - user preference context helper used by purchase analysis and outfit prompts
 - **`purchase_analysis.py`** - deterministic purchase scoring, duplicate/idle risk, outfit potential, price guidance, and next actions
 - **`wardrobe_report.py`** - wardrobe totals, distributions, scene coverage, duplicate risks, low-use items, and gaps
@@ -81,6 +83,9 @@ Key patterns:
 
 - All user endpoints use `Depends(get_db)` for DB sessions and `Depends(get_current_user)` (JWT bearer) for auth
 - Wedding endpoints use their own owner/participant actor scope. Both participants must have active portrait consent before media access or processing; revoked consent cancels renders and blocks export.
+- Wedding writes lock project before child task/render; close transactions before provider/storage/FFmpeg I/O. Known provider IDs resume GET; unknown submissions retain reservations and require reconciliation rather than another paid POST.
+- Preserve exact asset/person reviews and immutable render snapshots. Account financial receipts survive project deletion. Same-version draft edits use raw `If-Match` fingerprints; enqueue drains valid local saves first.
+- PostgreSQL naive-time migration requires original writer timezone provenance; already-aware timestamps remain absolute. Photo quality uses per-thread CPU/OpenCL-off detection; see `docs/wedding-mv.md` for rationale and commands.
 - Garments have a `review_status` workflow: AI results start as `pending_review`, user can `PATCH` to override, marking them `ready`
 - Purchase candidates stay separate from garments until saved; shopping recommendation items can link to purchase candidates after analysis
 - Outfits store an `items` JSON column with `[{garment_id, image_url, category}]` and a `weather_snapshot` JSON
@@ -108,7 +113,7 @@ Supporting files:
 - **`types.ts`** - TypeScript interfaces mirroring backend Pydantic schemas
 - **`styles.css`** - Plus Jakarta Sans, rose/pink brand (`#db2777`), responsive breakpoints at 800px and 430px, CSS Grid layouts, reduced-motion support
 
-Vite proxies `/auth`, `/garments`, `/uploads`, `/outfits`, `/purchase`, `/shopping`, `/reports`, `/preferences`, `/weather`, and `/static` to `localhost:8000`.
+Vite proxies `/v2`, legacy wardrobe routes and explicit wedding routes to `http://127.0.0.1:8031`; override with `VITE_BACKEND_TARGET`. Wedding draft/blob recovery must remain scoped to account, actor, project and content version. See `docs/wedding-mv.md` and the completion audit for actual contracts and external acceptance limits.
 
 ### Test Strategy
 
