@@ -461,3 +461,15 @@ def test_story_must_start_with_exact_standard_composition():
     snap = snapshot(); snap["story"]["shots"][7].update(shot_type="scene_ai", person_keys=[])
     with pytest.raises(runner.Rejected, match="STANDARD_STORY_COMPOSITION_REQUIRED"):
         runner.check_preflight(manifest()["samples"][0], snap)
+
+
+def test_failure_evidence_exposes_fixed_codes_never_private_provider_text():
+    snap = snapshot()
+    snap["jobs"] = [dict(id="failed1", project_version=1, status="failed", total_shots=1,
+                         error_code="PROVIDER_OUTCOME_UNKNOWN")]
+    row = runner.assess(manifest()["samples"][0], snap, final_render(snap), evidence())
+    assert row["failures"] == [{"job_id": "failed1", "reason": "PROVIDER_OUTCOME_UNKNOWN"}]
+    snap["jobs"][0]["error_code"] = "private signed URL and token"
+    row = runner.assess(manifest()["samples"][0], snap, final_render(snap), evidence())
+    assert row["failures"][0]["reason"] == "UNCLASSIFIED_SERVER_FAILURE"
+    assert "private signed" not in json.dumps(row)
