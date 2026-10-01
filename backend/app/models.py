@@ -360,6 +360,7 @@ class WeddingProject(Base):
     style: Mapped[str] = mapped_column(String(32), default="warm_documentary", nullable=False)
     target_duration_ms: Mapped[int] = mapped_column(Integer, default=90_000, nullable=False)
     aspect_ratio: Mapped[str] = mapped_column(String(8), default="16:9", nullable=False)
+    selected_music: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     frame_approved_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     budget_limit_fen: Mapped[int] = mapped_column(Integer, default=15_000, nullable=False)
     budget_delivery_reserve_fen: Mapped[int] = mapped_column(Integer, default=2_000, nullable=False)
@@ -471,6 +472,9 @@ class WeddingAsset(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quality: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    quality_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -662,6 +666,10 @@ class RenderVersion(Base):
         index=True,
         nullable=False,
     )
+    timeline_snapshot: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    music_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    restored_from_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     timeline_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     input_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     preview_asset_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_assets.id"), nullable=True)

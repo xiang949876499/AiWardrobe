@@ -110,6 +110,9 @@ def _job_shots(db: Session, job: GenerationJob) -> list[StoryboardShot]:
     statement = select(StoryboardShot).where(StoryboardShot.story_version_id == job.story_version_id)
     if job.target_shot_id is not None:
         statement = statement.where(StoryboardShot.id == job.target_shot_id)
+    if job.target_shot_id is None:
+        from app.wedding_authoring import pending_video_shots
+        return pending_video_shots(db, db.get(StoryVersion, job.story_version_id), job.id)
     return list(db.execute(statement.order_by(StoryboardShot.shot_index)).scalars())
 
 
@@ -442,6 +445,8 @@ def _dispatch_preflight(
             return None, "BUDGET_RESERVATION_INVALID"
         try:
             validate_active_consents(db, project)
+            from app.wedding_authoring import require_photo_readiness
+            require_photo_readiness(db, project)
         except HTTPException as exc:
             return None, str(exc.detail) if isinstance(exc.detail, str) else "CONSENT_REQUIRED"
         shot = db.get(StoryboardShot, shot_id)
@@ -975,47 +980,68 @@ def process_claimed_render_version(
             validate_active_consents(db, project)
         except HTTPException:
             return _fail_render(session_factory, render_id, "CONSENT_REQUIRED")
-        story = db.execute(
-            select(StoryVersion).where(
-                StoryVersion.project_id == project.id,
-                StoryVersion.version == render.project_version,
+        from app.wedding_authoring import validate_timeline, historical_music
+        if render.invalidated_at:
+            return _fail_render(session_factory, render_id, "RENDER_HISTORY_INVALID")
+        music_snapshot = render.music_snapshot
+        if render.timeline_snapshot:
+            try:
+                validate_timeline(db, project, render.timeline_snapshot)
+                historical_music(music_snapshot)
+            except HTTPException as exc:
+                return _fail_render(session_factory, render_id, str(exc.detail))
+            assets = [db.get(WeddingAsset, item['asset_id']) for item in render.timeline_snapshot]
+            input_specs = [(asset.object_key, asset.mime, item['subtitle'], item['duration_ms'])
+                           for asset,item in zip(assets,render.timeline_snapshot,strict=True)]
+            render_version = render.project_version
+            render_duration = sum(item['duration_ms'] for item in render.timeline_snapshot)
+            has_demo_asset = any(asset.provider == 'local_demo' for asset in assets)
+        else:
+            story = db.execute(
+                select(StoryVersion).where(
+                    StoryVersion.project_id == project.id,
+                    StoryVersion.version == render.project_version,
+                )
+            ).scalars().first()
+            shots = list(
+                db.execute(
+                    select(StoryboardShot)
+                    .where(StoryboardShot.story_version_id == story.id if story else False)
+                    .order_by(StoryboardShot.shot_index)
+                ).scalars()
             )
-        ).scalars().first()
-        shots = list(
-            db.execute(
-                select(StoryboardShot)
-                .where(StoryboardShot.story_version_id == story.id if story else False)
-                .order_by(StoryboardShot.shot_index)
-            ).scalars()
-        )
-        if not story or len(shots) != len(render.input_asset_ids) or not shots:
-            return _fail_render(session_factory, render_id, "RENDER_INPUTS_STALE")
-        render_inputs: list[RenderInput] = []
-        assets: list[WeddingAsset] = []
-        for shot, asset_id in zip(shots, render.input_asset_ids, strict=True):
-            selected_asset_id = shot.selected_asset_id
-            if shot.selected_candidate_id:
-                candidate = db.get(ShotCandidate, shot.selected_candidate_id)
-                if candidate is None or candidate.shot_id != shot.id:
-                    return _fail_render(session_factory, render_id, "SELECTED_CANDIDATE_MISSING")
-                selected_asset_id = candidate.asset_id
-            if selected_asset_id != asset_id:
+            if not story or len(shots) != len(render.input_asset_ids) or not shots:
                 return _fail_render(session_factory, render_id, "RENDER_INPUTS_STALE")
-            asset = db.get(WeddingAsset, asset_id)
-            if asset is None or asset.project_id != project.id:
-                return _fail_render(session_factory, render_id, "RENDER_ASSET_MISSING")
-            assets.append(asset)
-            render_inputs.append(RenderInput(storage.read(asset.object_key), asset.mime, shot.subtitle, shot.duration_ms))
-        render_version = render.project_version
-        render_duration = sum(shot.duration_ms for shot in shots)
-        has_demo_asset = any(asset.provider == "local_demo" for asset in assets)
+            render_inputs: list[RenderInput] = []
+            assets: list[WeddingAsset] = []
+            for shot, asset_id in zip(shots, render.input_asset_ids, strict=True):
+                selected_asset_id = shot.selected_asset_id
+                if shot.selected_candidate_id:
+                    candidate = db.get(ShotCandidate, shot.selected_candidate_id)
+                    if candidate is None or candidate.shot_id != shot.id:
+                        return _fail_render(session_factory, render_id, "SELECTED_CANDIDATE_MISSING")
+                    selected_asset_id = candidate.asset_id
+                if selected_asset_id != asset_id:
+                    return _fail_render(session_factory, render_id, "RENDER_INPUTS_STALE")
+                asset = db.get(WeddingAsset, asset_id)
+                if asset is None or asset.project_id != project.id:
+                    return _fail_render(session_factory, render_id, "RENDER_ASSET_MISSING")
+                assets.append(asset)
+                render_inputs.append(RenderInput(storage.read(asset.object_key), asset.mime, shot.subtitle, shot.duration_ms))
+            render_version = render.project_version
+            render_duration = sum(shot.duration_ms for shot in shots)
+            has_demo_asset = any(asset.provider == "local_demo" for asset in assets)
+            input_specs = None
         db.commit()
 
+    if input_specs is not None:
+        render_inputs = [RenderInput(storage.read(key), mime, subtitle, duration) for key,mime,subtitle,duration in input_specs]
     demo = get_settings().wedding_media_mode.strip().lower() == "demo" or has_demo_asset
     try:
         # Preview is always watermarked and silent for local demo assets; export retains that label too.
-        preview = renderer.render(render_inputs, demo=demo, resolution=(1280, 720))
-        export = renderer.render(render_inputs, demo=demo, resolution=(1920, 1080))
+        music_args = {"music_snapshot": music_snapshot} if not demo else {}
+        preview = renderer.render(render_inputs, demo=demo, resolution=(1280, 720), **music_args)
+        export = renderer.render(render_inputs, demo=demo, resolution=(1920, 1080), **music_args)
     except ProviderUnavailable as exc:
         return _fail_render(session_factory, render_id, exc.code)
 
@@ -1035,12 +1061,14 @@ def process_claimed_render_version(
             if render is None or project is None:
                 return _fail_render(session_factory, render_id, "RENDER_NOT_FOUND")
             db.refresh(render)
-            if render.status != RenderVersionStatus.PROCESSING:
+            if render.invalidated_at or render.status != RenderVersionStatus.PROCESSING:
                 return WorkerResult(render.id, str(render.status), "RENDER_CANCELLED")
             if project.current_version != render_version or render.project_version != render_version:
                 db.rollback()
                 return _fail_render(session_factory, render_id, "PROJECT_VERSION_STALE")
             validate_active_consents(db, project)
+            if render.timeline_snapshot:
+                validate_timeline(db, project, render.timeline_snapshot)
             preview_key = storage.put(project.id, preview.data, ".mp4", "video/mp4")
             stored_keys.append(preview_key)
             export_key = storage.put(project.id, export.data, ".mp4", "video/mp4")

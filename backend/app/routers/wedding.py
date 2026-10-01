@@ -80,6 +80,7 @@ from app.schemas import (
 from app.security import hash_code
 from app.wedding_service import (
     WeddingActor,
+    _as_utc,
     WeddingPrivateStorage,
     get_wedding_actor,
     private_storage,
@@ -198,6 +199,10 @@ def _render_response(
 ) -> RenderVersionResponse:
     return RenderVersionResponse(
         id=render.id,
+        timeline=render.timeline_snapshot,
+        music={k:v for k,v in render.music_snapshot.items() if k != "path"},
+        restored_from_id=render.restored_from_id,
+        invalidated_at=render.invalidated_at,
         project_version=render.project_version,
         version=render.version,
         status=render.status,
@@ -329,6 +334,8 @@ def _validate_image(data: bytes, declared_mime: str | None, asset_type: str) -> 
 
 def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bool:
     project = db.get(WeddingProject, asset.project_id)
+    if asset.invalidated_at or (asset.expires_at and _as_utc(asset.expires_at) <= utc_now()):
+        return False
     if project is None:
         return False
     if actor.kind == "owner":
@@ -354,6 +361,7 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
         render_query = select(RenderVersion).where(
             RenderVersion.project_id == project.id,
             RenderVersion.project_version == project.current_version,
+            RenderVersion.invalidated_at.is_(None),
         )
         if asset.asset_type == WeddingAssetType.FINAL_VIDEO:
             render_query = render_query.where(
@@ -439,6 +447,8 @@ def _check_job_prerequisites(db: Session, project: WeddingProject, version: int)
     if project.frame_approved_version != project.current_version:
         raise HTTPException(status_code=409, detail="STATIC_FRAME_APPROVAL_REQUIRED")
     validate_identity_reviews(db, project, story)
+    from app.wedding_authoring import require_photo_readiness
+    require_photo_readiness(db, project)
     return story
 
 
@@ -493,11 +503,18 @@ def get_wedding_capabilities(
     ffmpeg_available = bool(
         (Path(configured_ffmpeg).is_file() if configured_ffmpeg else shutil.which("ffmpeg"))
     )
-    licensed_music_available = bool(
-        settings.wedding_music_file
-        and settings.wedding_music_license_id
-        and Path(settings.wedding_music_file).is_file()
-    )
+    from app.wedding_authoring import music_catalog, select_music
+    licensed_music_available = False
+    try:
+        for track in music_catalog():
+            try:
+                select_music(track['track_id'])
+                licensed_music_available = True
+                break
+            except HTTPException:
+                continue
+    except HTTPException:
+        pass
     from app.wedding_providers import provider_capabilities
     capabilities = provider_capabilities(settings)
     providers = {key: (_capability(row['provider'], demo=True) if demo else
@@ -1061,6 +1078,7 @@ def revoke_consent(
         )
     ).scalars():
         set_render_status(render, RenderVersionStatus.CANCELLED)
+        render.invalidated_at = utc_now()
         render.owner_approved_at = None
         render.preview_asset_id = None
         render.export_asset_id = None
@@ -1135,6 +1153,8 @@ async def upload_wedding_asset(
             raise HTTPException(status_code=413, detail="PROJECT_PHOTO_LIMIT_EXCEEDED")
     data = await file.read(MAX_IMAGE_BYTES + 1)
     mime, suffix, width, height = _validate_image(data, file.content_type, asset_type)
+    from app.wedding_photo_quality import analyze_photo
+    quality = analyze_photo(data, demo=get_settings().wedding_media_mode == "demo") if asset_type == "photo" else {}
     object_key = storage.put(project.id, data, suffix, mime)
     asset = WeddingAsset(
         project_id=project.id,
@@ -1147,6 +1167,8 @@ async def upload_wedding_asset(
         size_bytes=len(data),
         width=width,
         height=height,
+        quality=quality,
+        expires_at=utc_now() + timedelta(days=30),
     )
     db.add(asset)
     _record_audit(db, project, actor, "asset.uploaded", "asset", asset.id, {"asset_type": asset_type})
@@ -1406,8 +1428,12 @@ def approve_storyboard_frames(
             and asset.person_key not in shot.person_keys
         ):
             raise HTTPException(status_code=422, detail="FRAME_ASSET_PERSON_SCOPE_INVALID")
-        shot.frame_asset_id = asset_id
-        set_shot_status(shot, StoryboardShotStatus.FRAME_APPROVED)
+        from app.wedding_authoring import valid_asset
+        if not valid_asset(asset, project.id):
+            raise HTTPException(422, "FRAME_ASSET_INVALID")
+        if shot.frame_asset_id != asset_id or shot.status in ("frame_pending", "draft"):
+            shot.frame_asset_id = asset_id
+            shot.status = StoryboardShotStatus.FRAME_APPROVED
     project.frame_approved_version = project.current_version
     _set_project_status(project, WeddingProjectStatus.READY_TO_GENERATE)
     _record_audit(db, project, actor, "frames.approved", "story_version", story.id)
@@ -1485,6 +1511,7 @@ def create_participant_review(
 @router.get("/wedding-projects/{project_id}/quote", response_model=WeddingQuoteResponse)
 def create_wedding_quote(
     project_id: str,
+    shot_id: str | None = None,
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> WeddingQuoteResponse:
@@ -1498,11 +1525,23 @@ def create_wedding_quote(
     )
     if available_fen <= 0:
         raise HTTPException(status_code=409, detail="BUDGET_LIMIT_EXCEEDED")
+    from app.wedding_authoring import pending_video_shots, video_reservation
+    pending = pending_video_shots(db, story)
+    if shot_id:
+        target = next((s for s in story.shots if s.id == shot_id and s.shot_type != 'photo'), None)
+        if target is None:
+            raise HTTPException(404, 'SHOT_NOT_FOUND')
+        pending = [target]
+    if not pending:
+        raise HTTPException(409, 'NO_SHOTS_REQUIRE_GENERATION')
+    planned = video_reservation(pending)
+    if planned > available_fen:
+        raise HTTPException(409, "BUDGET_LIMIT_EXCEEDED")
     now = utc_now()
     quote = WeddingQuote(
         project_id=project.id,
         project_version=project.current_version,
-        max_budget_fen=available_fen,
+        max_budget_fen=max(planned, 1),
         price_version="wedding-mv-v1",
         issued_at=now,
         expires_at=now + timedelta(minutes=30),
@@ -1556,6 +1595,13 @@ def _create_generation_job(
         raise HTTPException(status_code=409, detail="QUOTE_EXPIRED")
     if project.status not in {WeddingProjectStatus.READY_TO_GENERATE, WeddingProjectStatus.PREVIEW_REVIEW}:
         raise HTTPException(status_code=409, detail="PROJECT_NOT_READY_TO_GENERATE")
+    from app.wedding_authoring import pending_video_shots, video_reservation
+    pending = [target_shot] if target_shot else pending_video_shots(db, story)
+    if not pending:
+        raise HTTPException(409, "NO_SHOTS_REQUIRE_GENERATION")
+    reservation = video_reservation(pending)
+    if reservation > quote.max_budget_fen:
+        raise HTTPException(409, "QUOTE_INVALID")
     job = GenerationJob(
         project_id=project.id,
         story_version_id=story.id,
@@ -1567,7 +1613,7 @@ def _create_generation_job(
         status=WeddingJobStatus.QUEUED,
         progress_stage="queued",
         completed_shots=0,
-        total_shots=1 if target_shot is not None else len(story.shots),
+        total_shots=len(pending),
         reserved_amount_fen=0,
         actual_cost_fen=0,
     )
@@ -1579,7 +1625,7 @@ def _create_generation_job(
             project,
             job,
             reservation_key=f"generation:{idempotency_key}",
-            amount_fen=quote.max_budget_fen,
+            amount_fen=reservation,
         )
         quote.consumed_at = utc_now()
         _set_project_status(project, WeddingProjectStatus.GENERATING)
@@ -1705,6 +1751,9 @@ def select_wedding_shot_candidate(
         raise HTTPException(status_code=404, detail="Shot candidate not found")
     if candidate.project_id != project.id or candidate.shot_id != shot.id:
         raise HTTPException(status_code=404, detail="Shot candidate not found")
+    from app.wedding_authoring import valid_asset
+    if not valid_asset(db.get(WeddingAsset, candidate.asset_id), project.id):
+        raise HTTPException(409, "CANDIDATE_INVALIDATED")
     if candidate.review_result == "rejected":
         raise HTTPException(status_code=409, detail="REJECTED_CANDIDATE_CANNOT_BE_SELECTED")
     shot.selected_candidate_id = candidate.id
@@ -1750,9 +1799,15 @@ def create_render_version(
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> RenderVersionResponse:
-    project = require_project_owner(db, actor, project_id)
+    from app.wedding_creation import locked_owner
+    project = locked_owner(db, actor, project_id)
     _check_version(project, body.version)
     validate_active_consents(db, project)
+    if body.source_render_id:
+        from app.wedding_authoring import render_from_history
+        render = render_from_history(db, project, body.source_render_id, body.subtitles, body.music_track_id)
+        db.commit()
+        return _render_response(render)
     story = _current_story(db, project)
     if story.status != "approved" or project.frame_approved_version != project.current_version:
         raise HTTPException(status_code=409, detail="STORYBOARD_OR_FRAME_APPROVAL_REQUIRED")
@@ -1796,22 +1851,10 @@ def create_render_version(
             if review is None:
                 raise HTTPException(status_code=409, detail="IDENTITY_REVIEW_REQUIRED")
         selected_assets.append(selected_asset.id)
-    prior = db.execute(
-        select(RenderVersion).where(RenderVersion.project_id == project.id).order_by(RenderVersion.version.desc())
-    ).scalars().first()
-    version = prior.version + 1 if prior else 1
-    timeline_hash = hashlib.sha256(
-        f"{project.current_version}:{project.style}:{','.join(selected_assets)}".encode("utf-8")
-    ).hexdigest()
-    render = RenderVersion(
-        project_id=project.id,
-        project_version=project.current_version,
-        version=version,
-        status=RenderVersionStatus.QUEUED,
-        timeline_hash=timeline_hash,
-        input_asset_ids=selected_assets,
-    )
-    db.add(render)
+    from app.wedding_authoring import timeline_snapshot, render_music, new_render, require_photo_readiness
+    require_photo_readiness(db, project)
+    timeline = timeline_snapshot(db, project, shots, selected_assets, body.subtitles)
+    render = new_render(db, project, timeline, render_music(project, body.music_track_id))
     _record_audit(db, project, actor, "render.queued", "render_version", render.id)
     db.commit()
     db.refresh(render)
@@ -1919,6 +1962,7 @@ def create_render_review(
         render is None
         or render.project_id != project.id
         or render.project_version != project.current_version
+        or render.invalidated_at is not None
         or render.status != "ready"
         or render.preview_asset_id != body.asset_id
     ):
@@ -1972,7 +2016,7 @@ def approve_wedding_render(
     render = db.get(RenderVersion, render_version_id)
     if render is None or render.project_id != project.id or render.project_version != project.current_version:
         raise HTTPException(status_code=404, detail="Render version not found")
-    if render.status != "ready" or render.preview_asset_id is None:
+    if render.invalidated_at or render.status != "ready" or render.preview_asset_id is None:
         raise HTTPException(status_code=409, detail="RENDER_NOT_READY")
     for participant in validate_active_consents(db, project):
         review = db.execute(
@@ -1994,6 +2038,10 @@ def approve_wedding_render(
     db.refresh(render)
     return RenderVersionResponse(
         id=render.id,
+        timeline=render.timeline_snapshot,
+        music={k:v for k,v in render.music_snapshot.items() if k != "path"},
+        restored_from_id=render.restored_from_id,
+        invalidated_at=render.invalidated_at,
         project_version=render.project_version,
         version=render.version,
         status=render.status,
@@ -2008,17 +2056,23 @@ def approve_wedding_render(
 @router.post("/wedding-projects/{project_id}/export", response_model=ExportResponse)
 def export_wedding_render(
     project_id: str,
+    render_version_id: str | None = None,
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> ExportResponse:
     project = require_project_owner(db, actor, project_id)
     validate_active_consents(db, project)
+    if render_version_id is None:
+        render_version_id = db.scalar(select(RenderVersion.id).where(RenderVersion.project_id == project.id,
+            RenderVersion.project_version == project.current_version).order_by(RenderVersion.version.desc()))
     render = db.execute(
         select(RenderVersion)
         .where(
             RenderVersion.project_id == project.id,
+            RenderVersion.id == render_version_id,
             RenderVersion.project_version == project.current_version,
             RenderVersion.status == "approved",
+            RenderVersion.invalidated_at.is_(None),
             RenderVersion.owner_approved_at.is_not(None),
         )
         .order_by(RenderVersion.version.desc())
@@ -2026,7 +2080,8 @@ def export_wedding_render(
     if render is None or render.export_asset_id is None:
         raise HTTPException(status_code=409, detail="EXPORT_NOT_READY")
     asset = db.get(WeddingAsset, render.export_asset_id)
-    if asset is None or asset.asset_type != WeddingAssetType.FINAL_VIDEO:
+    from app.wedding_authoring import valid_asset
+    if not valid_asset(asset, project.id) or asset.asset_type != WeddingAssetType.FINAL_VIDEO:
         raise HTTPException(status_code=409, detail="EXPORT_ASSET_INVALID")
     return ExportResponse(
         render_version_id=render.id,

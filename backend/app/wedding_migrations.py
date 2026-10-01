@@ -7,6 +7,16 @@ def migrate_creation(engine):
         columns = {c['name'] for c in inspect(conn).get_columns('wedding_participants')}
         if 'primary_photo_asset_id' not in columns:
             conn.execute(text('ALTER TABLE wedding_participants ADD COLUMN primary_photo_asset_id VARCHAR(36) REFERENCES wedding_assets(id) ON DELETE SET NULL'))
+        additions = {
+            'wedding_projects': {'selected_music': "JSON NOT NULL DEFAULT '{}'"},
+            'wedding_assets': {'quality': "JSON NOT NULL DEFAULT '{}'", 'quality_confirmed_at': 'TIMESTAMP', 'invalidated_at': 'TIMESTAMP'},
+            'wedding_render_versions': {'timeline_snapshot': "JSON NOT NULL DEFAULT '[]'", 'music_snapshot': "JSON NOT NULL DEFAULT '{}'", 'restored_from_id': 'VARCHAR(36)', 'invalidated_at': 'TIMESTAMP'},
+        }
+        for table, fields in additions.items():
+            existing = {c['name'] for c in inspect(conn).get_columns(table)}
+            for field, sql_type in fields.items():
+                if field not in existing:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {field} {sql_type}'))
         # Existing counters already include active reservations. Never recompute an
         # existing account from live projects: deleted usage must remain charged.
         conn.execute(text('INSERT INTO wedding_account_usage (owner_id, spent_fen, reserved_fen) '

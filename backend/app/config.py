@@ -1,7 +1,7 @@
 from functools import lru_cache
 from decimal import Decimal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     wedding_account_budget_limit_fen: int = Field(default=15_000, gt=0)
     wedding_worker_stale_seconds: int = Field(default=1_800, gt=0)
     wedding_ffmpeg_path: str | None = None
+    wedding_music_catalog_file: str | None = None
     wedding_music_file: str | None = None
     wedding_music_license_id: str | None = None
 
@@ -116,6 +117,14 @@ class Settings(BaseSettings):
     runninghub_poll_timeout_seconds: int = 600
     runninghub_garment_workflow_file: str = "workflows/garment_recognition.json"
     runninghub_tryon_workflow_file: str = "workflows/ai_tryon.json"
+
+    @field_validator("wedding_media_mode", mode="before")
+    @classmethod
+    def normalize_wedding_mode(cls, value):
+        value = str(value).strip().lower()
+        if value not in {"disabled", "demo", "live"}:
+            raise ValueError("WEDDING_MEDIA_MODE must be disabled, demo, or live")
+        return value
 
     @model_validator(mode="after")
     def reject_sqlite_in_production(self) -> "Settings":

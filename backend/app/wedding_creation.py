@@ -153,7 +153,12 @@ def enqueue(db, actor, project_id, body, key, kind):
                (s.shot_type == 'person_ai' and (not s.person_keys or len(set(s.person_keys)) != len(s.person_keys)))
                for s in story.shots):
             raise HTTPException(409, 'STORYBOARD_SCOPE_INVALID')
-        check_storage_capacity(db, project.id, 12 * config.wedding_max_image_bytes)
+        from app.wedding_authoring import require_photo_readiness
+        require_photo_readiness(db, project)
+        pending = [s for s in story.shots if s.shot_type != 'photo' and not s.frame_asset_id]
+        if not pending:
+            raise HTTPException(409, 'NO_FRAMES_REQUIRE_GENERATION')
+        check_storage_capacity(db, project.id, len(pending) * config.wedding_max_image_bytes)
         photos = {p.shot_id: p.asset_id for p in body.photos}
         if len(photos) != len(body.photos) or set(photos) != {s.id for s in story.shots if s.shot_type == 'photo'}:
             raise HTTPException(422, 'PHOTO_ASSIGNMENTS_REQUIRED')
@@ -164,7 +169,7 @@ def enqueue(db, actor, project_id, body, key, kind):
                     raise HTTPException(422, 'PHOTO_ASSET_INVALID')
         snapshot.update(story_id=story.id, photos=photos, shots=[dict(id=s.id, description=s.description,
             person_keys=s.person_keys, references=selected_references(db, project, s.person_keys, demo=demo))
-            for s in sorted(story.shots, key=lambda s:s.shot_index) if s.shot_type != 'photo'])
+            for s in sorted(story.shots, key=lambda s:s.shot_index) if s in pending])
         price = 0 if demo else int(config.wedding_frame_fen_per_image.to_integral_value(rounding=ROUND_CEILING))
         operations = [(s['id'], price, {'references': [{k:v for k,v in r.items() if k != 'object_key'} for r in s['references']]}) for s in snapshot['shots']]
     job = WeddingCreationJob(project_id=project.id, kind=kind, project_version=body.version,
@@ -233,6 +238,8 @@ def fence(db, project, job):
     if draft_fingerprint(db, project) != job.draft_fingerprint:
         raise HTTPException(409, 'DRAFT_CHANGED')
     if job.kind == 'frame':
+        from app.wedding_authoring import require_photo_readiness
+        require_photo_readiness(db, project)
         if frame_fingerprint(db, project) != job.snapshot.get('frame_fingerprint'):
             raise HTTPException(409, 'FRAMES_CHANGED')
         require_frame_build_stage(db, project)

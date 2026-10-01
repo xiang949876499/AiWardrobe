@@ -817,7 +817,11 @@ class FallbackAcceptRequest(BaseModel):
 
 
 class RenderCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     version: int = Field(ge=1)
+    subtitles: dict[str, str] = Field(default_factory=dict, max_length=18)
+    music_track_id: str | None = None
+    source_render_id: str | None = None
 
 
 class WeddingRenderReviewSummary(BaseModel):
@@ -828,6 +832,10 @@ class WeddingRenderReviewSummary(BaseModel):
 
 
 class RenderVersionResponse(BaseModel):
+    timeline: list[dict] = Field(default_factory=list)
+    music: dict = Field(default_factory=dict)
+    restored_from_id: str | None = None
+    invalidated_at: datetime | None = None
     id: str
     project_version: int
     version: int

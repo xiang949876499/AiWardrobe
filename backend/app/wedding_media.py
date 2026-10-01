@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import json
 import shutil
 import subprocess
@@ -222,17 +224,16 @@ class FFmpegRenderer:
         self.ffmpeg_path = ffmpeg_path or self.settings.wedding_ffmpeg_path or shutil.which("ffmpeg")
         self.timeout_seconds = timeout_seconds
 
-    def validate_music_license(self, *, demo: bool) -> Path | None:
+    def validate_music_license(self, *, demo: bool, music_snapshot=None) -> Path | None:
         if demo:
             return None
-        music_file = self.settings.wedding_music_file
-        license_id = self.settings.wedding_music_license_id
-        if not music_file or not license_id:
-            raise ProviderUnavailable("MUSIC_LICENSE_REQUIRED", "A licensed music file and license ID are required")
-        path = Path(music_file)
-        if not path.is_file():
-            raise ProviderUnavailable("MUSIC_FILE_MISSING", "The configured licensed music file is unavailable")
-        return path
+        from app.wedding_authoring import historical_music
+        from fastapi import HTTPException
+        try:
+            snapshot = historical_music(music_snapshot or {})
+        except HTTPException as exc:
+            raise ProviderUnavailable(str(exc.detail), "An explicit valid license snapshot is required") from None
+        return Path(snapshot['path'])
 
     def render(
         self,
@@ -240,12 +241,13 @@ class FFmpegRenderer:
         *,
         demo: bool,
         resolution: tuple[int, int],
+        music_snapshot: dict | None = None,
     ) -> RenderedVideo:
         if not self.ffmpeg_path:
             raise ProviderUnavailable("FFMPEG_UNAVAILABLE", "FFmpeg executable is unavailable")
         if not inputs or any(item.duration_ms <= 0 for item in inputs):
             raise ProviderUnavailable("TIMELINE_INVALID", "Render timeline has no valid clips")
-        music_path = self.validate_music_license(demo=demo)
+        music_path = self.validate_music_license(demo=demo, music_snapshot=music_snapshot)
         duration_ms = sum(item.duration_ms for item in inputs)
 
         try:
@@ -302,7 +304,10 @@ class FFmpegRenderer:
 
                 if music_path is not None:
                     music_name = "licensed-music" + music_path.suffix
-                    (workdir / music_name).write_bytes(music_path.read_bytes())
+                    music_bytes = music_path.read_bytes()
+                    if not music_snapshot or hashlib.sha256(music_bytes).hexdigest() != music_snapshot.get('sha256'):
+                        raise ProviderUnavailable('MUSIC_FILE_CHANGED', 'Licensed music changed during render')
+                    (workdir / music_name).write_bytes(music_bytes)
                     args.extend(["-stream_loop", "-1", "-i", music_name])
                     audio_index = len(inputs)
                     filter_parts.append(

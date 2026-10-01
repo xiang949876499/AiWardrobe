@@ -576,7 +576,10 @@ def test_video_late_provider_consent_change_fences_output(client,monkeypatch):
         for p in db.scalars(select(WeddingParticipant).where(WeddingParticipant.project_id==work.project_id)):
             p.provider_list=['wan_r2v']
             asset=WeddingAsset(project_id=work.project_id,person_key=p.person_key,asset_type=WeddingAssetType.PHOTO,object_key=storage.put(work.project_id,_png(),'.png','image/png'),mime='image/png',sha256='a'*64,size_bytes=len(_png()))
+            asset.quality={'usable':True,'warnings':[]}
             db.add(asset);db.flush();p.primary_photo_asset_id=asset.id
+            for n in range(2):
+                db.add(WeddingAsset(project_id=work.project_id,person_key=p.person_key,asset_type=WeddingAssetType.PHOTO,object_key=f'live-ready-{p.id}-{n}',mime='image/png',sha256=str(n)*64,size_bytes=5,quality={'usable':True,'warnings':[]}))
         db.commit()
     class Video:
         def generate(self,request):

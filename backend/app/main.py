@@ -44,6 +44,8 @@ def create_app() -> FastAPI:
     app.include_router(shopping.router)
     app.include_router(weather.router)
     app.include_router(wedding.router)
+    from app.wedding_authoring import router as authoring_router
+    app.include_router(authoring_router)
     from app.wedding_creation import router as creation_router
     app.include_router(creation_router)
 
