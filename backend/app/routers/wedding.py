@@ -331,6 +331,34 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
     project = db.get(WeddingProject, asset.project_id)
     if project is None:
         return False
+    try:
+        validate_active_consents(db, project)
+    except HTTPException:
+        return False
+    if asset.asset_type in {WeddingAssetType.PREVIEW_VIDEO, WeddingAssetType.FINAL_VIDEO}:
+        if asset.asset_type == WeddingAssetType.FINAL_VIDEO and actor.kind != "owner":
+            return False
+        expected_status = (
+            RenderVersionStatus.APPROVED
+            if asset.asset_type == WeddingAssetType.FINAL_VIDEO
+            else None
+        )
+        render_query = select(RenderVersion).where(
+            RenderVersion.project_id == project.id,
+            RenderVersion.project_version == project.current_version,
+        )
+        if asset.asset_type == WeddingAssetType.FINAL_VIDEO:
+            render_query = render_query.where(
+                RenderVersion.status == expected_status,
+                RenderVersion.owner_approved_at.is_not(None),
+                RenderVersion.export_asset_id == asset.id,
+            )
+        else:
+            render_query = render_query.where(
+                RenderVersion.status.in_([RenderVersionStatus.READY, RenderVersionStatus.APPROVED]),
+                RenderVersion.preview_asset_id == asset.id,
+            )
+        return db.execute(render_query).scalars().first() is not None
     if actor.kind == "owner":
         return actor.owner_id == project.owner_id
     if actor.project_id != project.id or not actor.person_key:
@@ -976,7 +1004,9 @@ def revoke_consent(
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    project = db.get(WeddingProject, project_id)
+    project = db.execute(
+        select(WeddingProject).where(WeddingProject.id == project_id).with_for_update()
+    ).scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="Wedding project not found")
     participant = _participant_for_actor(db, project, actor)
@@ -1006,6 +1036,24 @@ def revoke_consent(
         else:
             set_job_status(job, WeddingJobStatus.CANCEL_REQUESTED)
             job.cancel_requested_at = now
+    for render in db.execute(
+        select(RenderVersion).where(
+            RenderVersion.project_id == project.id,
+            RenderVersion.status.in_(
+                [
+                    RenderVersionStatus.QUEUED,
+                    RenderVersionStatus.PROCESSING,
+                    RenderVersionStatus.READY,
+                    RenderVersionStatus.APPROVED,
+                ]
+            ),
+        )
+    ).scalars():
+        set_render_status(render, RenderVersionStatus.CANCELLED)
+        render.owner_approved_at = None
+        render.preview_asset_id = None
+        render.export_asset_id = None
+        _record_audit(db, project, actor, "render.cancelled_consent", "render_version", render.id)
     _record_audit(db, project, actor, "consent.revoked", "participant", participant.id)
     db.commit()
     return {"revoked": True, "person_key": participant.person_key, "revoked_at": now}
@@ -1659,7 +1707,11 @@ def accept_photo_fallback(
     asset = db.get(WeddingAsset, body.asset_id)
     if shot is None or shot.project_id != project.id or asset is None or asset.project_id != project.id:
         raise HTTPException(status_code=404, detail="Wedding shot or asset not found")
-    if asset.asset_type != WeddingAssetType.PHOTO or asset.person_key not in shot.person_keys:
+    if (
+        asset.asset_type != WeddingAssetType.PHOTO
+        or len(shot.person_keys) != 1
+        or asset.person_key != shot.person_keys[0]
+    ):
         raise HTTPException(status_code=422, detail="PHOTO_FALLBACK_ASSET_INVALID")
     shot.selected_asset_id = asset.id
     shot.selected_candidate_id = None
@@ -1938,6 +1990,7 @@ def export_wedding_render(
     db: Session = Depends(get_db),
 ) -> ExportResponse:
     project = require_project_owner(db, actor, project_id)
+    validate_active_consents(db, project)
     render = db.execute(
         select(RenderVersion)
         .where(

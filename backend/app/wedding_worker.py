@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
-from app.database import get_session_factory
+from app.database import get_session_factory, init_db
 from app.models import (
     BudgetLedger,
     CandidateReviewStatus,
@@ -993,10 +993,22 @@ def process_claimed_render_version(
     try:
         with session_factory() as db:
             render = db.get(RenderVersion, render_id)
-            project = db.get(WeddingProject, render.project_id) if render is not None else None
+            project = (
+                db.execute(
+                    select(WeddingProject)
+                    .where(WeddingProject.id == render.project_id)
+                    .with_for_update()
+                ).scalar_one_or_none()
+                if render is not None
+                else None
+            )
             if render is None or project is None:
                 return _fail_render(session_factory, render_id, "RENDER_NOT_FOUND")
+            db.refresh(render)
+            if render.status != RenderVersionStatus.PROCESSING:
+                return WorkerResult(render.id, str(render.status), "RENDER_CANCELLED")
             if project.current_version != render_version or render.project_version != render_version:
+                db.rollback()
                 return _fail_render(session_factory, render_id, "PROJECT_VERSION_STALE")
             validate_active_consents(db, project)
             preview_key = storage.put(project.id, preview.data, ".mp4", "video/mp4")
@@ -1119,6 +1131,15 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Process at most one job and one render, then exit")
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     args = parser.parse_args()
+    while True:
+        try:
+            init_db()
+            break
+        except Exception as exc:
+            if args.once:
+                raise
+            print(f"wedding worker database initialization failed: {exc}; retrying")
+            time.sleep(max(0.1, args.poll_seconds))
     while True:
         results = run_worker_once()
         for result in results:
