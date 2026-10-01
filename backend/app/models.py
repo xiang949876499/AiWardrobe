@@ -770,3 +770,19 @@ class WeddingCreationJob(Base):
     result_story_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class WeddingObjectCleanup(Base):
+    """Private object ownership survives project/asset deletion and failed uploads."""
+    __tablename__ = 'wedding_object_cleanup'
+    object_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    operation_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), default='pending', index=True, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    discard_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    cleanup_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)

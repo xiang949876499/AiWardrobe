@@ -1147,6 +1147,8 @@ def process_next_render_version(
 
 def run_worker_once() -> list[WorkerResult]:
     results: list[WorkerResult] = []
+    from app.wedding_cleanup import cleanup_objects
+    cleanup_objects(get_session_factory(), WeddingPrivateStorage(get_settings()))
     from app.wedding_creation import process_next_creation_job
     creation = process_next_creation_job()
     if creation is not None:

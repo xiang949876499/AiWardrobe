@@ -79,7 +79,10 @@ def callbacks(factory, job_id, shot_id, token):
             receipt = receipt_for(db, job_id, shot_id)
             if receipt is None:
                 raise RuntimeError('Receipt missing')
-            if task_id:
+            from app.wedding_accounting import lock_account
+            lock_account(db, receipt.owner_id)
+            db.refresh(receipt, with_for_update=True)
+            if task_id and not receipt.settled and receipt.billed_fen is None:
                 if receipt.task_id and receipt.task_id != task_id:
                     raise RuntimeError('Task identity changed')
                 receipt.task_id, receipt.state = task_id, 'running'
@@ -135,7 +138,10 @@ def record_result(factory, job_id, shot_id, output, state, token=None):
         from app.wedding_worker import _lease_matches
         if job and token and not _lease_matches(job, token):
             return
-        if receipt.settled:
+        from app.wedding_accounting import lock_account
+        lock_account(db, receipt.owner_id)
+        db.refresh(receipt, with_for_update=True)
+        if receipt.settled or receipt.billed_fen is not None:
             return
         receipt.task_id = output.task_id or receipt.task_id
         receipt.request_id = output.request_id or receipt.request_id

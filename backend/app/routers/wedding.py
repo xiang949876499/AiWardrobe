@@ -724,11 +724,17 @@ def delete_wedding_project(
     lock_account(db, project.owner_id)
     from app.wedding_creation import cancel_project_creation
     cancel_project_creation(db, project, 'PROJECT_DELETED')
-    # Remove private bytes before deleting metadata. No public URL exists to invalidate.
-    for asset in list(project.assets):
-        storage.delete(asset.object_key)
+    from app.wedding_cleanup import queue_project_objects, cleanup_objects
+    from app.database import get_session_factory
+    queue_project_objects(db, project)
     db.delete(project)
-    db.commit()
+    db.commit()  # Access and late-output fences take effect even if S3 is down.
+    db.close()
+    try:
+        cleanup_objects(get_session_factory(), storage)
+    except Exception:
+        # Durable queue already owns all keys; worker retries after DB recovery.
+        pass
     return Response(status_code=204)
 
 
@@ -1363,6 +1369,15 @@ def approve_storyboard_frames(
     story = _current_story(db, project)
     if story.owner_approved_at is None or story.status != "approved":
         raise HTTPException(status_code=409, detail="STORYBOARD_APPROVAL_REQUIRED")
+    from app.models import WeddingCreationJob
+    if db.scalar(select(WeddingCreationJob.id).where(WeddingCreationJob.project_id == project.id,
+            WeddingCreationJob.project_version == project.current_version,
+            WeddingCreationJob.kind == 'frame', WeddingCreationJob.status.in_(['queued', 'processing']))):
+        raise HTTPException(409, 'FRAME_CREATION_ACTIVE')
+    if db.scalar(select(GenerationJob.id).where(GenerationJob.project_id == project.id,
+            GenerationJob.project_version == project.current_version,
+            GenerationJob.status.in_(['queued', 'processing', 'cancel_requested']))):
+        raise HTTPException(409, 'GENERATION_ALREADY_ACTIVE')
     shots = {shot.id: shot for shot in story.shots}
     assignments = {assignment.shot_id: assignment.asset_id for assignment in body.frames}
     if len(assignments) != len(body.frames) or set(assignments) != set(shots):

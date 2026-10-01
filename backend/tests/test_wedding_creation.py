@@ -611,3 +611,147 @@ def test_bill_cli_import_and_duplicate_are_end_to_end_local(client,monkeypatch,t
     assert outputs==['applied','duplicate']
     with get_session_factory()() as db:
         assert db.get(WeddingAccountUsage,owner).spent_fen==31
+
+
+def enqueue_frames(client,project,headers,photos,key='repair-frames'):
+    return client.post(f'/wedding-projects/{project}/frame-jobs',headers={**headers,'Idempotency-Key':key},json={'version':1,'photos':photos})
+
+
+def test_frame_rebuild_after_approval_is_rejected_without_reusing_approval(client,monkeypatch):
+    from app.wedding_creation import process_next_creation_job
+    project,headers,story,photos,ids=prepare_frames(client,monkeypatch)
+    assert enqueue_frames(client,project,headers,photos).status_code==202
+    assert process_next_creation_job().status=='completed'
+    story=client.get(f'/wedding-projects/{project}/storyboard',headers=headers).json()
+    assignments=[{'shot_id':s['id'],'asset_id':s['frame_asset_id']} for s in story['shots']]
+    assert client.post(f'/wedding-projects/{project}/frames/approve',headers=headers,json={'version':1,'frames':assignments}).status_code==200
+    response=enqueue_frames(client,project,headers,photos,key='rebuild')
+    assert response.status_code==409 and response.json()['detail']=='FRAME_REBUILD_REQUIRES_RESET'
+
+
+@pytest.mark.parametrize('during_call',[False,True])
+def test_frame_job_fences_manual_frame_replacement(client,monkeypatch,during_call):
+    from app.wedding_creation import process_next_creation_job
+    from app.models import StoryboardShot
+    project,headers,story,photos,ids=prepare_frames(client,monkeypatch)
+    assert enqueue_frames(client,project,headers,photos).status_code==202
+    demo=build_provider_bundle()
+    def edit():
+        with get_session_factory()() as db:
+            db.get(StoryboardShot,story['shots'][0]['id']).frame_asset_id=ids['A']
+            db.commit()
+    class Frame:
+        def generate(self,request):
+            edit()
+            return demo.frame.generate(request)
+    if not during_call:edit()
+    result=process_next_creation_job(providers=replace(demo,frame=Frame()))
+    assert result.status=='needs_action' and result.error_code=='FRAMES_CHANGED'
+    with get_session_factory()() as db:
+        assert db.get(StoryboardShot,story['shots'][0]['id']).frame_asset_id==ids['A']
+
+
+@pytest.mark.parametrize('processing',[False,True])
+def test_manual_frame_approval_blocked_while_creation_is_queued(client,monkeypatch,processing):
+    project,headers,story,photos,ids=prepare_frames(client,monkeypatch)
+    assert enqueue_frames(client,project,headers,photos).status_code==202
+    if processing:
+        from app.wedding_creation import claim_creation_job
+        assert claim_creation_job(get_session_factory())
+    assignments=[{'shot_id':s['id'],'asset_id':ids['B'] if s['person_keys']==['B'] else ids['A']} for s in story['shots']]
+    response=client.post(f'/wedding-projects/{project}/frames/approve',headers=headers,json={'version':1,'frames':assignments})
+    assert response.status_code==409 and response.json()['detail']=='FRAME_CREATION_ACTIVE'
+
+
+@pytest.mark.parametrize('kind',['story','frame'])
+def test_deleted_creation_callback_refreshes_receipt_after_account_lock(client,monkeypatch,kind):
+    import app.wedding_creation as creation
+    from app.wedding_accounting import reconcile_rows
+    from app.models import WeddingBillingReceipt,WeddingAccountUsage
+    from app.wedding_media import StructuredOutput
+    project,headers=setup_project(client,monkeypatch)
+    factory=get_session_factory()
+    with factory() as db:
+        p=db.get(WeddingProject,project);owner=p.owner_id
+        db.get(WeddingAccountUsage,owner).reserved_fen=100
+        receipt=WeddingBillingReceipt(operation_key='race:'+kind,owner_id=owner,project_id=project,job_id=kind,provider='ark',model='m',task_id='race-'+kind,state='running',reserved_fen=100)
+        db.add(receipt);db.commit();receipt_id=receipt.id
+    assert client.delete(f'/wedding-projects/{project}',headers=headers).status_code==204
+    original=creation.lock_account
+    def bill_wins(db,owner_id):
+        assert reconcile_rows(factory,[{'task_id':'race-'+kind,'cost_fen':31}])[0]['status']=='applied'
+        return original(db,owner_id)
+    monkeypatch.setattr(creation,'lock_account',bill_wins)
+    with factory() as db:
+        stale=db.get(WeddingBillingReceipt,receipt_id)
+        creation.settle_receipt(db,stale,StructuredOutput(b'{}','ark','m',17,task_id='race-'+kind),'succeeded')
+        db.commit()
+    with factory() as db:
+        account=db.get(WeddingAccountUsage,owner)
+        assert account.reserved_fen==0 and account.spent_fen==31
+        assert db.get(WeddingBillingReceipt,receipt_id).billed_fen==31
+
+@pytest.mark.parametrize('callback',['result','checkpoint','envelope'])
+def test_deleted_video_callback_preserves_bill_winning_account_lock(client,monkeypatch,callback):
+    import app.wedding_accounting as accounting
+    from app.wedding_video_operations import record_result,callbacks
+    from app.models import WeddingBillingReceipt,WeddingAccountUsage
+    from app.wedding_media import StructuredOutput
+    project,headers=setup_project(client,monkeypatch)
+    factory=get_session_factory()
+    with factory() as db:
+        owner=db.get(WeddingProject,project).owner_id
+        db.get(WeddingAccountUsage,owner).reserved_fen=100
+        db.add_all([
+            WeddingBillingReceipt(operation_key='reservation:video-race',owner_id=owner,project_id=project,job_id='video-race',provider='budget_envelope',model='m',reserved_fen=100),
+            WeddingBillingReceipt(operation_key='video-race:shot',owner_id=owner,project_id=project,job_id='video-race',provider='wan',model='m',task_id='video-race-task',state='running')])
+        db.commit()
+    assert client.delete(f'/wedding-projects/{project}',headers=headers).status_code==204
+    original=accounting.lock_account
+    entered=[]
+    def bill_wins(db,owner_id):
+        if not entered:
+            entered.append(True)
+            assert accounting.reconcile_rows(factory,[{'task_id':'video-race-task','cost_fen':31}])[0]['status']=='applied'
+        return original(db,owner_id)
+    monkeypatch.setattr(accounting,'lock_account',bill_wins)
+    if callback=='result':
+        record_result(factory,'video-race','shot',StructuredOutput(b'{}','wan','m',17,task_id='video-race-task'),'succeeded')
+    elif callback=='checkpoint':
+        with pytest.raises(RuntimeError,match='WORKER_LEASE_STALE'):
+            callbacks(factory,'video-race','shot','old-token')[0]('video-race-task')
+    else:
+        with factory() as db:
+            stale=db.scalar(select(WeddingBillingReceipt).where(WeddingBillingReceipt.operation_key=='video-race:shot'))
+            accounting.settle_deleted_video(db,stale)
+            db.commit()
+    with factory() as db:
+        account=db.get(WeddingAccountUsage,owner)
+        assert (account.reserved_fen,account.spent_fen)==(0,31)
+        receipt=db.scalar(select(WeddingBillingReceipt).where(WeddingBillingReceipt.operation_key=='video-race:shot'))
+        assert receipt.state=='billed' and receipt.billed_fen==31 and receipt.settled
+
+
+@pytest.mark.parametrize('project_version,status,expected',[(0,'queued',202),(1,'ready',202),(1,'queued',409)])
+def test_frame_rebuild_considers_only_active_current_version_render(client,monkeypatch,project_version,status,expected):
+    from app.models import RenderVersion
+    project,headers,story,photos,ids=prepare_frames(client,monkeypatch)
+    with get_session_factory()() as db:
+        db.add(RenderVersion(project_id=project,project_version=project_version,version=1,status=status,timeline_hash='synthetic'))
+        db.commit()
+    response=enqueue_frames(client,project,headers,photos)
+    assert response.status_code==expected,response.text
+    if expected==409:assert response.json()['detail']=='FRAME_REBUILD_DOWNSTREAM_ACTIVE'
+
+
+def test_pre_migration_frame_job_without_fingerprint_is_safely_fenced(client,monkeypatch):
+    from app.models import WeddingCreationJob
+    from app.wedding_creation import process_next_creation_job
+    project,headers,story,photos,ids=prepare_frames(client,monkeypatch)
+    job=enqueue_frames(client,project,headers,photos).json()
+    with get_session_factory()() as db:
+        row=db.get(WeddingCreationJob,job['id'])
+        row.snapshot={k:v for k,v in row.snapshot.items() if k!='frame_fingerprint'}
+        db.commit()
+    result=process_next_creation_job()
+    assert result.status=='needs_action' and result.error_code=='FRAMES_CHANGED'

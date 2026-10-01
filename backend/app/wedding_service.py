@@ -418,13 +418,17 @@ class WeddingPrivateStorage:
 
     def put(self, project_id: str, data: bytes, suffix: str, mime: str) -> str:
         key = f"private-wedding/{project_id}/{uuid4().hex}{suffix}"
+        self.put_at(key, data, mime)
+        return key
+
+    def put_at(self, key: str, data: bytes, mime: str) -> None:
+        self._local_path(key)  # Validate private namespace for both backends.
         if self.settings.storage_driver == "s3":
             self._s3_client().put_object(Bucket=self.settings.wedding_s3_bucket, Key=key, Body=data, ContentType=mime)
-            return key
+            return
         path = self._local_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        return key
 
     def read(self, key: str) -> bytes:
         if self.settings.storage_driver == "s3":

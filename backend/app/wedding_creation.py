@@ -71,6 +71,25 @@ def draft_fingerprint(db, project):
                     creative=s.creative_scene) for s in sorted(story.shots, key=lambda s:s.shot_index)]})
 
 
+def frame_fingerprint(db, project):
+    story = current_story(db, project)
+    return digest({'approved_version': project.frame_approved_version,
+        'shots': [(s.id, s.frame_asset_id, str(s.status)) for s in sorted(story.shots, key=lambda s:s.shot_index)]})
+
+
+def require_frame_build_stage(db, project):
+    from app.models import GenerationJob, RenderVersion
+    if project.frame_approved_version == project.current_version or project.status != 'frame_review':
+        raise HTTPException(409, 'FRAME_REBUILD_REQUIRES_RESET')
+    if db.scalar(select(GenerationJob.id).where(GenerationJob.project_id == project.id,
+            GenerationJob.project_version == project.current_version,
+            GenerationJob.status.in_(['queued', 'processing', 'cancel_requested']))) or db.scalar(
+            select(RenderVersion.id).where(RenderVersion.project_id == project.id,
+                RenderVersion.project_version == project.current_version,
+                RenderVersion.status.in_(['queued', 'processing']))):
+        raise HTTPException(409, 'FRAME_REBUILD_DOWNSTREAM_ACTIVE')
+
+
 def response(job):
     return dict(id=job.id, project_id=job.project_id, kind=job.kind, version=job.project_version,
                 status=job.status, error_code=job.error_code, completed_operations=job.completed_operations,
@@ -126,6 +145,8 @@ def enqueue(db, actor, project_id, body, key, kind):
     else:
         if story is None or story.status != 'approved' or not story.owner_approved_at:
             raise HTTPException(409, 'STORYBOARD_APPROVAL_REQUIRED')
+        require_frame_build_stage(db, project)
+        snapshot['frame_fingerprint'] = frame_fingerprint(db, project)
         if len(story.shots) != 18 or sum(s.shot_type == 'person_ai' for s in story.shots) != 8 or sum(s.shot_type == 'scene_ai' for s in story.shots) != 4 or any(s.duration_ms != 5000 for s in story.shots):
             raise HTTPException(409, 'STORYBOARD_TEMPLATE_INVALID')
         if any((s.shot_type == 'scene_ai' and s.person_keys) or
@@ -212,6 +233,9 @@ def fence(db, project, job):
     if draft_fingerprint(db, project) != job.draft_fingerprint:
         raise HTTPException(409, 'DRAFT_CHANGED')
     if job.kind == 'frame':
+        if frame_fingerprint(db, project) != job.snapshot.get('frame_fingerprint'):
+            raise HTTPException(409, 'FRAMES_CHANGED')
+        require_frame_build_stage(db, project)
         for shot_id, asset_id in job.snapshot['photos'].items():
             photo = db.get(WeddingAsset, asset_id)
             if photo is None or photo.project_id != project.id or (photo.expires_at and _as_utc(photo.expires_at) <= utc_now()):
@@ -296,8 +320,10 @@ def apply_story(db, project, job, data):
 
 def settle_receipt(db, receipt, output, state):
     project = db.scalar(select(WeddingProject).where(WeddingProject.id == receipt.project_id).with_for_update())
-    # Caller holds project before job; account always follows both.
-    if receipt.settled:
+    # Account serialization also protects tombstones after the parent is deleted.
+    account = lock_account(db, receipt.owner_id)
+    db.refresh(receipt, with_for_update=True)
+    if receipt.settled or receipt.billed_fen is not None:
         return
     actual = max(0, int(output.actual_cost_fen))
     receipt.state = state
@@ -311,7 +337,8 @@ def settle_receipt(db, receipt, output, state):
     if project:
         settle(db, project, receipt.reserved_fen, actual)
     else:
-        account = lock_account(db, receipt.owner_id)
+        if account.reserved_fen < receipt.reserved_fen:
+            raise ValueError("Accounting reservation inconsistent")
         account.reserved_fen -= receipt.reserved_fen
         account.spent_fen += actual
     receipt.settled = True
@@ -385,51 +412,69 @@ def process_next_creation_job(session_factory=None, providers=None, storage=None
                 else:
                     from app.routers.wedding import _validate_image
                     mime, suffix, width, height = _validate_image(output.data, output.mime, 'storyboard_frame')
-                    object_key = storage.put(receipt_project_id, output.data, suffix, mime)
+                    from app.wedding_cleanup import stage_output
+                    object_key = stage_output(factory, storage, receipt_project_id, operation_key, output.data, suffix, mime)
             except Exception:
                 error = 'PROVIDER_RESULT_INVALID'
-        with factory() as db:
-            project, job = lock_job(db, job_id)
-            receipt = db.get(WeddingBillingReceipt, receipt_id)
-            settle_receipt(db, receipt, output, state)
-            if not job or job.lease_token != token or job.status != 'processing':
-                db.commit()
-                if object_key:
-                    storage.delete(object_key)
-                return WorkerResult(job_id, 'needs_action', 'WORKER_LEASE_STALE')
-            try:
-                fence(db, project, job)
+        try:
+            with factory() as db:
+                project, job = lock_job(db, job_id)
+                receipt = db.get(WeddingBillingReceipt, receipt_id)
+                settle_receipt(db, receipt, output, state)
+                if not job or job.lease_token != token or job.status != 'processing':
+                    db.commit()
+                    return WorkerResult(job_id, 'needs_action', 'WORKER_LEASE_STALE')
+                try:
+                    fence(db, project, job)
+                    if kind == 'frame' and not error:
+                        check_storage_capacity(db, project.id, len(output.data))
+                except HTTPException as exc:
+                    error = str(exc.detail)
+                if output.actual_cost_fen > receipt.reserved_fen:
+                    error = 'ACTUAL_COST_EXCEEDS_RESERVATION'
                 if kind == 'frame' and not error:
-                    check_storage_capacity(db, project.id, len(output.data))
-            except HTTPException as exc:
-                error = str(exc.detail)
-            if output.actual_cost_fen > receipt.reserved_fen:
-                error = 'ACTUAL_COST_EXCEEDS_RESERVATION'
-            if error:
-                job.status, job.error_code = 'needs_action', error
-                release_unstarted(db, project, job)
-                db.commit()
-                if object_key:
-                    storage.delete(object_key)
-                return WorkerResult(job_id, job.status, job.error_code)
-            if kind == 'story':
-                apply_story(db, project, job, data)
-            else:
-                asset = WeddingAsset(project_id=project.id, asset_type=WeddingAssetType.GENERATED_FRAME,
-                    object_key=object_key, sha256=hashlib.sha256(output.data).hexdigest(), mime=mime,
-                    size_bytes=len(output.data), width=width, height=height, generated=True,
-                    provider=output.provider, expires_at=utc_now()+timedelta(days=30))
-                db.add(asset)
-                db.flush()
-                db.get(StoryboardShot, operation).frame_asset_id = asset.id
-            job.completed_operations += 1
-            job.updated_at = utc_now()
-            if job.completed_operations == job.total_operations:
+                    from app.wedding_cleanup import attach_stage
+                    try:
+                        attach_stage(db, object_key)
+                    except HTTPException as exc:
+                        error = str(exc.detail)
+                if error:
+                    job.status, job.error_code = 'needs_action', error
+                    release_unstarted(db, project, job)
+                    db.commit()
+                    return WorkerResult(job_id, job.status, job.error_code)
+                if kind == 'story':
+                    apply_story(db, project, job, data)
+                else:
+                    asset = WeddingAsset(project_id=project.id, asset_type=WeddingAssetType.GENERATED_FRAME,
+                        object_key=object_key, sha256=hashlib.sha256(output.data).hexdigest(), mime=mime,
+                        size_bytes=len(output.data), width=width, height=height, generated=True,
+                        provider=output.provider, expires_at=utc_now()+timedelta(days=30))
+                    db.add(asset)
+                    db.flush()
+                    db.get(StoryboardShot, operation).frame_asset_id = asset.id
+                    db.get(StoryboardShot, operation).status = 'frame_pending'
+                    project.frame_approved_version = None
+                job.completed_operations += 1
+                job.updated_at = utc_now()
+                if job.completed_operations == job.total_operations:
+                    if kind == 'frame':
+                        for shot_id, asset_id in snapshot['photos'].items():
+                            db.get(StoryboardShot, shot_id).frame_asset_id = asset_id
+                    job.status = 'completed'
                 if kind == 'frame':
-                    for shot_id, asset_id in snapshot['photos'].items():
-                        db.get(StoryboardShot, shot_id).frame_asset_id = asset_id
-                job.status = 'completed'
-            db.commit()
+                    db.flush()
+                    job.snapshot = {**job.snapshot, 'frame_fingerprint': frame_fingerprint(db, project)}
+                db.commit()
+        finally:
+            if object_key:
+                from app.wedding_cleanup import abandon_stage, cleanup_objects
+                abandon_stage(factory, object_key)
+                try:
+                    cleanup_objects(factory, storage, keys=[object_key])
+                except Exception:
+                    # Durable stage remains available after a temporary DB outage.
+                    pass
     return WorkerResult(job_id, 'completed')
 
 

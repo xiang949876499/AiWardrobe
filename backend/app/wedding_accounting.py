@@ -56,16 +56,17 @@ def settle(db, project, reserved, actual):
 
 def settle_deleted_video(db, receipt):
     """Close deleted-job envelope only after every dispatched operation is known."""
-    rows = list(db.scalars(select(WeddingBillingReceipt).where(WeddingBillingReceipt.job_id == receipt.job_id)))
+    account = lock_account(db, receipt.owner_id)
+    # Callers mutate terminal state only after taking this same account lock.
+    db.flush()
+    rows = list(db.scalars(select(WeddingBillingReceipt).where(
+        WeddingBillingReceipt.job_id == receipt.job_id).with_for_update().execution_options(populate_existing=True)))
     envelope = next((r for r in rows if r.provider in ('budget_envelope','legacy_unknown')), None)
     operations = [r for r in rows if r is not envelope]
     if not envelope or envelope.settled or any(r.state in ('dispatching','unknown','running') for r in operations):
         return
-    account = lock_account(db, receipt.owner_id)
-    # Re-read after owner serialization, so concurrent late callbacks settle once.
-    db.refresh(envelope)
-    if envelope.settled:
-        return
+    if account.reserved_fen < envelope.reserved_fen:
+        raise ValueError('Accounting reservation inconsistent')
     amount = sum(r.billed_fen if r.billed_fen is not None else r.estimated_fen for r in operations)
     account.reserved_fen -= envelope.reserved_fen
     account.spent_fen += amount
