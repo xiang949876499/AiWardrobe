@@ -25,12 +25,13 @@ def snapshot(sample=None):
         kind = "person_ai" if i <= 8 else "scene_ai" if i <= 12 else "photo"
         people = ["A"] if i == 1 else ["A", "B"] if i <= 8 else []
         asset_id = f"asset{i}"
-        shots.append(dict(id=f"s{i}", project_version=1, shot_type=kind, duration_ms=5000,
+        shots.append(dict(id=f"s{i}", project_version=1, shot_type=kind, duration_ms=5000, frame_asset_id=f"frame{i}",
                           person_keys=people, selected_asset_id=asset_id,
                           selected_candidate_id=f"c{i}" if i <= 12 else None,
                           identity_reviews=[dict(person_key=p, asset_id=asset_id, result="approved") for p in people]))
         asset = dict(id=asset_id, mime="video/mp4" if i <= 12 else "image/jpeg", expires_at="2099-01-01T00:00:00Z")
         assets.append(asset)
+        assets.append(dict(id=f"frame{i}", mime="image/png", person_key=None, generated=True, expires_at="2099-01-01T00:00:00Z"))
         if i <= 12:
             candidates.append(dict(id=f"c{i}", shot_id=f"s{i}", generation_job_id="job1", asset_id=asset_id,
                                    asset=asset, provider="wan_r2v" if i <= 8 else "wan_i2v_flash",
@@ -428,3 +429,21 @@ def test_missing_actual_owner_approval_cannot_qualify_final():
     snap = snapshot(); snap["assets"].append(dict(id="final", mime="video/mp4", expires_at="2099-01-01T00:00:00Z"))
     render = final_render(snap); render["owner_approved_at"] = None
     assert not runner.assess(manifest()["samples"][0], snap, render, evidence())["qualified"]
+
+
+def test_scene_frame_must_not_carry_newlywed_portrait_scope():
+    snap = snapshot()
+    next(a for a in snap["assets"] if a["id"] == "frame9")["person_key"] = "A"
+    with pytest.raises(runner.Rejected, match="SCENE_FRAME_PERSON_SCOPE"):
+        runner.check_preflight(manifest()["samples"][0], snap)
+
+
+def test_placeholder_offline_manifest_is_incomplete_without_attesting_consent(tmp_path, capsys):
+    data = manifest()
+    for sample in data["samples"]:
+        sample["adult_authorized"] = False
+    path = tmp_path / "manifest.json"; path.write_text(json.dumps(data))
+    assert runner.main(["--manifest", str(path)]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "INCOMPLETE" and output["prepared"] is False
+    assert runner.main(["--manifest", str(path), "--stage", "preflight"]) == 2
