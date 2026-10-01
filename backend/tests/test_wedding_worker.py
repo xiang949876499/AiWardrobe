@@ -6,6 +6,7 @@ from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 from threading import Barrier, Event, Thread
+import sys
 
 from PIL import Image
 import pytest
@@ -51,6 +52,7 @@ from app.wedding_worker import (
     process_claimed_generation_job,
     process_claimed_render_version,
 )
+import app.wedding_worker as wedding_worker
 from app.wedding_media import (
     FFmpegRenderer,
     ProviderUnavailable,
@@ -1001,3 +1003,14 @@ def test_local_demo_persists_provider_label_and_zero_cost_candidate(client):
         assert WeddingPrivateStorage(settings).read(asset.object_key).find(b"DEMO ONLY") >= 0
         assert candidate.provider == "local_demo" and candidate.actual_cost_fen == 0
         assert ledger.status == BudgetLedgerStatus.SETTLED and ledger.actual_fen == 0
+
+
+def test_worker_initializes_database_before_polling(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(sys, "argv", ["wedding_worker", "--once"])
+    monkeypatch.setattr(wedding_worker, "init_db", lambda: calls.append("init"))
+    monkeypatch.setattr(wedding_worker, "run_worker_once", lambda: calls.append("poll") or [])
+
+    wedding_worker.main()
+
+    assert calls == ["init", "poll"]

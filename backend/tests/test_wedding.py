@@ -15,10 +15,14 @@ from app.models import (
     BudgetLedger,
     ConsentInvite,
     GenerationJob,
+    RenderVersion,
+    RenderVersionStatus,
     WeddingAsset,
+    WeddingAssetType,
     WeddingConsent,
     WeddingParticipant,
     WeddingProject,
+    utc_now,
 )
 from app.wedding_service import WeddingPrivateStorage
 from tests.conftest import login
@@ -134,6 +138,40 @@ def test_project_crud_is_owner_scoped_and_uses_optimistic_versioning(client: Tes
     assert not private_path.exists()
 
 
+def test_photo_fallback_cannot_replace_a_two_person_shot_with_one_person_photo(client: TestClient) -> None:
+    owner_token = login(client, "owner@example.com")
+    project_id = _create_project(client, owner_token)["id"]
+    consent = client.post(
+        f"/wedding-projects/{project_id}/self-consent",
+        headers=_headers(owner_token),
+        json={"terms_version": "portrait-v1", "scope": ["portrait_processing"], "provider_list": ["local_demo"]},
+    )
+    assert consent.status_code == 200
+    _confirm_partner(client, owner_token, project_id)
+    photo = _image_upload(client, owner_token, project_id, "A")
+    storyboard = client.post(
+        f"/wedding-projects/{project_id}/storyboard",
+        headers=_headers(owner_token),
+        json={
+            "version": 1,
+            "story_text": "一起相遇",
+            "facts": [{"source_field": "相遇", "text": "在书店"}],
+            "shots": [{"shot_index": 1, "shot_type": "person_ai", "person_keys": ["A", "B"], "description": "双人镜头"}],
+        },
+    )
+    assert storyboard.status_code == 201, storyboard.text
+    shot_id = storyboard.json()["shots"][0]["id"]
+
+    fallback = client.post(
+        f"/wedding-projects/{project_id}/shots/{shot_id}/accept-fallback",
+        headers=_headers(owner_token),
+        json={"project_version": 1, "asset_id": photo["id"]},
+    )
+
+    assert fallback.status_code == 422
+    assert fallback.json()["detail"] == "PHOTO_FALLBACK_ASSET_INVALID"
+
+
 def test_invite_is_hashed_single_use_and_participant_asset_access_is_scoped(client: TestClient) -> None:
     owner_token = login(client, "owner@example.com")
     project_id = _create_project(client, owner_token)["id"]
@@ -209,6 +247,72 @@ def test_invite_is_hashed_single_use_and_participant_asset_access_is_scoped(clie
         assert participant.consent_status == "revoked"
         assert db.query(WeddingConsent).filter_by(participant_id=participant.id, revoked_at=None).count() == 0
     assert client.get(f"/wedding-assets/{partner_asset['id']}", headers=_headers(participant_token)).status_code == 401
+
+
+def test_revoking_consent_invalidates_approved_render_and_blocks_video_assets(client: TestClient) -> None:
+    owner_token = login(client, "revoke-render-owner@example.com")
+    project_id = _create_project(client, owner_token)["id"]
+    consent = client.post(
+        f"/wedding-projects/{project_id}/self-consent",
+        headers=_headers(owner_token),
+        json={"terms_version": "portrait-v1", "scope": ["portrait_processing"], "provider_list": ["local_demo"]},
+    )
+    assert consent.status_code == 200, consent.text
+    partner_token = _confirm_partner(client, owner_token, project_id)
+
+    with get_session_factory()() as db:
+        preview = WeddingAsset(
+            project_id=project_id,
+            asset_type=WeddingAssetType.PREVIEW_VIDEO,
+            object_key=f"{project_id}/preview.mp4",
+            sha256="a" * 64,
+            mime="video/mp4",
+            size_bytes=10,
+            generated=True,
+        )
+        export = WeddingAsset(
+            project_id=project_id,
+            asset_type=WeddingAssetType.FINAL_VIDEO,
+            object_key=f"{project_id}/final.mp4",
+            sha256="b" * 64,
+            mime="video/mp4",
+            size_bytes=10,
+            generated=True,
+        )
+        db.add_all([preview, export])
+        db.flush()
+        render = RenderVersion(
+            project_id=project_id,
+            project_version=1,
+            version=1,
+            status=RenderVersionStatus.APPROVED,
+            timeline_hash="c" * 64,
+            input_asset_ids=[],
+            preview_asset_id=preview.id,
+            export_asset_id=export.id,
+            owner_approved_at=utc_now(),
+        )
+        db.add(render)
+        db.commit()
+        render_id, preview_id, export_id = render.id, preview.id, export.id
+
+    revoked = client.post(
+        f"/wedding-projects/{project_id}/consent/revoke",
+        headers=_headers(partner_token),
+    )
+    assert revoked.status_code == 200, revoked.text
+
+    with get_session_factory()() as db:
+        invalidated = db.get(RenderVersion, render_id)
+        assert invalidated is not None
+        assert invalidated.status == RenderVersionStatus.CANCELLED
+        assert invalidated.owner_approved_at is None
+
+    assert client.get(f"/wedding-assets/{preview_id}", headers=_headers(owner_token)).status_code == 404
+    assert client.get(f"/wedding-assets/{export_id}", headers=_headers(owner_token)).status_code == 404
+    blocked_export = client.post(f"/wedding-projects/{project_id}/export", headers=_headers(owner_token))
+    assert blocked_export.status_code == 409
+    assert blocked_export.json()["detail"] == "CONSENT_REQUIRED"
 
 
 def test_wedding_read_models_restore_owner_and_participant_scopes(client: TestClient) -> None:
