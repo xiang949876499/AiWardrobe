@@ -1,6 +1,7 @@
 """Acceptance runner uses mocked application HTTP only; never dispatch providers."""
-import copy
 import json
+from email.message import Message
+from io import BytesIO
 
 import pytest
 
@@ -48,7 +49,7 @@ def snapshot(sample=None):
 def evidence():
     return dict(project_id="p0", version=1, render_id="render1", rating=4, willing=True,
                 role_facts_correct=True, commercial_music_rights=True,
-                motion={c: True for c in runner.CATEGORIES},
+                motion={c: {"passed": True, "candidate_id": f"c{i}"} for i, c in enumerate(runner.CATEGORIES, 1)},
                 bill=dict(authoritative=True, reference_id="bill1", complete=True,
                           model_fen=10000, music_fen=1000, render_fen=1000, storage_fen=1000, other_fen=2000),
                 timing=dict(start="2026-10-01T00:00:00Z", end="2026-10-01T00:40:00Z",
@@ -57,7 +58,7 @@ def evidence():
 
 def final_render(snap):
     return dict(id="render1", project_version=1, status="approved", invalidated_at=None,
-                output_duration_ms=90000, preview_asset_id="preview", export_asset_id="final", music=snap["music"],
+                output_duration_ms=90000, preview_asset_id="preview", export_asset_id="final", music=snap["music"], owner_approved_at="2026-10-01T01:00:00Z",
                 timeline=[dict(shot_id=s["id"], asset_id=s["selected_asset_id"], shot_type=s["shot_type"], duration_ms=s["duration_ms"]) for s in snap["story"]["shots"]],
                 identity_reviews=[dict(person_key=p, asset_id="preview", result="approved") for p in "AB"])
 
@@ -240,3 +241,190 @@ def test_known_scope_receipts_exclude_failed_other_jobs(tmp_path):
     snap["jobs"] = [dict(id="job1", project_version=1, status="failed", total_shots=1)]
     api.checkpoint = tmp_path / "new.json"
     assert runner.dispatch(api, sample, snap, api.checkpoint, "generate", "a_closeup", True, receipts=[receipt])["status"] == "SUBMITTED"
+
+
+class Response(BytesIO):
+    def __init__(self, body=b'{"safe":true}', url="https://example.com/data", status=200, length=None, mime="application/json"):
+        super().__init__(body); self.url = url; self.status = status; self.headers = Message()
+        self.headers["Content-Type"] = mime
+        if length is not None:
+            self.headers["Content-Length"] = str(length)
+
+    def geturl(self):
+        return self.url
+
+
+class Opener:
+    def __init__(self, response):
+        self.response = response; self.requests = []
+
+    def open(self, request, timeout):
+        self.requests.append(request)
+        assert timeout == 15
+        return self.response
+
+
+def test_transport_gates_then_uses_only_named_token(monkeypatch):
+    api = runner.Transport("https://example.com", "WEDDING_TOKEN")
+    with pytest.raises(runner.Rejected, match="EXECUTE_PAID_REQUIRED"):
+        api.request("POST", "/data", {})
+    with pytest.raises(runner.Rejected, match="TOKEN_ENV_MISSING"):
+        api.request("GET", "/data")
+    monkeypatch.setenv("WEDDING_TOKEN", "private-secret-value")
+    api.opener = Opener(Response())
+    assert api.request("GET", "/data") == {"safe": True}
+    assert api.opener.requests[0].get_header("Authorization") == "Bearer private-secret-value"
+    api = runner.Transport("http://127.0.0.1:8031", "WEDDING_TOKEN", True)
+    api.opener = Opener(Response(url="http://127.0.0.1:8031/data"))
+    api.request("POST", "/data", {"version": 1}, "idempotency-key")
+    assert api.opener.requests[0].get_header("Idempotency-key") == "idempotency-key"
+
+
+@pytest.mark.parametrize("response,code", [
+    (lambda: Response(url="https://other.example/data"), "ORIGIN_CHANGED"),
+    (lambda: Response(status=302), "HTTP_REJECTED"),
+    (lambda: Response(length=runner.MAX_BYTES + 1), "RESPONSE_TOO_LARGE"),
+    (lambda: Response(body=b"x" * (runner.MAX_BYTES + 1)), "RESPONSE_TOO_LARGE"),
+    (lambda: Response(mime="text/html"), "RESPONSE_NOT_JSON"),
+    (lambda: Response(body=b"private non-json error"), "TRANSPORT_FAILED"),
+])
+def test_transport_response_bounds_and_private_error_suppression(monkeypatch, response, code):
+    monkeypatch.setenv("TOKEN", "private-secret")
+    api = runner.Transport("https://example.com", "TOKEN")
+    api.opener = Opener(response())
+    with pytest.raises(runner.Rejected, match=code) as error:
+        api.request("GET", "/data")
+    assert "private" not in str(error.value)
+
+
+def test_redirect_and_cross_origin_path_rejected(monkeypatch):
+    with pytest.raises(runner.Rejected, match="REDIRECT_REFUSED"):
+        runner.NoRedirect().redirect_request(None, None, 302, None, None, "https://other.example")
+    api = runner.Transport("https://example.com", "TOKEN")
+    for path in ("//evil.example/data", "https://evil.example", "/data?token=private", "/../data"):
+        with pytest.raises(runner.Rejected, match="UNSAFE_REQUEST_PATH"):
+            api.request("GET", path)
+
+
+def test_transport_timeout_and_http_error_are_bounded(monkeypatch):
+    monkeypatch.setenv("TOKEN", "private-secret")
+    api = runner.Transport("https://example.com", "TOKEN")
+    api.opener = Opener(Response())
+    ticks = iter([0, 16])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(runner.Rejected, match="RESPONSE_TIMEOUT"):
+        api.request("GET", "/data")
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 0)
+    def fail(*args, **kwargs):
+        raise runner.HTTPError("https://example.com/private", 403, "private token", {}, None)
+    monkeypatch.setattr(api.opener, "open", fail)
+    with pytest.raises(runner.Rejected, match="HTTP_REJECTED"):
+        api.request("GET", "/data")
+
+
+def test_cli_offline_is_network_free_and_example_cannot_certify(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "manifest.json"; path.write_text(json.dumps(manifest()))
+    def no_network(*args, **kwargs):
+        raise AssertionError("offline opened network")
+    monkeypatch.setattr(runner, "Transport", no_network)
+    assert runner.main(["--manifest", str(path)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "INCOMPLETE"
+    assert runner.main(["--manifest", str(path), "--output", str(path)]) == 2
+    assert "OUTPUT_OVERWRITES_INPUT" in capsys.readouterr().out
+    assert runner.main(["--manifest", str(path) + "missing"]) == 2
+    assert "INPUT_UNREADABLE" in capsys.readouterr().out
+
+
+class SnapshotAPI(FakeAPI):
+    def request(self, method, path, body=None, key=None):
+        self.calls.append((method, path, body, key))
+        assert method == "GET"
+        if path == "/wedding-capabilities":
+            return self.snap["capabilities"]
+        if path == "/wedding-music":
+            return {"tracks": [self.snap["music"]]}
+        if "/renders/" in path:
+            return final_render(self.snap)
+        suffix = path.split("/")[-1]
+        mapping = {"storyboard": "story", "photo-readiness": "readiness", "candidates": "candidates", "assets": "assets", "generation-jobs": "jobs"}
+        if suffix in mapping:
+            return self.snap.get(mapping[suffix], [])
+        return dict(self.snap["project"], id=suffix)
+
+
+def test_cli_preflight_and_report_never_mutate_even_with_flag(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "manifest.json"; path.write_text(json.dumps(manifest()))
+    api = SnapshotAPI()
+    monkeypatch.setattr(runner, "Transport", lambda *args: api)
+    assert runner.main(["--manifest", str(path), "--stage", "preflight", "--execute-paid"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PREFLIGHT_OK"
+    assert runner.main(["--manifest", str(path), "--stage", "report"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["status"] == "INCOMPLETE"
+    assert all(c[0] == "GET" for c in api.calls)
+
+
+def test_render_stage_posts_once_then_readonly_resume(tmp_path):
+    sample = manifest()["samples"][0]; snap = snapshot()
+    class RenderAPI(FakeAPI):
+        def request(self, method, path, body=None, key=None):
+            self.calls.append((method, path, body, key))
+            if method == "POST":
+                assert json.loads(self.checkpoint.read_text())["state"] == "submitting"
+                assert body == {"version": 1, "music_track_id": "licensed-track"}
+            return final_render(self.snap)
+    api = RenderAPI(snap); api.checkpoint = tmp_path / "cp.json"
+    assert runner.dispatch(api, sample, snap, api.checkpoint, "render", execute_paid=True)["job_id"] == "render1"
+    assert runner.resume(api, sample, api.checkpoint)["status"] == "approved"
+    assert [c[0] for c in api.calls] == ["POST", "GET"]
+
+
+def test_crash_submitting_and_wrong_resolution_cannot_resume(tmp_path):
+    sample = manifest()["samples"][0]; api = FakeAPI(fail=True); api.checkpoint = tmp_path / "cp.json"
+    with pytest.raises(runner.Rejected):
+        runner.dispatch(api, sample, snapshot(), api.checkpoint, "generate", "a_closeup", True)
+    cp = json.loads(api.checkpoint.read_text()); cp["state"] = "submitting"
+    api.checkpoint.write_text(json.dumps(cp))
+    with pytest.raises(runner.Rejected, match="AMBIGUOUS"):
+        runner.resume(api, sample, api.checkpoint)
+    api.snap["candidates"] = []
+    with pytest.raises(runner.Rejected, match="SCOPE_UNPROVEN"):
+        runner.resume(api, sample, api.checkpoint, "job1")
+    api.base_url = "https://different.example"
+    with pytest.raises(runner.Rejected, match="ORIGIN_MISMATCH"):
+        runner.resume(api, sample, api.checkpoint, "job1")
+
+
+def test_stale_lock_and_bad_job_scope_stop(tmp_path):
+    cp = tmp_path / "cp.json"
+    with runner.checkpoint_lock(cp):
+        with pytest.raises(runner.Rejected, match="CHECKPOINT_LOCKED"):
+            with runner.checkpoint_lock(cp):
+                pass
+    with pytest.raises(runner.Rejected, match="JOB_PROJECT_MISMATCH"):
+        runner.check_job_scope(dict(project_version=1, project_id="wrong"), dict(version=1, project_id="p0", action="generate"))
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda e: e.update(token="private"), lambda e: e.update(rating=True),
+    lambda e: e["bill"].update(other_fen=-1), lambda e: e["bill"].update(reference_id="https://private"),
+    lambda e: e["timing"]["human_intervals"].append(e["timing"]["human_intervals"][0]),
+    lambda e: e["timing"].update(end="2020-01-01T00:00:00Z"),
+    lambda e: e["timing"].update(start="2026-10-01T00:00:00"),
+])
+def test_bad_evidence_never_becomes_success(mutate):
+    e = evidence(); mutate(e)
+    with pytest.raises(runner.Rejected):
+        runner.validate_evidence([e])
+
+
+def test_motion_human_record_is_bound_to_current_candidate():
+    snap = snapshot(); e = evidence()
+    e["motion"]["a_closeup"]["candidate_id"] = "old-candidate"
+    row = runner.assess(manifest()["samples"][0], snap, final_render(snap), e)
+    assert row["motion_passes"] == 1 and not row["complete"]
+
+
+def test_missing_actual_owner_approval_cannot_qualify_final():
+    snap = snapshot(); snap["assets"].append(dict(id="final", mime="video/mp4", expires_at="2099-01-01T00:00:00Z"))
+    render = final_render(snap); render["owner_approved_at"] = None
+    assert not runner.assess(manifest()["samples"][0], snap, render, evidence())["qualified"]
