@@ -265,6 +265,8 @@ def validate_timeline(db,project,items):
     if not items or sum(i['duration_ms'] for i in items)!=project.target_duration_ms or len({i['shot_id'] for i in items})!=len(items):
         raise HTTPException(409,'TIMELINE_DURATION_INVALID')
     people={p.person_key:p for p in project.participants}
+    story_id=db.scalar(select(StoryVersion.id).where(StoryVersion.project_id==project.id,
+        StoryVersion.version==project.current_version))
     for item in items:
         expected={p.person_key: {'participant_id':p.id,'confirmed_at':_as_utc(p.confirmed_at).isoformat(),'terms_version':p.terms_version} for p in project.participants}
         if item.get('consent') != expected:
@@ -273,6 +275,8 @@ def validate_timeline(db,project,items):
         shot=db.get(StoryboardShot,item['shot_id'])
         if not valid_asset(asset,project.id) or asset.sha256!=item['asset_sha256'] or shot is None or shot.project_id!=project.id:
             raise HTTPException(409,'TIMELINE_ASSET_INVALID')
+        if shot.project_version!=project.current_version or shot.story_version_id!=story_id:
+            raise HTTPException(409,'TIMELINE_SHOT_VERSION_STALE')
         if any(people[k].primary_photo_asset_id!=v for k,v in item['primary_references'].items()):
             raise HTTPException(409,'PRIMARY_REFERENCE_CHANGED')
         if item.get('candidate_id'):
@@ -394,6 +398,8 @@ def render_from_history(db,project,source_id,subtitles=None,music_track_id=None)
     source=db.get(RenderVersion,source_id)
     if source is None or source.project_id!=project.id:
         raise HTTPException(404,'RENDER_NOT_FOUND')
+    if source.project_version!=project.current_version:
+        raise HTTPException(409,'RENDER_SOURCE_VERSION_STALE')
     if source.invalidated_at or not source.timeline_snapshot:
         raise HTTPException(409,'RENDER_HISTORY_INVALID')
     validate_timeline(db,project,source.timeline_snapshot)

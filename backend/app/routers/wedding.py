@@ -1452,11 +1452,17 @@ def create_participant_review(
     shot = db.get(StoryboardShot, shot_id)
     if shot is None:
         raise HTTPException(status_code=404, detail="Storyboard shot not found")
-    project = db.get(WeddingProject, shot.project_id)
+    project = db.scalar(select(WeddingProject).where(WeddingProject.id == shot.project_id)
+        .with_for_update().execution_options(populate_existing=True))
     if project is None:
         raise HTTPException(status_code=404, detail="Storyboard shot not found")
-    _check_version(project, body.project_version)
     participant = _participant_for_actor(db, project, actor)
+    _check_version(project, body.project_version)
+    db.refresh(shot)
+    story_id = db.scalar(select(StoryVersion.id).where(StoryVersion.project_id == project.id,
+        StoryVersion.version == project.current_version))
+    if shot.project_version != project.current_version or shot.story_version_id != story_id:
+        raise HTTPException(409, "SHOT_VERSION_STALE")
     if participant.person_key not in shot.person_keys:
         raise HTTPException(status_code=403, detail="PARTICIPANT_PERSON_SCOPE_REQUIRED")
     asset = db.get(WeddingAsset, body.asset_id)

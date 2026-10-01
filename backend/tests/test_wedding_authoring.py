@@ -484,3 +484,89 @@ def test_authoring_migration_upgrades_legacy_columns_once(client,monkeypatch):
         assert db.get(WeddingProject,project).selected_music=={}
         for table,columns in fields.items():
             assert set(columns)<={c['name'] for c in inspect(db.get_bind()).get_columns(table)}
+
+
+def superseded_render(client,monkeypatch):
+    project,headers,photos,ids=rendered_story(client,monkeypatch)
+    row=client.post(f'/wedding-projects/{project}/render',headers=headers,json={'version':1}).json()
+    changed=client.patch(f'/wedding-projects/{project}',headers=headers,json={'version':1,'title':'New content version'})
+    assert changed.status_code==200 and changed.json()['version']==2
+    return project,headers,row
+
+
+@pytest.mark.parametrize("tamper_shot_version",[False,True])
+def test_current_version_review_cannot_attach_to_superseded_shot(client,monkeypatch,tamper_shot_version):
+    project,headers,row=superseded_render(client,monkeypatch)
+    item=next(i for i in row['timeline'] if 'A' in i['person_keys'])
+    if tamper_shot_version:
+        from app.models import StoryboardShot
+        with get_session_factory()() as db:
+            db.get(StoryboardShot,item['shot_id']).project_version=2
+            db.add(StoryVersion(project_id=project,version=2,story_text='New content',style='warm_documentary',status='approved',owner_approved_at=utc_now()))
+            db.commit()
+    response=client.post(f"/participant-reviews/{item['shot_id']}",headers=headers,
+        json={'project_version':2,'person_key':'A','asset_id':item['asset_id'],'result':'approved'})
+    assert response.status_code==409,response.text
+    assert response.json()['detail']=='SHOT_VERSION_STALE'
+    with get_session_factory()() as db:
+        assert db.scalar(select(ParticipantReview.id).where(ParticipantReview.project_id==project,ParticipantReview.project_version==2)) is None
+
+
+@pytest.mark.parametrize('injected_reviews',[False,True])
+def test_superseded_render_cannot_be_restored_or_edited_as_current(client,monkeypatch,injected_reviews):
+    project,headers,row=superseded_render(client,monkeypatch)
+    with get_session_factory()() as db:
+        if injected_reviews:
+            for review in list(db.scalars(select(ParticipantReview).where(ParticipantReview.project_id==project))):
+                db.add(ParticipantReview(project_id=project,participant_id=review.participant_id,
+                    person_key=review.person_key,project_version=2,shot_id=review.shot_id,
+                    asset_id=review.asset_id,result='approved',confirmed_at=utc_now()))
+            db.commit()
+        before=[r.id for r in db.scalars(select(RenderVersion).where(RenderVersion.project_id==project))]
+    restored=client.post(f"/wedding-projects/{project}/renders/{row['id']}/restore",headers=headers,json={'version':2})
+    edited=client.post(f'/wedding-projects/{project}/render',headers=headers,
+        json={'version':2,'source_render_id':row['id'],'subtitles':{row['timeline'][0]['shot_id']:'New edit'}})
+    assert restored.status_code==edited.status_code==409,(restored.text,edited.text)
+    assert restored.json()['detail']==edited.json()['detail']=='RENDER_SOURCE_VERSION_STALE'
+    with get_session_factory()() as db:
+        assert [r.id for r in db.scalars(select(RenderVersion).where(RenderVersion.project_id==project))]==before
+
+
+@pytest.mark.parametrize('tamper_shot_version',[False,True])
+def test_timeline_requires_current_shot_and_current_story_even_with_injected_reviews(client,monkeypatch,tamper_shot_version):
+    from app.models import WeddingProject,StoryboardShot
+    from app.wedding_authoring import validate_timeline
+    project,headers,row=superseded_render(client,monkeypatch)
+    with get_session_factory()() as db:
+        for review in list(db.scalars(select(ParticipantReview).where(ParticipantReview.project_id==project))):
+            db.add(ParticipantReview(project_id=project,participant_id=review.participant_id,
+                person_key=review.person_key,project_version=2,shot_id=review.shot_id,
+                asset_id=review.asset_id,result='approved',confirmed_at=utc_now()))
+        db.add(StoryVersion(project_id=project,version=2,story_text='New content',style='warm_documentary',status='approved',owner_approved_at=utc_now()))
+        if tamper_shot_version:
+            for item in row['timeline']:db.get(StoryboardShot,item['shot_id']).project_version=2
+        db.flush()
+        with pytest.raises(HTTPException,match='TIMELINE_SHOT_VERSION_STALE'):
+            validate_timeline(db,db.get(WeddingProject,project),row['timeline'])
+
+
+def test_worker_rejects_preexisting_render_stamped_with_new_version(client,monkeypatch):
+    from app.wedding_worker import claim_next_render_version,process_claimed_render_version
+    from app.wedding_service import WeddingPrivateStorage
+    project,headers,row=superseded_render(client,monkeypatch)
+    with get_session_factory()() as db:
+        render=db.get(RenderVersion,row['id']);render.project_version=2
+        db.add(StoryVersion(project_id=project,version=2,story_text='Current story',style='warm_documentary',status='approved',owner_approved_at=utc_now()))
+        for review in list(db.scalars(select(ParticipantReview).where(ParticipantReview.project_id==project))):
+            db.add(ParticipantReview(project_id=project,participant_id=review.participant_id,
+                person_key=review.person_key,project_version=2,shot_id=review.shot_id,
+                asset_id=review.asset_id,result='approved',confirmed_at=utc_now()))
+        db.commit()
+    class Renderer:
+        def render(self,*args,**kwargs):raise AssertionError('Superseded timeline reached renderer')
+    assert claim_next_render_version()==row['id']
+    result=process_claimed_render_version(get_session_factory(),row['id'],WeddingPrivateStorage(get_settings()),Renderer())
+    assert result.error_code=='TIMELINE_SHOT_VERSION_STALE'
+    with get_session_factory()() as db:
+        render=db.get(RenderVersion,row['id'])
+        assert render.status=='failed' and render.preview_asset_id is None and render.export_asset_id is None
