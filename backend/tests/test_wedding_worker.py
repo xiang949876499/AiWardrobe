@@ -14,6 +14,7 @@ from app.database import get_session_factory
 from app.models import (
     BudgetLedger,
     BudgetLedgerStatus,
+    CandidateReviewStatus,
     GenerationJob,
     RenderVersion,
     RenderVersionStatus,
@@ -32,7 +33,7 @@ from app.models import (
     WeddingAuditEvent,
     utc_now,
 )
-from app.wedding_service import WeddingPrivateStorage, reserve_generation_budget
+from app.wedding_service import WeddingPrivateStorage, reserve_generation_budget, set_job_status
 from app.wedding_worker import (
     MediaOutput,
     ProviderBundle,
@@ -200,11 +201,13 @@ class FailingVideoProvider:
 class SuccessfulVideoProvider:
     def __init__(self, *, cost_fen: int = 37, mutate_version: bool = False) -> None:
         self.calls = 0
+        self.idempotency_keys: list[str] = []
         self.cost_fen = cost_fen
         self.mutate_version = mutate_version
 
     def generate(self, request) -> MediaOutput:
         self.calls += 1
+        self.idempotency_keys.append(request.idempotency_key)
         if self.mutate_version:
             with get_session_factory()() as db:
                 project = db.get(WeddingProject, request.project_id)
@@ -425,6 +428,144 @@ def test_project_hard_cap_is_checked_before_dispatch_and_keeps_delivery_reserve(
         assert project is not None and project.budget_delivery_reserve_fen == 2_000
         assert project.budget_reserved_fen == 0
         assert ledger.status == BudgetLedgerStatus.RELEASED
+
+
+def test_owner_account_budget_cap_blocks_dispatch_across_two_valid_projects(client, monkeypatch):
+    first = _project_with_job(client)
+    second = _project_with_job(client)
+    factory = get_session_factory()
+    for work in (first, second):
+        with factory() as db:
+            project = db.get(WeddingProject, work.project_id)
+            assert project is not None
+            assert project.budget_reserved_fen == 1_000
+            assert project.budget_spent_fen + project.budget_reserved_fen + project.budget_delivery_reserve_fen <= project.budget_limit_fen
+    monkeypatch.setenv("WEDDING_ACCOUNT_BUDGET_LIMIT_FEN", "1500")
+    get_settings.cache_clear()
+    provider = SuccessfulVideoProvider()
+    assert claim_next_generation_job(factory) == first.job_id
+    result = process_claimed_generation_job(
+        factory, first.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+    )
+    assert result.error_code == "ACCOUNT_BUDGET_LIMIT_EXCEEDED"
+    assert provider.calls == 0
+    with factory() as db:
+        first_job = db.get(GenerationJob, first.job_id)
+        first_ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == first.job_id)).scalar_one()
+        first_project = db.get(WeddingProject, first.project_id)
+        second_project = db.get(WeddingProject, second.project_id)
+        assert first_job is not None and first_job.actual_cost_fen == 0
+        assert first_ledger.status == BudgetLedgerStatus.RELEASED
+        assert first_project is not None and first_project.budget_reserved_fen == 0
+        assert second_project is not None and second_project.budget_reserved_fen == 1_000
+
+
+def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client, monkeypatch):
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    storage = WeddingPrivateStorage(get_settings())
+    with factory() as db:
+        first_shot = db.get(StoryboardShot, work.shot_id)
+        job = db.get(GenerationJob, work.job_id)
+        assert first_shot is not None and job is not None
+        second_shot = StoryboardShot(
+            project_id=work.project_id,
+            story_version_id=work.story_id,
+            project_version=1,
+            shot_index=1,
+            shot_type="person_ai",
+            duration_ms=5_000,
+            person_keys=["A"],
+            fact_ids=[],
+            description="Second approved shot",
+            subtitle="Second subtitle",
+            frame_asset_id=work.frame_asset_id,
+            status=StoryboardShotStatus.FRAME_APPROVED,
+        )
+        db.add(second_shot)
+        db.flush()
+        second_shot_id = second_shot.id
+        output_key = storage.put(work.project_id, b"persisted-first-candidate", ".mp4", "video/mp4")
+        output_asset = WeddingAsset(
+            project_id=work.project_id,
+            asset_type=WeddingAssetType.VIDEO_CANDIDATE,
+            object_key=output_key,
+            sha256="c" * 64,
+            mime="video/mp4",
+            size_bytes=len(b"persisted-first-candidate"),
+            generated=True,
+            provider="test-provider",
+        )
+        db.add(output_asset)
+        db.flush()
+        db.add(
+            ShotCandidate(
+                project_id=work.project_id,
+                shot_id=first_shot.id,
+                generation_job_id=job.id,
+                asset_id=output_asset.id,
+                provider="test-provider",
+                model_version="test-model-v1",
+                review_result=CandidateReviewStatus.PENDING,
+                actual_cost_fen=31,
+            )
+        )
+        set_job_status(job, WeddingJobStatus.PROCESSING)
+        job.target_shot_id = None
+        job.total_shots = 2
+        job.completed_shots = 1
+        job.actual_cost_fen = 31
+        job.provider_name = "test-provider"
+        job.model_version = "test-model-v1"
+        job.progress_stage = "provider_result_received"
+        job.started_at = utc_now() - timedelta(hours=1)
+        job.updated_at = utc_now() - timedelta(hours=1)
+        first_shot.status = StoryboardShotStatus.CANDIDATE_REVIEW
+        db.commit()
+        assert db.execute(
+            select(ShotCandidate).where(
+                ShotCandidate.generation_job_id == work.job_id,
+                ShotCandidate.shot_id == work.shot_id,
+            )
+        ).scalars().first() is not None
+
+    monkeypatch.setenv("WEDDING_PROVIDER_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("WEDDING_WORKER_STALE_SECONDS", "120")
+    get_settings.cache_clear()
+    assert claim_next_generation_job(factory) == work.job_id
+    with factory() as db:
+        recovered = db.get(GenerationJob, work.job_id)
+        assert recovered is not None
+        assert recovered.status == WeddingJobStatus.PROCESSING
+        assert recovered.progress_stage == "recovered"
+        assert recovered.actual_cost_fen == 31 and recovered.reserved_amount_fen == 1_000
+        resumed_candidate = db.execute(
+            select(ShotCandidate).where(
+                ShotCandidate.generation_job_id == work.job_id,
+                ShotCandidate.shot_id == work.shot_id,
+            )
+        ).scalars().first()
+        assert resumed_candidate is not None
+        assert recovered.target_shot_id is None
+
+    provider = SuccessfulVideoProvider(cost_fen=19)
+    result = process_claimed_generation_job(
+        factory, work.job_id, ProviderBundle(character_video=provider), storage
+    )
+    assert result.status == "completed"
+    assert provider.calls == 1
+    assert provider.idempotency_keys == [f"{work.job_id}:{second_shot_id}"], (
+        f"work shot={work.shot_id}, second shot={second_shot_id}, keys={provider.idempotency_keys}"
+    )
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        candidates = list(db.execute(select(ShotCandidate).where(ShotCandidate.generation_job_id == work.job_id)).scalars())
+        assert job is not None and job.completed_shots == 2 and job.actual_cost_fen == 50
+        assert ledger.status == BudgetLedgerStatus.SETTLED and ledger.actual_fen == 50
+        assert ledger.released_fen == 950 and ledger.reserved_fen == 1_000
+        assert len(candidates) == 2
+        assert len({candidate.shot_id for candidate in candidates}) == 2
 
 
 def test_provider_result_after_project_version_changes_is_discarded_but_cost_is_settled(client, tmp_path):

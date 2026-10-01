@@ -4,9 +4,10 @@ import argparse
 import hashlib
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
@@ -72,6 +73,7 @@ def _job_shots(db: Session, job: GenerationJob) -> list[StoryboardShot]:
 def claim_next_generation_job(session_factory: SessionFactory | None = None) -> str | None:
     """Atomically claim one queued job; the conditional update is the SQLite-safe CAS."""
     factory = session_factory or get_session_factory()
+    _recover_stale_generation_jobs(factory)
     with factory() as db:
         candidate = db.execute(
             select(GenerationJob)
@@ -83,6 +85,7 @@ def claim_next_generation_job(session_factory: SessionFactory | None = None) -> 
         if candidate is None:
             return None
         now = utc_now()
+        claim_stage = "recovered" if candidate.progress_stage == "recovered" else "claimed"
         set_job_status(candidate, WeddingJobStatus.PROCESSING)
         result = db.execute(
             update(GenerationJob)
@@ -92,8 +95,9 @@ def claim_next_generation_job(session_factory: SessionFactory | None = None) -> 
             )
             .values(
                 status=WeddingJobStatus.PROCESSING,
-                progress_stage="claimed",
-                started_at=now,
+                progress_stage=claim_stage,
+                started_at=candidate.started_at or now,
+                updated_at=now,
                 error_code=None,
                 error_category=None,
             )
@@ -104,10 +108,71 @@ def claim_next_generation_job(session_factory: SessionFactory | None = None) -> 
             return None
         db.expire(candidate)
         db.refresh(candidate)
-        candidate.progress_stage = "claimed"
-        candidate.started_at = now
+        candidate.progress_stage = claim_stage
+        candidate.started_at = candidate.started_at or now
         db.commit()
         return candidate.id
+
+
+def _recover_stale_generation_jobs(
+    session_factory: SessionFactory,
+    *,
+    now=None,
+) -> list[str]:
+    """Requeue stale claims via legal transitions and a status/lease compare-and-swap."""
+    current_time = now or utc_now()
+    stale_before = current_time - timedelta(seconds=get_settings().wedding_worker_stale_seconds)
+    with session_factory() as db:
+        stale_ids = list(
+            db.execute(
+                select(GenerationJob.id)
+                .where(
+                    GenerationJob.status == WeddingJobStatus.PROCESSING,
+                    GenerationJob.updated_at < stale_before,
+                )
+                .order_by(GenerationJob.updated_at, GenerationJob.id)
+            ).scalars()
+        )
+
+    recovered_ids: list[str] = []
+    for job_id in stale_ids:
+        with session_factory() as db:
+            job = db.execute(
+                select(GenerationJob)
+                .where(
+                    GenerationJob.id == job_id,
+                    GenerationJob.status == WeddingJobStatus.PROCESSING,
+                    GenerationJob.updated_at < stale_before,
+                )
+                .with_for_update(skip_locked=True)
+            ).scalars().first()
+            if job is None:
+                continue
+            # Validate both state transitions before the CAS makes recovery visible.
+            set_job_status(job, WeddingJobStatus.NEEDS_ACTION)
+            set_job_status(job, WeddingJobStatus.QUEUED)
+            result = db.execute(
+                update(GenerationJob)
+                .where(
+                    GenerationJob.id == job_id,
+                    GenerationJob.status == WeddingJobStatus.PROCESSING,
+                    GenerationJob.updated_at < stale_before,
+                )
+                .values(
+                    status=WeddingJobStatus.QUEUED,
+                    progress_stage="recovered",
+                    updated_at=current_time,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                db.rollback()
+                continue
+            db.expire(job)
+            db.refresh(job)
+            db.commit()
+            recovered_ids.append(job.id)
+    return recovered_ids
 
 
 def claim_next_render_version(session_factory: SessionFactory | None = None) -> str | None:
@@ -230,7 +295,11 @@ def _finalize_job(
         return WorkerResult(job.id, str(job.status), job.error_code)
 
 
-def _dispatch_preflight(session_factory: SessionFactory, job_id: str) -> tuple[VideoGenerationRequest | None, str | None]:
+def _dispatch_preflight(
+    session_factory: SessionFactory,
+    job_id: str,
+    shot_id: str,
+) -> tuple[VideoGenerationRequest | None, str | None]:
     """Commit a truthful stage and re-check all gates at the provider dispatch boundary."""
     with session_factory() as db:
         job = db.get(GenerationJob, job_id)
@@ -252,6 +321,16 @@ def _dispatch_preflight(session_factory: SessionFactory, job_id: str) -> tuple[V
             > project.budget_limit_fen
         ):
             return None, "BUDGET_LIMIT_EXCEEDED"
+        account_total_fen = db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(WeddingProject.budget_spent_fen + WeddingProject.budget_reserved_fen),
+                    0,
+                )
+            ).where(WeddingProject.owner_id == project.owner_id)
+        )
+        if int(account_total_fen or 0) > get_settings().wedding_account_budget_limit_fen:
+            return None, "ACCOUNT_BUDGET_LIMIT_EXCEEDED"
         ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == job.id)).scalar_one_or_none()
         if ledger is None or ledger.status.value != "reserved" or ledger.reserved_fen != job.reserved_amount_fen:
             return None, "BUDGET_RESERVATION_INVALID"
@@ -259,10 +338,15 @@ def _dispatch_preflight(session_factory: SessionFactory, job_id: str) -> tuple[V
             validate_active_consents(db, project)
         except HTTPException as exc:
             return None, str(exc.detail) if isinstance(exc.detail, str) else "CONSENT_REQUIRED"
-        shots = _job_shots(db, job)
-        if not shots:
+        shot = db.get(StoryboardShot, shot_id)
+        if (
+            shot is None
+            or shot.story_version_id != job.story_version_id
+            or shot.project_id != project.id
+            or shot.project_version != job.project_version
+            or (job.target_shot_id is not None and shot.id != job.target_shot_id)
+        ):
             return None, "SHOT_NOT_FOUND"
-        shot = shots[0]
         if shot.shot_type == "photo":
             return None, "PHOTO_SHOT_DOES_NOT_DISPATCH"
         if shot.shot_type not in {"person_ai", "scene_ai"}:
@@ -360,7 +444,7 @@ def process_claimed_generation_job(
                 set_shot_status(shot, StoryboardShotStatus.GENERATING)
             db.commit()
 
-        request, preflight_error = _dispatch_preflight(session_factory, job_id)
+        request, preflight_error = _dispatch_preflight(session_factory, job_id, shot_id)
         if request is None:
             if preflight_error == "PHOTO_SHOT_DOES_NOT_DISPATCH":
                 continue

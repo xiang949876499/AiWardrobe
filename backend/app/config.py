@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     wedding_scene_video_provider: str = "disabled"
     wedding_scene_video_api_key: str | None = None
     wedding_scene_video_model: str = ""
+    wedding_account_budget_limit_fen: int = Field(default=15_000, gt=0)
+    wedding_provider_timeout_seconds: int = Field(default=600, gt=0)
+    wedding_worker_stale_seconds: int = Field(default=1_800, gt=0)
     wedding_ffmpeg_path: str | None = None
     wedding_music_file: str | None = None
     wedding_music_license_id: str | None = None
@@ -96,6 +99,8 @@ class Settings(BaseSettings):
     def reject_sqlite_in_production(self) -> "Settings":
         if self.database_url.startswith("sqlite") and self.environment == "production" and not self.testing:
             raise ValueError("SQLite is only allowed for development or tests; set DATABASE_URL to Postgres in production")
+        if self.wedding_worker_stale_seconds <= self.wedding_provider_timeout_seconds:
+            raise ValueError("WEDDING_WORKER_STALE_SECONDS must exceed WEDDING_PROVIDER_TIMEOUT_SECONDS")
         return self
 
 
