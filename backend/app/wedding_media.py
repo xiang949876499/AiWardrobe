@@ -4,9 +4,9 @@ import json
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
@@ -14,9 +14,18 @@ from app.config import Settings, get_settings
 
 
 class ProviderUnavailable(RuntimeError):
-    def __init__(self, code: str, message: str, *, actual_cost_fen: int = 0) -> None:
+    def __init__(self, code: str, message: str, *, actual_cost_fen: int = 0,
+                 task_id: str | None = None, submission_state: str = "not_submitted",
+                 request_id: str | None = None, usage: dict | None = None,
+                 price_version: str | None = None, price_metadata: dict | None = None) -> None:
         self.code = code
         self.actual_cost_fen = actual_cost_fen
+        self.task_id = task_id
+        self.submission_state = submission_state
+        self.request_id = request_id
+        self.usage = usage or {}
+        self.price_version = price_version
+        self.price_metadata = price_metadata or {}
         super().__init__(f"{code}: {message}")
 
 
@@ -29,6 +38,10 @@ class MediaOutput:
     actual_cost_fen: int
     request_id: str | None = None
     demo: bool = False
+    task_id: str | None = None
+    usage: dict = field(default_factory=dict)
+    price_version: str | None = None
+    price_metadata: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -39,6 +52,10 @@ class StructuredOutput:
     actual_cost_fen: int
     request_id: str | None = None
     demo: bool = False
+    task_id: str | None = None
+    usage: dict = field(default_factory=dict)
+    price_version: str | None = None
+    price_metadata: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -46,6 +63,8 @@ class StoryStructureRequest:
     story_text: str
     confirmed_facts: tuple[str, ...]
     idempotency_key: str
+    role_names: tuple[tuple[str, str], ...] = ()
+    style: str = "cinematic"
 
 
 @dataclass(frozen=True)
@@ -67,6 +86,10 @@ class VideoGenerationRequest:
     reference_image: bytes
     reference_mime: str
     idempotency_key: str
+    primary_references: tuple[tuple[str, bytes, str], ...] = ()
+    existing_task_id: str | None = None
+    checkpoint: Callable[[str], None] | None = None
+    heartbeat: Callable[[], None] | None = None
 
 
 class StoryStructureProvider(Protocol):
@@ -163,15 +186,9 @@ def build_provider_bundle(settings: Settings | None = None) -> ProviderBundle:
     if config.wedding_media_mode.strip().lower() == "demo":
         demo = _DemoProvider()
         return ProviderBundle(demo, demo, demo, demo)
-    return ProviderBundle(
-        story=_UnavailableProvider(config.wedding_story_provider, config.wedding_story_api_key),
-        frame=_UnavailableProvider(config.wedding_frame_provider, config.wedding_frame_api_key),
-        character_video=_UnavailableProvider(
-            config.wedding_character_video_provider,
-            config.wedding_character_video_api_key,
-        ),
-        scene_video=_UnavailableProvider(config.wedding_scene_video_provider, config.wedding_scene_video_api_key),
-    )
+    # Lazy import keeps the established demo contracts independent of HTTP adapters.
+    from app.wedding_providers import live_provider_bundle
+    return live_provider_bundle(config)
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from decimal import Decimal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,16 +44,35 @@ class Settings(BaseSettings):
     wedding_media_mode: str = "disabled"
     wedding_story_provider: str = "disabled"
     wedding_story_api_key: str | None = None
-    wedding_story_model: str = ""
+    wedding_story_model: str = "doubao-seed-2-0-pro-260215"
     wedding_frame_provider: str = "disabled"
     wedding_frame_api_key: str | None = None
-    wedding_frame_model: str = ""
+    wedding_frame_model: str = "doubao-seedream-4-5-251128"
     wedding_character_video_provider: str = "disabled"
     wedding_character_video_api_key: str | None = None
-    wedding_character_video_model: str = ""
+    wedding_character_video_model: str = "wan2.7-r2v-2026-06-12"
     wedding_scene_video_provider: str = "disabled"
     wedding_scene_video_api_key: str | None = None
-    wedding_scene_video_model: str = ""
+    wedding_scene_video_model: str = "wan2.6-i2v-flash"
+    wedding_ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    wedding_dashscope_base_url: str = "https://dashscope.aliyuncs.com"
+    wedding_connect_timeout_seconds: float = Field(default=10, gt=0)
+    wedding_read_timeout_seconds: float = Field(default=60, gt=0)
+    wedding_poll_interval_seconds: float = Field(default=3, gt=0)
+    wedding_total_timeout_seconds: float = Field(default=600, gt=0)
+    wedding_max_json_bytes: int = Field(default=32_000_000, gt=0)
+    wedding_max_request_bytes: int = Field(default=60_000_000, gt=0)
+    wedding_max_image_bytes: int = Field(default=20_000_000, gt=0)
+    wedding_max_video_bytes: int = Field(default=100_000_000, gt=0)
+    wedding_download_allowed_domains: str = "oss-cn-beijing.aliyuncs.com,oss-cn-shanghai.aliyuncs.com,volces.com"
+    wedding_price_version: str = "cn-baseline-2026-10-01"
+    wedding_story_input_fen_per_million_tokens: Decimal | None = Field(default=None, gt=0)
+    wedding_story_output_fen_per_million_tokens: Decimal | None = Field(default=None, gt=0)
+    wedding_story_max_cost_fen: int = Field(default=100, gt=0)
+    wedding_story_max_tokens: int = Field(default=8192, gt=0, le=16384)
+    wedding_frame_fen_per_image: Decimal = Field(default=Decimal("25"), gt=0)
+    wedding_r2v_fen_per_second: Decimal = Field(default=Decimal("100"), gt=0)
+    wedding_i2v_flash_fen_per_second: Decimal = Field(default=Decimal("25"), gt=0)
     wedding_account_budget_limit_fen: int = Field(default=15_000, gt=0)
     wedding_worker_stale_seconds: int = Field(default=1_800, gt=0)
     wedding_ffmpeg_path: str | None = None
