@@ -144,7 +144,7 @@ def process_claimed_render_version(factory,claimed,storage,renderer):
                 keys.append(key);outputs.append(result)
             with factory() as db:
                 project,row=lock_render(db,rid);fence(db,project,row,token)
-                # A delivery refreshes all still-valid source/generated media as well as both outputs.
+                # Successful work records activity only after every source passes the final retention fence.
                 deadline=touch_activity(db,project)
                 assets=[]
                 for key,result,kind in zip(keys,outputs,('preview_video','final_video'),strict=True):

@@ -767,3 +767,56 @@ def test_pre_migration_frame_job_without_fingerprint_is_safely_fenced(client,mon
         db.commit()
     result=process_next_creation_job()
     assert result.status=='needs_action' and result.error_code=='FRAMES_CHANGED'
+
+
+@pytest.mark.parametrize('kind', ['story','frame'])
+def test_new_creation_renews_activity_even_if_provider_fails_but_replay_and_poll_do_not(client,monkeypatch,kind):
+    from app.models import utc_now
+    from app.wedding_service import _as_utc
+    from app.wedding_creation import process_next_creation_job
+    from app.wedding_media import ProviderUnavailable
+    if kind=='frame':
+        project,headers,_,photos,_=prepare_frames(client,monkeypatch)
+        body={'version':1,'photos':photos}
+    else:
+        project,headers=setup_project(client,monkeypatch)
+        body={'version':1,'story_text':'We met in a library.'}
+    factory=get_session_factory();now=utc_now()
+    with factory() as db:
+        row=db.get(WeddingProject,project);row.last_activity_at=now-timedelta(days=29)
+        for asset in db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==project)):asset.expires_at=now+timedelta(days=1)
+        expired=WeddingAsset(project_id=project,asset_type='photo',object_key='expired-unused',sha256='a'*64,mime='image/png',size_bytes=1,expires_at=now-timedelta(days=1))
+        db.add(expired);db.flush();expired_id=expired.id;db.commit()
+    url=f'/wedding-projects/{project}/{kind}-jobs'
+    first=client.post(url,headers={**headers,'Idempotency-Key':'retention-new'},json=body)
+    assert first.status_code==202,first.text
+    with factory() as db:
+        accepted=_as_utc(db.get(WeddingProject,project).last_activity_at)
+        assert accepted>=now
+        assert all(_as_utc(a.expires_at)==accepted+timedelta(days=30) for a in db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==project,WeddingAsset.id!=expired_id)))
+        assert _as_utc(db.get(WeddingAsset,expired_id).expires_at)<now
+    monkeypatch.setattr('app.wedding_retention.utc_now',lambda:now+timedelta(days=2))
+    assert client.post(url,headers={**headers,'Idempotency-Key':'retention-new'},json=body).json()['id']==first.json()['id']
+    assert client.get(f'/wedding-projects/{project}/creation-jobs',headers=headers).status_code==200
+    class Failed:
+        def structure(self,request):raise ProviderUnavailable('TEST_FAILED','safe',submission_state='failed')
+        def generate(self,request):raise ProviderUnavailable('TEST_FAILED','safe',submission_state='failed')
+    result=process_next_creation_job(providers=replace(build_provider_bundle(),story=Failed(),frame=Failed()))
+    assert result.status=='needs_action' and result.error_code=='TEST_FAILED'
+    with factory() as db:
+        assert _as_utc(db.get(WeddingProject,project).last_activity_at)==accepted
+        assert _as_utc(db.get(WeddingAsset,expired_id).expires_at)<now
+
+
+def test_new_story_request_does_not_revive_project_expired_legacy_media(client,monkeypatch):
+    from app.models import utc_now
+    from app.wedding_service import _as_utc
+    project,headers=setup_project(client,monkeypatch);factory=get_session_factory();now=utc_now()
+    with factory() as db:
+        db.get(WeddingProject,project).last_activity_at=now-timedelta(days=31)
+        for asset in db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==project)):asset.expires_at=now+timedelta(days=20)
+        db.commit()
+    assert submit(client,project,headers,key='new-after-expiry').status_code==202
+    with factory() as db:
+        assert _as_utc(db.get(WeddingProject,project).last_activity_at)>=now
+        assert all(_as_utc(a.expires_at)<now for a in db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==project)))

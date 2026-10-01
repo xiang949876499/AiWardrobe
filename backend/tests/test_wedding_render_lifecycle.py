@@ -155,3 +155,65 @@ def test_render_heartbeat_protects_preview_stage_during_second_encode(client,mon
     with heartbeat(factory,rid,claim.lease_token):time.sleep(2.7)
     from app.wedding_service import _as_utc
     with factory() as db:assert _as_utc(db.get(WeddingObjectCleanup,key).cleanup_after)>utc_now()+timedelta(minutes=14)
+
+
+@pytest.mark.parametrize('boundary', ['before', 'during'])
+def test_project_only_expiry_fences_render_without_renewal(client,monkeypatch,boundary):
+    pid,headers,rid=queued(client,monkeypatch);factory=get_session_factory()
+    stale=utc_now()-timedelta(days=31)
+    def expire_project():
+        with factory() as db:
+            db.get(WeddingProject,pid).last_activity_at=stale
+            assert all(a.expires_at>utc_now().replace(tzinfo=None) for a in db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==pid)))
+            db.commit()
+    if boundary=='before':expire_project()
+    calls=[]
+    class Renderer(UnitRenderer):
+        def render(self,*args,**kwargs):
+            calls.append(True)
+            if boundary=='during':expire_project()
+            return super().render(*args,**kwargs)
+    result=process_claimed_render_version(factory,claim_next_render_version(factory),WeddingPrivateStorage(get_settings()),Renderer())
+    assert result.status=='failed' and result.error_code=='TIMELINE_ASSET_INVALID'
+    if boundary=='before':assert not calls
+    with factory() as db:
+        from app.wedding_service import _as_utc
+        assert _as_utc(db.get(WeddingProject,pid).last_activity_at)==stale
+        assert not list(db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==pid,WeddingAsset.asset_type.in_(['preview_video','final_video']))))
+        assert db.scalar(select(WeddingObjectCleanup).where(WeddingObjectCleanup.project_id==pid)) is None
+
+
+@pytest.mark.parametrize('dependency', ['frame','primary'])
+@pytest.mark.parametrize('boundary', ['before','during'])
+def test_nonselected_snapshot_dependency_expiry_fences_render(client,monkeypatch,dependency,boundary):
+    from copy import deepcopy
+    from app.models import StoryboardShot
+    pid,headers,rid=queued(client,monkeypatch);factory=get_session_factory()
+    with factory() as db:
+        row=db.get(RenderVersion,rid);items=deepcopy(row.timeline_snapshot)
+        item=next(i for i in items if i['primary_references'])
+        if dependency=='primary':
+            target=next(iter(item['primary_references'].values()))
+        else:
+            source=db.get(WeddingAsset,item['frame_asset_id'])
+            asset=WeddingAsset(project_id=pid,asset_type='generated_frame',object_key=source.object_key+'-previous',sha256=source.sha256,mime=source.mime,size_bytes=source.size_bytes)
+            db.add(asset);db.flush();target=asset.id
+            item['frame_asset_id']=target
+            db.get(StoryboardShot,item['shot_id']).frame_asset_id=target
+            row.timeline_snapshot=items
+        db.commit()
+    def expire():
+        with factory() as db:
+            db.get(WeddingAsset,target).expires_at=utc_now()-timedelta(seconds=1);db.commit()
+    if boundary=='before':expire()
+    calls=[]
+    class Renderer(UnitRenderer):
+        def render(self,*args,**kwargs):
+            calls.append(True)
+            if boundary=='during':expire()
+            return super().render(*args,**kwargs)
+    result=process_claimed_render_version(factory,claim_next_render_version(factory),WeddingPrivateStorage(get_settings()),Renderer())
+    assert result.status=='failed' and result.error_code=='TIMELINE_ASSET_INVALID'
+    if boundary=='before':assert not calls
+    with factory() as db:
+        row=db.get(RenderVersion,rid);assert row.preview_asset_id is None and row.export_asset_id is None

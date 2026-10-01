@@ -182,6 +182,10 @@ def enqueue(db, actor, project_id, body, key, kind):
             provenance={**provenance, 'input_hash': fingerprint, 'consent_hash': digest(consent),
                         'price_version': config.wedding_price_version, 'draft_hash': job.draft_fingerprint,
                         'consent': consent, 'region_endpoint': config.wedding_ark_base_url}))
+    # Only a newly accepted owner request renews retention. Replay returns above;
+    # provider outcome and status polling do not manufacture further activity.
+    from app.wedding_retention import touch_activity
+    touch_activity(db, project)
     db.commit()
     return job
 

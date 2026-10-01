@@ -266,7 +266,20 @@ def timeline_snapshot(db,project,shots,asset_ids,subtitles):
 
 def validate_timeline(db,project,items):
     from app.models import StoryboardShot, ShotCandidate
+    from app.wedding_retention import asset_expired
     validate_active_consents(db,project)
+    # Snapshot dependencies must remain retained at both worker fences, including
+    # frames/primary references that are not themselves selected render inputs.
+    dependencies = set()
+    for item in items:
+        dependencies.add(item['asset_id'])
+        if item.get('frame_asset_id'):
+            dependencies.add(item['frame_asset_id'])
+        dependencies.update(item.get('primary_references', {}).values())
+    for asset_id in dependencies:
+        asset = db.get(WeddingAsset, asset_id)
+        if not valid_asset(asset, project.id) or asset_expired(project, asset):
+            raise HTTPException(409, 'TIMELINE_ASSET_INVALID')
     require_photo_readiness(db,project)
     if not items or sum(i['duration_ms'] for i in items)!=project.target_duration_ms or len({i['shot_id'] for i in items})!=len(items):
         raise HTTPException(409,'TIMELINE_DURATION_INVALID')
