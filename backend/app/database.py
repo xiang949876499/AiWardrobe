@@ -54,6 +54,7 @@ def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
     _ensure_lightweight_columns(engine)
+    _ensure_wedding_project_columns(engine)
 
 
 def _ensure_lightweight_columns(engine: Engine) -> None:
@@ -84,6 +85,31 @@ def _ensure_lightweight_columns(engine: Engine) -> None:
             }.items():
                 if name not in outfit_columns:
                     connection.execute(text(f"ALTER TABLE outfits ADD COLUMN {name} {ddl}"))
+
+
+def _ensure_wedding_project_columns(engine: Engine) -> None:
+    """Keep early SQLite/Postgres wedding prototypes compatible with create_all.
+
+    create_all adds the new wedding tables. This additive check covers only the
+    small set of project counters that may be missing from an older prototype
+    table; it never rebuilds or drops user data.
+    """
+    inspector = inspect(engine)
+    if "wedding_projects" not in set(inspector.get_table_names()):
+        return
+    columns = {column["name"] for column in inspector.get_columns("wedding_projects")}
+    missing = {
+        "current_version": "INTEGER NOT NULL DEFAULT 1",
+        "frame_approved_version": "INTEGER",
+        "budget_limit_fen": "INTEGER NOT NULL DEFAULT 15000",
+        "budget_delivery_reserve_fen": "INTEGER NOT NULL DEFAULT 2000",
+        "budget_reserved_fen": "INTEGER NOT NULL DEFAULT 0",
+        "budget_spent_fen": "INTEGER NOT NULL DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        for name, ddl in missing.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE wedding_projects ADD COLUMN {name} {ddl}"))
 
 
 def get_db() -> Generator[Session, None, None]:

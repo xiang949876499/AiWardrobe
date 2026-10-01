@@ -554,3 +554,245 @@ class WeatherResponse(BaseModel):
     precipitation: float
     wind_speed: float
     cached: bool
+
+
+WeddingStyle = Literal["warm_documentary", "romantic_film", "fresh_illustration"]
+WeddingPersonKey = Literal["A", "B"]
+
+
+class WeddingProjectCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    owner_name: str = Field(min_length=1, max_length=20)
+    style: WeddingStyle = "warm_documentary"
+
+
+class WeddingProjectPatch(BaseModel):
+    version: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    style: WeddingStyle | None = None
+
+
+class WeddingProjectResponse(BaseModel):
+    id: str
+    title: str
+    status: str
+    version: int
+    style: WeddingStyle
+    target_duration_ms: int
+    aspect_ratio: str
+    budget_limit_fen: int
+    budget_reserved_fen: int
+    budget_spent_fen: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WeddingParticipantSummary(BaseModel):
+    person_key: WeddingPersonKey
+    display_name: str
+    consent_status: Literal["pending", "active", "revoked", "declined"]
+    confirmed_at: datetime | None = None
+
+
+class WeddingProjectDetailResponse(WeddingProjectResponse):
+    participants: list[WeddingParticipantSummary]
+    story_text: str | None = None
+
+
+class WeddingConsentRequest(BaseModel):
+    terms_version: str = Field(min_length=1, max_length=64)
+    scope: list[Literal["portrait_processing", "preview_review", "storage"]] = Field(min_length=1)
+    provider_list: list[str] = Field(min_length=1, max_length=8)
+
+
+class ConsentInviteCreate(BaseModel):
+    person_key: Literal["B"] = "B"
+    display_name: str = Field(min_length=1, max_length=20)
+    provider_list: list[str] = Field(min_length=1, max_length=8)
+    terms_version: str = Field(min_length=1, max_length=64)
+
+
+class ConsentInviteResponse(BaseModel):
+    id: str
+    invite_token: str
+    person_key: WeddingPersonKey
+    expires_at: datetime
+
+
+class ConsentConfirmRequest(BaseModel):
+    accepted: bool
+    display_name: str | None = Field(default=None, max_length=20)
+    terms_version: str = Field(min_length=1, max_length=64)
+
+
+class ParticipantSessionResponse(BaseModel):
+    access_token: str | None = None
+    token_type: str = "bearer"
+    accepted: bool
+    participant: WeddingParticipantSummary
+
+
+class WeddingAssetResponse(BaseModel):
+    id: str
+    asset_type: str
+    person_key: WeddingPersonKey | None = None
+    mime: str
+    size_bytes: int
+    width: int | None = None
+    height: int | None = None
+    generated: bool
+    created_at: datetime
+
+
+class StoryFactInput(BaseModel):
+    source_field: str = Field(min_length=1, max_length=80)
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class StoryFactResponse(BaseModel):
+    id: str
+    source_field: str
+    text: str
+    confirmed_at: datetime | None = None
+
+
+class StoryboardShotInput(BaseModel):
+    shot_index: int = Field(ge=1, le=18)
+    shot_type: Literal["person_ai", "scene_ai", "photo"]
+    duration_ms: int = Field(default=5000, ge=1000, le=10000)
+    person_keys: list[WeddingPersonKey] = Field(default_factory=list, max_length=2)
+    fact_indexes: list[int] = Field(default_factory=list, max_length=10)
+    description: str = Field(min_length=1, max_length=1000)
+    subtitle: str = Field(default="", max_length=80)
+    creative_scene: bool = False
+
+
+class StoryboardShotResponse(BaseModel):
+    id: str
+    project_version: int
+    shot_index: int
+    shot_type: str
+    duration_ms: int
+    person_keys: list[WeddingPersonKey]
+    fact_ids: list[str]
+    description: str
+    subtitle: str
+    creative_scene: bool
+    frame_asset_id: str | None = None
+    status: str
+
+
+class StoryboardSubmitRequest(BaseModel):
+    version: int = Field(ge=1)
+    story_text: str = Field(min_length=1, max_length=12000)
+    facts: list[StoryFactInput] = Field(min_length=1, max_length=40)
+    shots: list[StoryboardShotInput] = Field(min_length=1, max_length=18)
+
+
+class StoryVersionResponse(BaseModel):
+    id: str
+    version: int
+    story_text: str
+    style: WeddingStyle
+    status: str
+    owner_approved_at: datetime | None = None
+    facts: list[StoryFactResponse]
+    shots: list[StoryboardShotResponse]
+
+
+class VersionRequest(BaseModel):
+    version: int = Field(ge=1)
+
+
+class FrameAssignment(BaseModel):
+    shot_id: str
+    asset_id: str
+
+
+class FrameApprovalRequest(BaseModel):
+    version: int = Field(ge=1)
+    frames: list[FrameAssignment] = Field(min_length=1, max_length=18)
+
+
+class ParticipantReviewRequest(BaseModel):
+    asset_id: str
+    result: Literal["approved", "rejected"]
+    project_version: int = Field(ge=1)
+
+
+class ParticipantReviewResponse(BaseModel):
+    id: str
+    person_key: WeddingPersonKey
+    project_version: int
+    shot_id: str | None = None
+    asset_id: str
+    result: Literal["approved", "rejected"]
+    confirmed_at: datetime
+
+
+class WeddingQuoteResponse(BaseModel):
+    id: str
+    project_version: int
+    max_budget_fen: int
+    currency: Literal["CNY"] = "CNY"
+    price_version: str
+    issued_at: datetime
+    expires_at: datetime
+
+
+class GenerationJobCreate(BaseModel):
+    quote_id: str
+    version: int = Field(ge=1)
+
+
+class GenerationJobResponse(BaseModel):
+    id: str
+    project_id: str
+    project_version: int
+    status: Literal["queued", "processing", "needs_action", "completed", "failed", "cancel_requested", "cancelled"]
+    progress_stage: str
+    completed_shots: int
+    total_shots: int
+    reserved_amount_fen: int
+    actual_cost_fen: int
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class GenerationJobCancelResponse(BaseModel):
+    id: str
+    status: str
+
+
+class CandidateSelectionRequest(BaseModel):
+    project_version: int = Field(ge=1)
+    candidate_id: str
+
+
+class FallbackAcceptRequest(BaseModel):
+    project_version: int = Field(ge=1)
+    asset_id: str
+
+
+class RenderCreateRequest(BaseModel):
+    version: int = Field(ge=1)
+
+
+class RenderVersionResponse(BaseModel):
+    id: str
+    project_version: int
+    version: int
+    status: Literal["queued", "processing", "ready", "approved", "failed", "cancelled"]
+    preview_asset_id: str | None = None
+    export_asset_id: str | None = None
+    output_duration_ms: int | None = None
+    owner_approved_at: datetime | None = None
+    created_at: datetime
+
+
+class ExportResponse(BaseModel):
+    render_version_id: str
+    asset_id: str
+    mime: str
+    size_bytes: int
