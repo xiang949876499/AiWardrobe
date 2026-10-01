@@ -1,3 +1,38 @@
+x-backend-environment: &backend-environment
+  DATABASE_URL: postgresql+psycopg://aiwardrobe:aiwardrobe@postgres:5432/aiwardrobe
+  JWT_SECRET: docker-development-secret-with-at-least-thirty-two-bytes
+  FRONTEND_ORIGIN: http://localhost:5173
+  STORAGE_DRIVER: s3
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_BUCKET: aiwardrobe
+  WEDDING_S3_BUCKET: ${WEDDING_S3_BUCKET:-aiwardrobe-wedding-private}
+  S3_REGION: auto
+  S3_ACCESS_KEY_ID: minioadmin
+  S3_SECRET_ACCESS_KEY: minioadmin
+  PUBLIC_STORAGE_BASE_URL: http://localhost:9100/aiwardrobe
+  AI_DEMO_MODE: "true"
+  AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
+  AI_API_KEY: ${AI_API_KEY:-}
+  AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+  WEDDING_MEDIA_MODE: ${WEDDING_MEDIA_MODE:-disabled}
+  WEDDING_STORY_PROVIDER: ${WEDDING_STORY_PROVIDER:-disabled}
+  WEDDING_STORY_API_KEY: ${WEDDING_STORY_API_KEY:-}
+  WEDDING_STORY_MODEL: ${WEDDING_STORY_MODEL:-}
+  WEDDING_FRAME_PROVIDER: ${WEDDING_FRAME_PROVIDER:-disabled}
+  WEDDING_FRAME_API_KEY: ${WEDDING_FRAME_API_KEY:-}
+  WEDDING_FRAME_MODEL: ${WEDDING_FRAME_MODEL:-}
+  WEDDING_CHARACTER_VIDEO_PROVIDER: ${WEDDING_CHARACTER_VIDEO_PROVIDER:-disabled}
+  WEDDING_CHARACTER_VIDEO_API_KEY: ${WEDDING_CHARACTER_VIDEO_API_KEY:-}
+  WEDDING_CHARACTER_VIDEO_MODEL: ${WEDDING_CHARACTER_VIDEO_MODEL:-}
+  WEDDING_SCENE_VIDEO_PROVIDER: ${WEDDING_SCENE_VIDEO_PROVIDER:-disabled}
+  WEDDING_SCENE_VIDEO_API_KEY: ${WEDDING_SCENE_VIDEO_API_KEY:-}
+  WEDDING_SCENE_VIDEO_MODEL: ${WEDDING_SCENE_VIDEO_MODEL:-}
+  WEDDING_ACCOUNT_BUDGET_LIMIT_FEN: ${WEDDING_ACCOUNT_BUDGET_LIMIT_FEN:-15000}
+  WEDDING_WORKER_STALE_SECONDS: ${WEDDING_WORKER_STALE_SECONDS:-1800}
+  WEDDING_FFMPEG_PATH: ${WEDDING_FFMPEG_PATH:-}
+  WEDDING_MUSIC_FILE: ${WEDDING_MUSIC_FILE:-}
+  WEDDING_MUSIC_LICENSE_ID: ${WEDDING_MUSIC_LICENSE_ID:-}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -34,6 +69,8 @@ services:
 
   minio-init:
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    environment:
+      WEDDING_S3_BUCKET: ${WEDDING_S3_BUCKET:-aiwardrobe-wedding-private}
     depends_on:
       minio:
         condition: service_healthy
@@ -41,29 +78,29 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 minioadmin minioadmin &&
       mc mb --ignore-existing local/aiwardrobe &&
-      mc anonymous set download local/aiwardrobe
+      mc anonymous set download local/aiwardrobe &&
+      mc mb --ignore-existing local/$$WEDDING_S3_BUCKET &&
+      mc anonymous set none local/$$WEDDING_S3_BUCKET
       "
 
   backend:
     build:
       context: ./backend
-    environment:
-      DATABASE_URL: postgresql+psycopg://aiwardrobe:aiwardrobe@postgres:5432/aiwardrobe
-      JWT_SECRET: docker-development-secret-with-at-least-thirty-two-bytes
-      FRONTEND_ORIGIN: http://localhost:5173
-      STORAGE_DRIVER: s3
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_BUCKET: aiwardrobe
-      S3_REGION: auto
-      S3_ACCESS_KEY_ID: minioadmin
-      S3_SECRET_ACCESS_KEY: minioadmin
-      PUBLIC_STORAGE_BASE_URL: http://localhost:9100/aiwardrobe
-      AI_DEMO_MODE: "true"
-      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
-      AI_API_KEY: ${AI_API_KEY:-}
-      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+    environment: *backend-environment
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  wedding-worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.wedding_worker", "--poll-seconds", "2"]
+    environment: *backend-environment
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy

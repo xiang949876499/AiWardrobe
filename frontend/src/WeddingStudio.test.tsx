@@ -9,7 +9,8 @@ const api = vi.hoisted(() => ({
   fetchWeddingJobs: vi.fn(), fetchWeddingProject: vi.fn(), fetchWeddingRenders: vi.fn(), fetchWeddingStoryboard: vi.fn(),
   getWeddingCapabilities: vi.fn(), listWeddingAssets: vi.fn(), listWeddingProjects: vi.fn(), saveWeddingStoryboard: vi.fn(),
   selectWeddingCandidate: vi.fn(), submitWeddingRenderReview: vi.fn(), submitWeddingShotReview: vi.fn(), uploadWeddingPhoto: vi.fn(),
-  confirmWeddingOwnerConsent: vi.fn(), acceptWeddingPhotoFallback: vi.fn(), regenerateWeddingShot: vi.fn()
+  confirmWeddingOwnerConsent: vi.fn(), acceptWeddingPhotoFallback: vi.fn(), regenerateWeddingShot: vi.fn(),
+  revokeWeddingConsent: vi.fn(), deleteWeddingProject: vi.fn()
 }));
 vi.mock("./api", () => api);
 
@@ -42,6 +43,9 @@ beforeEach(() => {
   api.selectWeddingCandidate.mockResolvedValue(storyboard(["A", "B"], ["A", "B"].map((person_key) => ({ person_key: person_key as "A" | "B", asset_id: asset.id, result: "approved" as const, confirmed_at: "2026-10-01T00:00:00Z" }))));
   api.createWeddingQuote.mockResolvedValue({ id: "quote-1" });
   api.regenerateWeddingShot.mockResolvedValue({ id: "job-2", status: "queued" });
+  api.revokeWeddingConsent.mockResolvedValue({ revoked: true, person_key: "B", revoked_at: "2026-10-01T00:00:00Z" });
+  api.deleteWeddingProject.mockResolvedValue(undefined);
+  api.listWeddingProjects.mockResolvedValue([]);
   api.fetchWeddingStoryboard.mockResolvedValue(storyboard(["B"]));
 });
 
@@ -75,5 +79,34 @@ describe("Wedding Studio candidate review and regeneration", () => {
     expect(api.selectWeddingCandidate).toHaveBeenCalledWith("owner-token", project.id, "shot-1", candidate.id, 1);
     await user.click(screen.getByRole("button", { name: "重做此镜头" }));
     await waitFor(() => expect(api.regenerateWeddingShot).toHaveBeenCalledWith("owner-token", project.id, "shot-1", "quote-1", 1));
+  });
+
+  test("participant can revoke consent and the browser session token is removed", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    sessionStorage.setItem("wedding_active_project", project.id);
+    sessionStorage.setItem(`wedding_participant:${project.id}`, "participant-token");
+    render(<WeddingStudio ownerToken={null} initialProjectId={project.id} />);
+
+    await user.click(await screen.findByRole("button", { name: "撤回我的授权" }));
+
+    await waitFor(() => expect(api.revokeWeddingConsent).toHaveBeenCalledWith("participant-token", project.id));
+    expect(sessionStorage.getItem(`wedding_participant:${project.id}`)).toBeNull();
+    expect(screen.getByRole("heading", { name: "婚礼 MV 项目需要访问令牌" })).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  test("owner must confirm project deletion and returns to their project list", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    sessionStorage.setItem("wedding_active_project", project.id);
+    render(<WeddingStudio ownerToken="owner-token" initialProjectId={project.id} />);
+
+    await user.click(await screen.findByRole("button", { name: "删除项目" }));
+
+    await waitFor(() => expect(api.deleteWeddingProject).toHaveBeenCalledWith("owner-token", project.id));
+    expect(sessionStorage.getItem("wedding_active_project")).toBeNull();
+    expect(await screen.findByRole("heading", { name: "开始共同创作" })).toBeInTheDocument();
+    confirm.mockRestore();
   });
 });

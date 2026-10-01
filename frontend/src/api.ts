@@ -246,6 +246,18 @@ export function confirmWeddingOwnerConsent(token: string, projectId: string, pro
   }, token);
 }
 
+export function revokeWeddingConsent(token: string, projectId: string) {
+  return request<{ revoked: boolean; person_key: "A" | "B"; revoked_at: string }>(
+    `/wedding-projects/${encodeURIComponent(projectId)}/consent/revoke`,
+    { method: "POST" },
+    token
+  );
+}
+
+export function deleteWeddingProject(token: string, projectId: string) {
+  return request<void>(`/wedding-projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }, token);
+}
+
 export function createWeddingInvite(token: string, projectId: string, displayName: string, providerList: string[]) {
   return request<{ id: string; invite_token: string; person_key: "B"; expires_at: string }>(
     `/wedding-projects/${encodeURIComponent(projectId)}/consent-invites`,

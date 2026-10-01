@@ -458,7 +458,7 @@ class WeddingPrivateStorage:
     def put(self, project_id: str, data: bytes, suffix: str, mime: str) -> str:
         key = f"private-wedding/{project_id}/{uuid4().hex}{suffix}"
         if self.settings.storage_driver == "s3":
-            self._s3_client().put_object(Bucket=self.settings.s3_bucket, Key=key, Body=data, ContentType=mime)
+            self._s3_client().put_object(Bucket=self.settings.wedding_s3_bucket, Key=key, Body=data, ContentType=mime)
             return key
         path = self._local_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,13 +467,13 @@ class WeddingPrivateStorage:
 
     def read(self, key: str) -> bytes:
         if self.settings.storage_driver == "s3":
-            response = self._s3_client().get_object(Bucket=self.settings.s3_bucket, Key=key)
+            response = self._s3_client().get_object(Bucket=self.settings.wedding_s3_bucket, Key=key)
             return response["Body"].read()
         return self._local_path(key).read_bytes()
 
     def delete(self, key: str) -> None:
         if self.settings.storage_driver == "s3":
-            self._s3_client().delete_object(Bucket=self.settings.s3_bucket, Key=key)
+            self._s3_client().delete_object(Bucket=self.settings.wedding_s3_bucket, Key=key)
             return
         path = self._local_path(key)
         path.unlink(missing_ok=True)

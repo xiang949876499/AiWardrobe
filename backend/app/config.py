@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     local_upload_dir: str = "uploads"
     s3_endpoint_url: str | None = None
     s3_bucket: str = "aiwardrobe"
+    # Wedding assets must never share a bucket that may expose wardrobe images publicly.
+    wedding_s3_bucket: str = "aiwardrobe-wedding-private"
     s3_region: str = "auto"
     s3_access_key_id: str | None = None
     s3_secret_access_key: str | None = None
@@ -98,6 +100,8 @@ class Settings(BaseSettings):
     def reject_sqlite_in_production(self) -> "Settings":
         if self.database_url.startswith("sqlite") and self.environment == "production" and not self.testing:
             raise ValueError("SQLite is only allowed for development or tests; set DATABASE_URL to Postgres in production")
+        if self.storage_driver.strip().lower() == "s3" and self.s3_bucket == self.wedding_s3_bucket:
+            raise ValueError("Wedding S3 assets require a bucket separate from wardrobe storage")
         return self
 
 

@@ -120,7 +120,8 @@ if errorlevel 1 (
 )
 popd
 
-start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set WEDDING_MEDIA_MODE=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+start "AiWardrobe Wedding Worker" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WEDDING_MEDIA_MODE=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m app.wedding_worker --poll-seconds 2"
 start "AiWardrobe Frontend" /D "%FRONTEND_DIR%" cmd /k "set VITE_BACKEND_TARGET=%BACKEND_URL%&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
 timeout /t 5 /nobreak >nul
 start "" "%FRONTEND_URL%"
@@ -129,7 +130,7 @@ echo.
 echo Frontend: %FRONTEND_URL%
 echo Backend:  %BACKEND_URL%/docs
 echo.
-echo Backend and frontend are running in separate terminals.
+echo Backend, wedding worker and frontend are running in separate terminals.
 echo Close those terminals to stop local dev servers.
 echo.
 pause
@@ -197,7 +198,8 @@ if errorlevel 1 (
 :backend_ready
 popd
 
-start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+start "AiWardrobe Backend" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set FRONTEND_ORIGIN=%FRONTEND_URL%&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WORKFLOW_PROVIDER=demo&& set WEDDING_MEDIA_MODE=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031"
+start "AiWardrobe Wedding Worker" /D "%BACKEND_DIR%" cmd /k "set DATABASE_URL=sqlite:///./aiwardrobe-local.db&& set ENVIRONMENT=development&& set STORAGE_DRIVER=local&& set LOCAL_UPLOAD_DIR=uploads&& set WEDDING_MEDIA_MODE=demo&& set JWT_SECRET=local-development-secret-with-at-least-thirty-two-bytes&& .venv\Scripts\python.exe -m app.wedding_worker --poll-seconds 2"
 echo Backend: %BACKEND_URL%/docs
 echo.
 pause

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AiWardrobe is an AI buy-before-you-buy wardrobe assistant (MVP). Users can analyze a product URL or image before purchase, see a structured buy/consider/skip recommendation, then use their wardrobe, preferences, reports, and outfit generation to improve future advice.
+AiWardrobe is an AI wardrobe assistant with buy-before-you-buy analysis, wardrobe and outfit tools, and an independent wedding MV studio. Users can analyze a product URL or image before purchase and use their wardrobe, preferences, reports, and outfit generation; wedding projects have separate participant consent and private media access.
 
 ## Tech Stack
 
@@ -43,7 +43,7 @@ npm test
 docker compose up --build
 ```
 
-Services: frontend `:5173`, backend `:8000`, MinIO console `:9001`, Postgres `:5432`.
+Services: frontend `:5173`, backend `:8000`, wedding worker, MinIO console `:9001`, Postgres `:5432`.
 
 ## Configuration
 
@@ -54,6 +54,7 @@ Copy `.env.example` to `.env`. Key env vars:
 - `OUTFIT_AI_PROVIDER`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` - outfit generation provider settings
 - `SHOPPING_RECOMMENDATION_DEMO_MODE`, `TAOBAO_*` - wardrobe gap product search settings
 - `STORAGE_DRIVER` - `local` (default) or `s3` (requires `S3_ENDPOINT_URL`, `S3_BUCKET`, AWS credentials)
+- `WEDDING_*` - wedding MV provider, budget, worker, FFmpeg, and music settings; media mode defaults to `disabled`, and wedding S3 storage uses a private bucket distinct from wardrobe storage
 - `JWT_SECRET`, `SMTP_*` for email codes
 
 ## Architecture
@@ -63,20 +64,23 @@ Copy `.env.example` to `.env`. Key env vars:
 - **`main.py`** - FastAPI app creation, middleware (CORS), router registration, startup event (DB tables)
 - **`config.py`** - Pydantic `Settings` loading from env vars
 - **`database.py`** - SQLAlchemy engine/session factory, `get_db` dependency
-- **`models.py`** - domain models for users, preferences, garments, purchase candidates, shopping recommendation runs/items, rate limits, upload sessions, outfits, and weather cache
+- **`models.py`** - domain models for users, preferences, garments, purchase candidates, shopping recommendation runs/items, rate limits, upload sessions, outfits, weather cache, and wedding projects/assets/jobs/reviews
 - **`schemas.py`** - Pydantic request/response schemas, including purchase analysis normalization for legacy rows
 - **`security.py`** - bcrypt password hashing, JWT create/decode (HS256, 7-day expiry), email code HMAC
 - **`ai.py`** - garment analysis and outfit generation via OpenAI-compatible API; falls back to demo mode
 - **`storage.py`** - `LocalStorage` and `S3Storage` drivers behind a common interface
+- **`wedding_service.py`, `wedding_media.py`, `wedding_worker.py`** - separate wedding participant authorization/private storage, provider interfaces and media rendering, and durable background jobs; the worker initializes the database before polling
 - **`preferences.py`** - user preference context helper used by purchase analysis and outfit prompts
 - **`purchase_analysis.py`** - deterministic purchase scoring, duplicate/idle risk, outfit potential, price guidance, and next actions
 - **`wardrobe_report.py`** - wardrobe totals, distributions, scene coverage, duplicate risks, low-use items, and gaps
 - **`shopping_recommendations.py`** - wardrobe-gap keywords, avoid categories, recommendation groups, candidate search, caching, and rate limits
 - **`routers/`** - `auth.py`, `garments.py`, `uploads.py`, `outfits.py`, `purchase.py`, `shopping.py`, `reports.py`, `preferences.py`, and `weather.py`
+- **`routers/wedding.py`** - wedding MV projects, consent, private assets, storyboard, generation, review, and export APIs
 
 Key patterns:
 
 - All user endpoints use `Depends(get_db)` for DB sessions and `Depends(get_current_user)` (JWT bearer) for auth
+- Wedding endpoints use their own owner/participant actor scope. Both participants must have active portrait consent before media access or processing; revoked consent cancels renders and blocks export.
 - Garments have a `review_status` workflow: AI results start as `pending_review`, user can `PATCH` to override, marking them `ready`
 - Purchase candidates stay separate from garments until saved; shopping recommendation items can link to purchase candidates after analysis
 - Outfits store an `items` JSON column with `[{garment_id, image_url, category}]` and a `weather_snapshot` JSON
@@ -95,6 +99,7 @@ Single-page React app. Nearly all UI logic lives in `App.tsx` with named compone
 - **DetailView** - garment attribute editing (AI result confirmation/correction)
 - **OutfitView** - AI generation by context, optional target garment, result feedback, and manual outfit creation via `ManualPicker`
 - **HistoryView** - outfit list with favorite filtering
+- **WeddingStudio.tsx** - independent wedding project flow; participant invite tokens stay in `sessionStorage` and do not replace the wardrobe login token
 - **PreferencePrompt** - five-field lightweight personalization prompt after enough wardrobe context or a completed purchase analysis
 
 Supporting files:

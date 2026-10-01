@@ -48,6 +48,9 @@
 .ws-primary:hover { background: #be185d; }
 .ws-secondary { color: #44403c; border-color: #d6d3d1; background: #fff; }
 .ws-secondary:hover { background: #fafaf9; }
+.ws-danger { min-height: 38px; padding: 8px 12px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid #fecaca; border-radius: 6px; color: #b91c1c; background: #fff; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.ws-danger:hover { background: #fff7f7; }
+.ws-danger:disabled { opacity: .5; cursor: not-allowed; }
 .ws-primary:disabled, .ws-secondary:disabled { opacity: .5; cursor: not-allowed; }
 .ws-existing { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--ws-line); }
 .ws-existing h3, .ws-facts h3, .ws-templateRow h3 { margin: 0; font-size: 13px; }
@@ -125,7 +128,7 @@
 }
 @media (max-width: 600px) {
   .ws-topbar { height: auto; min-height: 64px; padding: 11px 14px; }
-  .ws-topActions { gap: 6px; }
+  .ws-topActions { gap: 6px; flex-wrap: wrap; }
   .ws-projectBadge { display: none; }
   .ws-main { padding: 14px 12px 90px; }
   .ws-hero { padding: 19px; }

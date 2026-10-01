@@ -24,6 +24,7 @@ AiWardrobe keeps a candidate separate from a confirmed garment. The wardrobe onl
 - 将确认后的 PurchaseCandidate 保存为正式 Garment。
 - 输出衣橱分布、场景覆盖、重复风险、低利用单品、缺口和避购建议。
 - 使用 Open-Meteo 天气服务，以及 Demo 或已配置的 Taobao/Tmall 商品候选。
+- 提供独立的实验性婚礼 MV 工作区：新人可上传照片、填写故事、共同审核镜头并导出带演示标记的本地样片。
 
 ## 工作流 / How it works
 
@@ -80,6 +81,8 @@ npm run dev
 - POST /outfits/generate：按场景、季节、天气与目标单品生成搭配。
 - GET /reports/wardrobe：获取衣橱分布、缺口和风险报告。
 - GET 或 PUT /preferences/me：读取或修改风格偏好。
+
+婚礼 MV 的当前模型适配状态、运行方式、环境变量与接口列表见[婚礼 MV 运行说明](./docs/wedding-mv.md)。本地一键启动会额外启动婚礼 worker；婚礼演示输出不会伪装成真实 AI 视频。
 
 ## 模型、商品与天气配置 / Providers
 
