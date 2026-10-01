@@ -215,3 +215,28 @@ def test_stress_failures_do_not_change_default_motion_denominator():
     summary = runner.summarize(rows)
     assert summary["status"] == "PASS" and summary["stress_passes"] == 0
     assert summary["latency_goal_met"] is False
+
+
+def test_selected_candidate_api_clears_direct_asset_id():
+    snap = snapshot(); shot = snap["story"]["shots"][0]
+    shot["selected_asset_id"] = None
+    assert runner.selected_video(shot, snap["candidates"])
+
+
+def test_proven_other_job_targets_do_not_spend_this_category_attempt(tmp_path):
+    snap = snapshot()
+    snap["jobs"] = [dict(id=f"other{i}", project_version=1, status="completed", total_shots=1) for i in range(3)]
+    for i in range(3):
+        snap["candidates"].append(dict(snap["candidates"][1], id=f"otherc{i}", generation_job_id=f"other{i}"))
+    api = FakeAPI(snap); api.checkpoint = tmp_path / "cp.json"
+    assert runner.dispatch(api, manifest()["samples"][0], snap, api.checkpoint, "generate", "a_closeup", True)["status"] == "SUBMITTED"
+
+
+def test_known_scope_receipts_exclude_failed_other_jobs(tmp_path):
+    snap = snapshot(); sample = manifest()["samples"][0]
+    api = FakeAPI(snap); api.checkpoint = tmp_path / "old.json"
+    runner.dispatch(api, sample, snap, api.checkpoint, "generate", "both", True)
+    receipt = api.checkpoint
+    snap["jobs"] = [dict(id="job1", project_version=1, status="failed", total_shots=1)]
+    api.checkpoint = tmp_path / "new.json"
+    assert runner.dispatch(api, sample, snap, api.checkpoint, "generate", "a_closeup", True, receipts=[receipt])["status"] == "SUBMITTED"
