@@ -49,6 +49,8 @@ function valid(draft: WeddingStoryDraft) {
     draft.shots.length > 0
   );
 }
+const INCOMPLETE_DRAFT_MESSAGE =
+  "请填写真实事实后保存；原文可以直接提交 AI 编排";
 
 export function useWeddingDraft(
   token: string | null,
@@ -176,7 +178,7 @@ export function useWeddingDraft(
     if (!isDirty.current) return remote.current;
     if (!valid(current.current)) {
       setStatus("事实未完整，仅本地恢复");
-      throw new Error("请填写真实事实后保存；原文可以直接提交 AI 编排");
+      throw new Error(INCOMPLETE_DRAFT_MESSAGE);
     }
     if (remote.current && remote.current.status !== "draft") {
       blocked.current = true;
@@ -228,6 +230,25 @@ export function useWeddingDraft(
       pending.current = null;
     }
   }, [key, owner, persist, projectId, token, onSaved]);
+  const prepareStorySubmission = async () => {
+    if (blocked.current) throw new Error("DRAFT_CONFLICT");
+    if (pending.current) await pending.current;
+    if (isDirty.current && valid(current.current)) {
+      try {
+        await flush();
+      } catch (error) {
+        // An edit may become incomplete while the valid save is in flight.
+        // Keep that raw text locally; all genuine save/CAS failures still block.
+        if (
+          !(error instanceof Error) ||
+          error.message !== INCOMPLETE_DRAFT_MESSAGE ||
+          valid(current.current)
+        )
+          throw error;
+      }
+    }
+    return current.current.story_text;
+  };
   useEffect(() => {
     if (
       !dirty ||
@@ -256,6 +277,7 @@ export function useWeddingDraft(
     dirty,
     receive,
     flush,
+    prepareStorySubmission,
     reload,
     getFingerprint: () => fingerprint.current,
     getRevision,

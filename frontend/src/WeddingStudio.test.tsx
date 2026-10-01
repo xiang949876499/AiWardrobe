@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -192,7 +193,7 @@ function storyboard(
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   api.getWeddingCapabilities.mockResolvedValue(capability);
   api.fetchWeddingProject.mockResolvedValue(project);
   api.listWeddingAssets.mockResolvedValue([asset]);
@@ -240,6 +241,196 @@ afterEach(() => {
 });
 
 describe("Wedding draft safety", () => {
+  test.each([false, true])(
+    "valid dirty story enqueue drains the preexisting timer but fences newer edits (%s)",
+    async (newer) => {
+      let persisted = {
+        ...storyboard(["A"]),
+        status: "draft",
+        owner_approved_at: null,
+        draft_fingerprint: "original",
+      };
+      api.fetchWeddingStoryboard.mockImplementation(async () => persisted);
+      let finishSave!: () => void;
+      api.saveWeddingStoryboard
+        .mockImplementationOnce(
+          (_token, _project, draft) =>
+            new Promise((resolve) => {
+              finishSave = () => {
+                persisted = {
+                  ...persisted,
+                  story_text: draft.story_text,
+                  draft_fingerprint: "requested",
+                };
+                resolve(persisted);
+              };
+            }),
+        )
+        .mockImplementation(async (_token, _project, draft) => {
+          persisted = {
+            ...persisted,
+            story_text: draft.story_text,
+            draft_fingerprint: "newer",
+          };
+          return persisted;
+        });
+      let captured = "";
+      api.createWeddingStoryJob.mockImplementation(async () => {
+        captured = persisted.draft_fingerprint;
+        return { id: "requested-job", status: "processing" };
+      });
+      render(
+        <WeddingStudio
+          ownerToken="owner-token"
+          initialProjectId={project.id}
+        />,
+      );
+      const editor = await screen.findByLabelText("你们的爱情故事");
+      await waitFor(() => expect(editor).toHaveValue(persisted.story_text));
+      vi.useFakeTimers();
+      fireEvent.change(editor, { target: { value: "request text" } });
+      fireEvent.click(screen.getByRole("button", { name: "AI 编排故事" }));
+      expect(api.saveWeddingStoryboard).toHaveBeenCalledTimes(1);
+      expect(api.createWeddingStoryJob).not.toHaveBeenCalled();
+      await act(async () => {
+        finishSave();
+      });
+      expect(api.createWeddingStoryJob).toHaveBeenCalledWith(
+        "owner-token",
+        project.id,
+        1,
+        "request text",
+      );
+      if (newer)
+        fireEvent.change(editor, { target: { value: "genuinely newer" } });
+      await act(() => vi.advanceTimersByTimeAsync(1500));
+      expect(api.saveWeddingStoryboard).toHaveBeenCalledTimes(newer ? 2 : 1);
+      const changed = captured !== persisted.draft_fingerprint;
+      expect(changed).toBe(newer);
+      api.fetchWeddingCreationJobs.mockResolvedValue([
+        {
+          id: "requested-job",
+          kind: "story",
+          status: changed ? "needs_action" : "completed",
+          error_code: changed ? "DRAFT_CHANGED" : null,
+          demo: true,
+          completed_operations: 1,
+          total_operations: 1,
+        },
+      ]);
+      if (!changed)
+        persisted = {
+          ...persisted,
+          story_text: "provider output",
+          draft_fingerprint: "provider",
+        };
+      fireEvent.click(screen.getByRole("button", { name: "刷新项目" }));
+      await act(async () => {});
+      expect(editor).toHaveValue(newer ? "genuinely newer" : "provider output");
+    },
+  );
+
+  test("approved A photo can explicitly become B without changing another AI selection", async () => {
+    const photoA = {
+      ...asset,
+      id: "original-a",
+      asset_type: "photo",
+      generated: false,
+      person_key: "A" as const,
+    };
+    const photoB = { ...photoA, id: "original-b", person_key: "B" as const };
+    let board = storyboard(["A"]);
+    board.shots = [
+      {
+        ...board.shots[0],
+        shot_type: "photo",
+        frame_asset_id: photoA.id,
+        selected_asset_id: photoA.id,
+      },
+      {
+        ...board.shots[0],
+        id: "unaffected",
+        shot_index: 2,
+        frame_asset_id: photoA.id,
+        selected_candidate_id: "kept-candidate",
+      },
+    ];
+    api.fetchWeddingStoryboard.mockImplementation(async () => board);
+    api.listWeddingAssets.mockResolvedValue([
+      photoA,
+      photoB,
+      { ...photoB, id: "generated-photo", generated: true },
+      { ...photoB, id: "expired-photo", expires_at: "2000-01-01T00:00:00Z" },
+    ]);
+    api.fetchWeddingCandidates.mockResolvedValue([]);
+    api.approveWeddingFrames.mockImplementation(async () => {
+      board = {
+        ...board,
+        shots: [
+          {
+            ...board.shots[0],
+            person_keys: ["B"],
+            frame_asset_id: photoB.id,
+            selected_asset_id: photoB.id,
+            identity_reviews: [],
+          },
+          board.shots[1],
+        ],
+      };
+      return board;
+    });
+    sessionStorage.setItem(
+      `wedding_participant:${project.id}`,
+      "participant-token",
+    );
+    render(
+      <WeddingStudio ownerToken="owner-token" initialProjectId={project.id} />,
+    );
+    const selectors = await screen.findAllByLabelText("关键帧照片");
+    expect(
+      within(selectors[0]).getByRole("option", { name: /B 方照片/ }),
+    ).toHaveValue(photoB.id);
+    expect(
+      within(selectors[1]).queryByRole("option", { name: /B 方照片/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(selectors[0], { target: { value: photoB.id } });
+    fireEvent.click(screen.getByRole("button", { name: "确认已选关键帧" }));
+    await waitFor(() =>
+      expect(api.approveWeddingFrames).toHaveBeenCalledWith(
+        "owner-token",
+        project.id,
+        1,
+        [
+          { shot_id: "shot-1", asset_id: photoB.id },
+          { shot_id: "unaffected", asset_id: photoA.id },
+        ],
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: "我确认此镜头" }),
+      ).toHaveLength(1),
+    );
+    expect(board.shots[1].selected_candidate_id).toBe("kept-candidate");
+    api.fetchWeddingStoryboard.mockImplementation(async () => ({
+      ...board,
+      shots: [board.shots[0]],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "切换 B 方本人" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "我确认此镜头" }),
+    );
+    await waitFor(() =>
+      expect(api.submitWeddingShotReview).toHaveBeenCalledWith(
+        "participant-token",
+        "shot-1",
+        photoB.id,
+        1,
+        "approved",
+      ),
+    );
+    expect(api.selectWeddingCandidate).not.toHaveBeenCalled();
+  });
   test.each([false, true])(
     "a poll that began before autosave cannot replace the saved text (missing=%s)",
     async (missing) => {

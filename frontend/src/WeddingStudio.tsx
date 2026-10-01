@@ -403,7 +403,7 @@ function WeddingWorkspace({
     return () => {
       active = false;
     };
-  }, [invite, ownerToken, participantToken, projectId,isParticipant]);
+  }, [invite, ownerToken, participantToken, projectId, isParticipant]);
 
   useEffect(() => {
     if (!invite && projectId && token) void refresh(projectId, token);
@@ -654,13 +654,12 @@ function WeddingWorkspace({
   const queueStory = () => {
     if (uncertain || creationActive) return;
     void act(
-      () =>
-        createWeddingStoryJob(
-          token,
-          projectId!,
-          project!.version,
-          draft.story_text,
-        ),
+      async () => {
+        const scopeEpoch = epoch.current;
+        const text = await editor.prepareStorySubmission();
+        if (!alive.current || epoch.current !== scopeEpoch) return;
+        return createWeddingStoryJob(token, projectId!, project!.version, text);
+      },
       () => void refresh(),
       "故事任务已排队；原文保留在本地，LIVE 可能收费",
     );
@@ -2005,7 +2004,11 @@ function ShotReview({
   const frameOptions = assets.filter(
     (a) =>
       a.asset_type === "photo" &&
-      (shot.person_keys.length === 0 ||
+      !a.generated &&
+      (a.person_key === "A" || a.person_key === "B") &&
+      (!a.expires_at || new Date(a.expires_at).getTime() > Date.now()) &&
+      (shot.shot_type === "photo" ||
+        shot.person_keys.length === 0 ||
         shot.person_keys.includes(a.person_key as "A" | "B")),
   );
   const photoOptions = assets.filter(

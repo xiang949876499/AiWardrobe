@@ -135,3 +135,134 @@ test("the first project response initializes a missing draft at its real content
   act(() => hook.result.current.receive(null));
   expect(hook.result.current.draft.version).toBe(3);
 });
+
+test("story preparation drains valid edits but a genuinely newer edit still autosaves", async () => {
+  vi.useFakeTimers();
+  save.mockImplementation(async (_token, _project, draft) => ({
+    ...story,
+    story_text: draft.story_text,
+    draft_fingerprint: draft.story_text,
+  }));
+  const { result } = renderHook(() =>
+    useWeddingDraft("owner", "project", true, storyToDraft(story)),
+  );
+  act(() => result.current.receive(story));
+  act(() =>
+    result.current.setDraft({
+      ...result.current.draft,
+      story_text: "requested",
+    }),
+  );
+  let requested!: string;
+  await act(async () => {
+    requested = await result.current.prepareStorySubmission();
+  });
+  expect(requested).toBe("requested");
+  expect(save).toHaveBeenCalledTimes(1);
+  await act(() => vi.advanceTimersByTimeAsync(1500));
+  expect(save).toHaveBeenCalledTimes(1);
+  act(() =>
+    result.current.setDraft({
+      ...result.current.draft,
+      story_text: "genuinely newer",
+    }),
+  );
+  await act(() => vi.advanceTimersByTimeAsync(1000));
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(save).toHaveBeenLastCalledWith(
+    "owner",
+    "project",
+    expect.objectContaining({ story_text: "genuinely newer" }),
+    true,
+    "requested",
+  );
+});
+
+test("story preparation preserves incomplete raw text without invented facts", async () => {
+  const { result } = renderHook(() =>
+    useWeddingDraft("owner", "project", true, storyToDraft(story)),
+  );
+  act(() => result.current.receive(story));
+  act(() =>
+    result.current.setDraft({
+      ...result.current.draft,
+      story_text: "raw incomplete",
+      facts: [{ source_field: "source", text: "" }],
+    }),
+  );
+  let requested!: string;
+  await act(async () => {
+    requested = await result.current.prepareStorySubmission();
+  });
+  expect(requested).toBe("raw incomplete");
+  expect(save).not.toHaveBeenCalled();
+  expect(result.current.dirty).toBe(true);
+  expect(result.current.draft.facts[0].text).toBe("");
+});
+
+test("story preparation keeps raw edits that become incomplete during its valid save", async () => {
+  let finish!: (value: WeddingStoryboard) => void;
+  save.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const { result } = renderHook(() =>
+    useWeddingDraft("owner", "project", true, storyToDraft(story)),
+  );
+  act(() => result.current.receive(story));
+  act(() =>
+    result.current.setDraft({
+      ...result.current.draft,
+      story_text: "valid request",
+    }),
+  );
+  let prepared!: Promise<string>;
+  act(() => {
+    prepared = result.current.prepareStorySubmission();
+  });
+  act(() =>
+    result.current.setDraft({
+      ...result.current.draft,
+      story_text: "incomplete raw",
+      facts: [{ source_field: "source", text: "" }],
+    }),
+  );
+  await act(async () => {
+    finish({
+      ...story,
+      story_text: "valid request",
+      draft_fingerprint: "saved",
+    });
+    expect(await prepared).toBe("incomplete raw");
+  });
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(result.current.dirty).toBe(true);
+  expect(result.current.draft.facts[0].text).toBe("");
+});
+
+test("story preparation propagates a CAS conflict while keeping local text", async () => {
+  save.mockRejectedValue(new Error("DRAFT_CONFLICT"));
+  const { result } = renderHook(() =>
+    useWeddingDraft("owner", "project", true, storyToDraft(story)),
+  );
+  act(() => result.current.receive(story));
+  act(() =>
+    result.current.setDraft({
+      ...result.current.draft,
+      story_text: "local request",
+    }),
+  );
+  await act(async () => {
+    await expect(result.current.prepareStorySubmission()).rejects.toThrow(
+      "DRAFT_CONFLICT",
+    );
+  });
+  expect(result.current.draft.story_text).toBe("local request");
+  expect(result.current.dirty).toBe(true);
+  await expect(result.current.prepareStorySubmission()).rejects.toThrow(
+    "DRAFT_CONFLICT",
+  );
+  expect(save).toHaveBeenCalledTimes(1);
+});

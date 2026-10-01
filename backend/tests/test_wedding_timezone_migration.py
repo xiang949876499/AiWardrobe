@@ -44,20 +44,27 @@ def isolated_pg():
         admin.dispose()
 
 
-@pytest.mark.parametrize('schema_kind', ['missing', 'naive', 'current', 'naive_override'])
+@pytest.mark.parametrize('schema_kind', ['missing', 'naive', 'current', 'naive_override',
+    'naive_fixed_session', 'naive_fixed_override', 'current_fixed_session', 'current_unused_override'])
 def test_additive_timestamps_preserve_absolute_time_and_accounting_twice(isolated_pg, schema_kind, monkeypatch):
     from app.models import User, WeddingProject, RenderVersion, WeddingAccountUsage
     from app.wedding_migrations import migrate_creation
     from app.wedding_service import _as_utc
+    from app.config import get_settings
+    get_settings.cache_clear()
     engine = isolated_pg
     instant = datetime(2026, 10, 1, 2, 30, tzinfo=timezone.utc)
-    if schema_kind != 'current':
+    if not schema_kind.startswith('current'):
         with engine.begin() as conn:
             for table, fields in FIELDS.items():
                 for field in fields:
                     conn.execute(text(f'ALTER TABLE {table} DROP COLUMN {field}'))
                     if schema_kind.startswith('naive'):
                         conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {field} TIMESTAMP'))
+    if 'fixed' in schema_kind:
+        with engine.begin() as conn:
+            conn.execute(text("SET TIME ZONE INTERVAL '+08:00' HOUR TO MINUTE"))
+            assert conn.scalar(text("SELECT current_setting('TimeZone')")) == '<+08>-08'
     # Migrate empty legacy shape first; then exercise writes in the non-UTC session.
     if schema_kind == 'missing':
         migrate_creation(engine)
@@ -69,12 +76,14 @@ def test_additive_timestamps_preserve_absolute_time_and_accounting_twice(isolate
         db.add(render);db.flush()
         db.add(WeddingAccountUsage(owner_id=user.id,spent_fen=99,reserved_fen=88))
         db.commit(); project_id=project.id;render_id=render.id;owner_id=user.id
-    if schema_kind == 'naive_override':
-        monkeypatch.setenv('WEDDING_LEGACY_TIMESTAMP_TIMEZONE', 'Asia/Shanghai')
-        from app.config import get_settings
+    if schema_kind in ('naive_override', 'naive_fixed_override'):
+        monkeypatch.setenv('WEDDING_LEGACY_TIMESTAMP_TIMEZONE', '<+08>-08' if 'fixed' in schema_kind else 'Asia/Shanghai')
         get_settings.cache_clear()
         with engine.begin() as conn:
             conn.execute(text("SET TIME ZONE 'UTC'"))
+    if schema_kind == 'current_unused_override':
+        monkeypatch.setenv('WEDDING_LEGACY_TIMESTAMP_TIMEZONE', 'invalid_unused_provenance')
+        get_settings.cache_clear()
     migrate_creation(engine);migrate_creation(engine)
     with Session(engine) as db:
         project=db.get(WeddingProject,project_id);render=db.get(RenderVersion,render_id)
@@ -85,3 +94,16 @@ def test_additive_timestamps_preserve_absolute_time_and_accounting_twice(isolate
         for table, fields in FIELDS.items():
             columns={column['name']:column for column in inspect(db.get_bind()).get_columns(table)}
             assert all(columns[field]['type'].timezone for field in fields)
+
+
+def test_invalid_legacy_zone_fails_only_when_conversion_is_required(isolated_pg, monkeypatch):
+    from app.config import get_settings
+    from app.wedding_migrations import migrate_creation
+    monkeypatch.setenv('WEDDING_LEGACY_TIMESTAMP_TIMEZONE', 'invalid_required_provenance')
+    get_settings.cache_clear()
+    with isolated_pg.begin() as conn:
+        conn.execute(text("ALTER TABLE wedding_projects ALTER COLUMN delivered_at TYPE TIMESTAMP USING delivered_at AT TIME ZONE 'Asia/Shanghai'"))
+    with pytest.raises(ValueError, match='WEDDING_LEGACY_TIMESTAMP_TIMEZONE_INVALID'):
+        migrate_creation(isolated_pg)
+    columns = {c['name']: c for c in inspect(isolated_pg).get_columns('wedding_projects')}
+    assert columns['delivered_at']['type'].timezone is False

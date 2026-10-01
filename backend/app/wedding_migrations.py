@@ -1,20 +1,12 @@
 """Additive SQLite/PostgreSQL creation migration and once-only account backfill."""
 from sqlalchemy import inspect, text, literal
+from sqlalchemy.exc import DataError
 
 
 def migrate_creation(engine):
     with engine.begin() as conn:
         postgres = conn.dialect.name == 'postgresql'
-        if postgres:
-            from app.config import get_settings
-            # Naive legacy values contain wall time from the writing DB session. Use
-            # its zone explicitly, or an operator-supplied original zone if changed.
-            legacy_zone = get_settings().wedding_legacy_timestamp_timezone or conn.scalar(text("SELECT current_setting('TimeZone')"))
-            if not conn.scalar(text('SELECT 1 FROM pg_timezone_names WHERE name=:zone'), {'zone':legacy_zone}):
-                raise ValueError('WEDDING_LEGACY_TIMESTAMP_TIMEZONE_INVALID')
-            # PostgreSQL utility DDL cannot infer a bind parameter in USING. Compile
-            # the validated zone as a SQLAlchemy-escaped literal, never raw input.
-            zone_literal = str(literal(legacy_zone).compile(dialect=conn.dialect, compile_kwargs={'literal_binds':True}))
+        zone_literal = None
         columns = {c['name'] for c in inspect(conn).get_columns('wedding_participants')}
         if 'primary_photo_asset_id' not in columns:
             conn.execute(text('ALTER TABLE wedding_participants ADD COLUMN primary_photo_asset_id VARCHAR(36) REFERENCES wedding_assets(id) ON DELETE SET NULL'))
@@ -32,6 +24,20 @@ def migrate_creation(engine):
                         sql_type = 'TIMESTAMP WITH TIME ZONE'
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {field} {sql_type}'))
                 elif postgres and sql_type == 'TIMESTAMP' and not existing[field]['type'].timezone:
+                    if zone_literal is None:
+                        from app.config import get_settings
+                        # Resolve historical wall-time provenance only for naive
+                        # conversion. PostgreSQL also accepts fixed-offset/POSIX
+                        # zones absent from pg_timezone_names; validate by binding.
+                        legacy_zone = get_settings().wedding_legacy_timestamp_timezone or conn.scalar(text("SELECT current_setting('TimeZone')"))
+                        try:
+                            conn.scalar(text("SELECT TIMESTAMP '2000-01-01 00:00:00' AT TIME ZONE :zone"), {'zone': legacy_zone})
+                        except DataError as error:
+                            if getattr(error.orig, 'sqlstate', None) != '22023':
+                                raise
+                            raise ValueError('WEDDING_LEGACY_TIMESTAMP_TIMEZONE_INVALID') from error
+                        # Utility DDL needs an escaped literal, never raw input.
+                        zone_literal = str(literal(legacy_zone).compile(dialect=conn.dialect, compile_kwargs={'literal_binds':True}))
                     conn.execute(text(f'ALTER TABLE {table} ALTER COLUMN {field} TYPE TIMESTAMP WITH TIME ZONE '
                         f'USING {field} AT TIME ZONE {zone_literal}'))
         conn.execute(text('UPDATE wedding_projects SET last_activity_at = updated_at WHERE last_activity_at IS NULL'))
