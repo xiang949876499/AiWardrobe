@@ -3,7 +3,7 @@
 > 目标：在独立分支 codex/ai-wedding-mv 中，将已评审的婚礼 MV spec 实现为可运行的端到端 MVP。实现必须保持现有 AiWardrobe 的登录、衣橱和推荐功能不回归。
 >
 > 规格来源：docs/superpowers/specs/2026-10-01-ai-wedding-mv-design.md
-> 当前状态：已在独立分支实现并通过后端/前端检查；真实模型调用、付款及线上发布仍未启用。
+> 当前状态：演示业务工作流已实现并通过自动测试；原始产品 Spec 的 P0 尚未全部完成。真实模型、自动脚本/静帧、音乐库和版本回退等缺口见[完成情况核查](../../wedding-mv-completion-audit-2026-10-01.md)。
 
 ## 范围及约束
 
@@ -59,8 +59,8 @@
 
 ## 实施结果（2026-10-01）
 
-- Task 1–3 已在 `codex/ai-wedding-mv` 实现：项目/授权 API、媒体任务 worker、预算及过期恢复、独立私密婚礼工作区、邀请者会话隔离、逐镜审核、单镜头重做和导出门禁。
-- Task 4 已补齐：独立 S3 私有 bucket、Compose worker/FFmpeg、Windows 本地 worker 启动、环境变量和运行/API 文档。
-- 最终本地检查：后端 `python -m pytest -q` 122 passed；前端 `npm test` 36 passed；`npm run build` 通过；Compose YAML 解析和 `git diff --check` 通过。
+- Task 1–3 的演示基础已实现：项目/授权 API、媒体任务 worker、预算及生成任务过期恢复、独立私密婚礼工作区、邀请者会话隔离、逐镜审核、单镜头重做和导出门禁。模型协议不代表真实供应商接入；渲染崩溃恢复仍未实现。
+- Task 4 已交付配置和测试基础：独立 S3 私有 bucket、Compose worker/FFmpeg、Windows 本地 worker 启动、环境变量和运行/API 文档；完整环境端到端验收仍待执行。
+- 前次本地检查：后端 `python -m pytest -q` 122 passed；前端 `npm test` 36 passed；`npm run build` 通过；Compose YAML 解析和 `git diff --check` 通过。本轮复查结果见完成情况核查。
 - 任一方撤回授权会取消排队、处理中、待审及已批准渲染，清除可下载版本引用；媒体读取和导出都会重新核验双方授权。worker 在轮询前初始化数据库，并在持久化成片前检查取消状态。
 - 环境限制：Docker CLI 未安装，未能实际构建/启动 Compose 镜像；当前无 PostgreSQL，因此未验证真实 PostgreSQL 行锁行为。真实模型适配器和授权音乐未启用，也未进行外部或付费调用。

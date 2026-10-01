@@ -21,3 +21,4 @@
 - [AI 婚礼 MV 产品 Spec](superpowers/specs/2026-10-01-ai-wedding-mv-design.md)：新人上传照片和爱情故事，生成90秒婚礼MV；包含模型选型、制作流程、预算、架构及验收。
 - [AI 婚礼 MV 实施计划](superpowers/plans/2026-10-01-ai-wedding-mv-implementation.md)：实现范围、阶段、验证和安全约束。
 - [AI 婚礼 MV 运行与接口说明](wedding-mv.md)：当前能力边界、启动方式、配置、用户流程、路由和验证命令；真实模型适配器仍未启用。
+- [AI 婚礼 MV 完成情况核查](wedding-mv-completion-audit-2026-10-01.md)：原始 P0 逐项状态、未完成能力、安全修复与验证边界。
