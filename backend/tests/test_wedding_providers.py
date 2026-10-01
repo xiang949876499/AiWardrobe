@@ -350,3 +350,158 @@ def test_frame_preserves_transport_request_id_when_body_has_none():
     response = httpx.Response(200, headers={"X-Request-Id": "ark-request-123"}, json={"data": [{"b64_json": base64.b64encode(PNG).decode()}]})
     output = SeedreamFrameProvider(settings(), transport=httpx.MockTransport(lambda _: response)).generate(FrameGenerationRequest("s", "frame", (), "key"))
     assert output.request_id == "ark-request-123"
+
+# Review regressions: every response below is synthetic and every HTTP call mocked.
+@pytest.mark.parametrize("bad", ["invalid", "1e999999999", "NaN", "Infinity", -1, True, 0.5, "1", 0])
+@pytest.mark.parametrize("kind", ["story", "frame", "video"])
+def test_malformed_numeric_usage_preserves_paid_error_contract(kind, bad):
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=(
+        {"id": "response-id", "choices": [{"message": {"content": json.dumps(story_output())}}], "usage": {"prompt_tokens": bad, "completion_tokens": 10}}
+        if kind == "story" else {"id": "response-id", "data": [{"b64_json": base64.b64encode(PNG).decode()}], "usage": {"generated_images": bad}}
+        if kind == "frame" else {"request_id": "response-id", "output": {"task_status": "SUCCEEDED", "video_url": "https://video.oss-cn-beijing.aliyuncs.com/result.mp4"}, "usage": {"duration": bad}}
+    )))
+    with pytest.raises(ProviderUnavailable) as err:
+        if kind == "story":
+            ArkStoryProvider(settings(), transport=transport).structure(StoryStructureRequest("confirmed", ("fact",), "k"))
+        elif kind == "frame":
+            SeedreamFrameProvider(settings(), transport=transport).generate(FrameGenerationRequest("s", "frame", (), "k"))
+        else:
+            WanVideoProvider(settings(), "wan_r2v", transport=transport).generate(video(existing_task_id="paid-task"))
+    assert err.value.code == "PROVIDER_OUTPUT_INVALID" and err.value.submission_state == "succeeded"
+    assert err.value.actual_cost_fen == {"story": 100, "frame": 25, "video": 500}[kind]
+    assert err.value.request_id == "response-id" and err.value.price_version
+    assert err.value.task_id == ("paid-task" if kind == "video" else None)
+
+
+@pytest.mark.parametrize("usage", [None, [], {"duration": "invalid"}, {"duration": "1e999999999"}, {"duration": 0.5}])
+@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
+def test_terminal_task_state_is_retained_when_usage_envelope_is_bad(status, usage):
+    def handler(_):
+        return httpx.Response(200, json={"request_id": "r", "output": {"task_status": status, "video_url": "https://video.oss-cn-beijing.aliyuncs.com/a"}, "usage": usage})
+    with pytest.raises(ProviderUnavailable) as err:
+        adapter(handler).generate(video(existing_task_id="paid-task"))
+    assert err.value.code == "PROVIDER_OUTPUT_INVALID"
+    assert err.value.submission_state == ("succeeded" if status == "SUCCEEDED" else "failed")
+    assert err.value.task_id == "paid-task" and err.value.actual_cost_fen == 500
+
+
+def corrupted_crc_png():
+    data = bytearray(PNG)
+    pos = data.index(b"IDAT")
+    size = int.from_bytes(data[pos - 4:pos], "big")
+    data[pos + 4 + size] ^= 1
+    return bytes(data)
+
+
+def test_crc_corrupt_png_input_is_zero_cost_not_submitted():
+    with pytest.raises(ProviderUnavailable) as err:
+        adapter(lambda _: pytest.fail("unexpected POST")).generate(video(reference_image=corrupted_crc_png()))
+    assert err.value.code == "PROVIDER_INPUT_INVALID" and err.value.actual_cost_fen == 0
+    assert err.value.submission_state == "not_submitted"
+
+
+def test_crc_corrupt_png_paid_output_retains_cost():
+    response = httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(corrupted_crc_png()).decode()}], "usage": {"generated_images": 1}})
+    with pytest.raises(ProviderUnavailable) as err:
+        SeedreamFrameProvider(settings(), transport=httpx.MockTransport(lambda _: response)).generate(FrameGenerationRequest("s", "frame", (), "k"))
+    assert err.value.code == "PROVIDER_OUTPUT_INVALID" and err.value.actual_cost_fen == 25
+    assert err.value.submission_state == "succeeded"
+
+
+@pytest.mark.parametrize("level", ["INFO", "DEBUG"])
+def test_dependency_logs_and_exception_format_do_not_reveal_private_data(caplog, level):
+    import logging
+    import traceback
+    secret_path, secret_query, secret_key = "private-wedding-unique-path", "private-signed-query", "private-api-unique-key"
+    signed = f"https://video.oss-cn-beijing.aliyuncs.com/{secret_path}?signature={secret_query}"
+    def handler(req):
+        if req.url.host == "dashscope.aliyuncs.com":
+            return httpx.Response(200, json={"output": {"task_status": "SUCCEEDED", "video_url": signed}, "usage": {"duration": 5}})
+        logging.getLogger("httpcore.connection").debug("transport args=%r key=%s", req.url, secret_key)
+        return httpx.Response(403, json={"message": signed})
+    with caplog.at_level(getattr(logging, level)):
+        with pytest.raises(ProviderUnavailable) as err:
+            adapter(handler, config=settings(wedding_character_video_api_key=secret_key)).generate(video(existing_task_id="t"))
+        logging.getLogger("app.unrelated").info("unrelated diagnostic preserved")
+    rendered = caplog.text + "".join(traceback.format_exception(err.value))
+    assert all(secret not in rendered for secret in (secret_path, secret_query, secret_key))
+    assert "unrelated diagnostic preserved" in rendered
+    assert err.value.submission_state == "succeeded" and err.value.actual_cost_fen == 500
+
+
+def test_privacy_scope_does_not_suppress_concurrent_unrelated_httpx_records(caplog):
+    import concurrent.futures
+    import logging
+    import threading
+    gate = threading.Barrier(2)
+    secret = "private-concurrent-query"
+    def handler(req):
+        gate.wait(timeout=2)
+        logging.getLogger("httpcore.connection").debug("private=%s", secret)
+        return httpx.Response(200, json={"output": {"task_status": "FAILED"}})
+    def unrelated():
+        gate.wait(timeout=2)
+        logging.getLogger("httpx").info("unrelated-httpx-diagnostic")
+    with caplog.at_level(logging.DEBUG), concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(unrelated)
+        with pytest.raises(ProviderUnavailable):
+            adapter(handler).generate(video(existing_task_id="t"))
+        future.result()
+    assert secret not in caplog.text and "unrelated-httpx-diagnostic" in caplog.text
+
+
+def test_small_raw_chunks_enforce_actual_deadline_and_stop_io_callbacks():
+    import time
+    pulses, requests, chunks = [], [], []
+    class Slow(httpx.SyncByteStream, httpx.AsyncByteStream):
+        def __iter__(self):
+            for _ in range(50):
+                time.sleep(0.02)
+                chunks.append(1)
+                yield b"x"
+        async def __aiter__(self):
+            import asyncio
+            for _ in range(50):
+                await asyncio.sleep(0.02)
+                chunks.append(1)
+                yield b"x"
+    def handler(req):
+        requests.append(req)
+        if req.url.host == "dashscope.aliyuncs.com":
+            return httpx.Response(200, json={"output": {"task_status": "SUCCEEDED", "video_url": "https://video.oss-cn-beijing.aliyuncs.com/a"}, "usage": {"duration": 5}})
+        return httpx.Response(200, stream=Slow(), headers={"content-type": "video/mp4"})
+    started = time.monotonic()
+    with pytest.raises(ProviderUnavailable) as err:
+        adapter(handler, config=settings(wedding_total_timeout_seconds=0.12, wedding_io_heartbeat_seconds=0.02)).generate(video(existing_task_id="t", heartbeat=lambda: pulses.append(1)))
+    assert time.monotonic() - started < 0.3
+    assert err.value.code == "PROVIDER_TIMEOUT" and err.value.submission_state == "succeeded"
+    assert err.value.actual_cost_fen == 500 and len(pulses) >= 3
+    counts = (len(pulses), len(requests), len(chunks))
+    time.sleep(0.15)
+    assert counts == (len(pulses), len(requests), len(chunks))
+
+
+def test_delayed_resolver_expires_without_late_http_or_callbacks():
+    import time
+    calls, pulses = [], []
+    def resolver(_):
+        time.sleep(0.4)
+        return ["8.8.8.8"]
+    provider = WanVideoProvider(settings(wedding_total_timeout_seconds=0.08, wedding_io_heartbeat_seconds=0.02), "wan_r2v", transport=httpx.MockTransport(lambda req: calls.append(req) or httpx.Response(200, json={})), resolver=resolver)
+    started = time.monotonic()
+    with pytest.raises(ProviderUnavailable) as err:
+        provider.generate(video(heartbeat=lambda: pulses.append(1)))
+    assert time.monotonic() - started < 0.25 and err.value.code == "PROVIDER_TIMEOUT"
+    assert err.value.submission_state == "not_submitted" and err.value.actual_cost_fen == 0
+    count = len(pulses)
+    time.sleep(0.5)
+    assert not calls and len(pulses) == count
+
+
+def test_pre_submit_heartbeat_failure_is_not_submitted_and_zero_cost():
+    def fail():
+        raise RuntimeError("private consent exception")
+    with pytest.raises(ProviderUnavailable) as err:
+        adapter(lambda _: pytest.fail("unexpected HTTP")).generate(video(heartbeat=fail))
+    assert err.value.submission_state == "not_submitted" and err.value.actual_cost_fen == 0
+    assert err.value.task_id is None
