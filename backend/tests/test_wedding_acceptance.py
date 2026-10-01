@@ -280,11 +280,11 @@ def test_transport_gates_then_uses_only_named_token(monkeypatch):
         api.request("GET", "/data")
     monkeypatch.setenv("WEDDING_TOKEN", "private-secret-value")
     api.opener = Opener(Response())
-    assert api.request("GET", "/data") == {"safe": True}
+    assert api._request_local("GET", "/data") == {"safe": True}
     assert api.opener.requests[0].get_header("Authorization") == "Bearer private-secret-value"
     api = runner.Transport("http://127.0.0.1:8031", "WEDDING_TOKEN", True)
     api.opener = Opener(Response(url="http://127.0.0.1:8031/data"))
-    api.request("POST", "/data", {"version": 1}, "idempotency-key")
+    api._request_local("POST", "/data", {"version": 1}, "idempotency-key")
     assert api.opener.requests[0].get_header("Idempotency-key") == "idempotency-key"
 
 
@@ -301,7 +301,7 @@ def test_transport_response_bounds_and_private_error_suppression(monkeypatch, re
     api = runner.Transport("https://example.com", "TOKEN")
     api.opener = Opener(response())
     with pytest.raises(runner.Rejected, match=code) as error:
-        api.request("GET", "/data")
+        api._request_local("GET", "/data")
     assert "private" not in str(error.value)
 
 
@@ -321,13 +321,13 @@ def test_transport_timeout_and_http_error_are_bounded(monkeypatch):
     ticks = iter([0, 16])
     monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
     with pytest.raises(runner.Rejected, match="RESPONSE_TIMEOUT"):
-        api.request("GET", "/data")
+        api._request_local("GET", "/data")
     monkeypatch.setattr(runner.time, "monotonic", lambda: 0)
     def fail(*args, **kwargs):
         raise runner.HTTPError("https://example.com/private", 403, "private token", {}, None)
     monkeypatch.setattr(api.opener, "open", fail)
     with pytest.raises(runner.Rejected, match="HTTP_REJECTED"):
-        api.request("GET", "/data")
+        api._request_local("GET", "/data")
 
 
 def test_cli_offline_is_network_free_and_example_cannot_certify(tmp_path, monkeypatch, capsys):
@@ -543,6 +543,9 @@ def test_total_deadline_kills_every_http_phase_and_blocked_ipc(tmp_path, monkeyp
     monkeypatch.setenv("TOKEN", "synthetic-only")
     children = []; original_popen = subprocess.Popen
     def capture(*args, **kwargs):
+        if os.name == "nt":
+            assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+        assert "synthetic-only" not in repr(args) and kwargs["stderr"] == subprocess.DEVNULL
         child = original_popen(*args, **kwargs); children.append(child); return child
     monkeypatch.setattr(subprocess, "Popen", capture)
     api = runner.Transport("https://127.0.0.1:9" if phase == "tls" else "http://127.0.0.1:9", "TOKEN", True)
@@ -579,3 +582,120 @@ def test_cli_malformed_http_status_never_prints_private_marker_or_traceback(tmp_
     assert json.loads(result.stdout) == {"status": "STOPPED", "reason": "TRANSPORT_FAILED"}
     assert "PRIVATE_MARKER" not in result.stdout + result.stderr
     assert "Traceback" not in result.stdout + result.stderr and result.stderr == ""
+
+
+@pytest.mark.parametrize("error", [runner.HTTPException("PRIVATE_PROTOCOL_MARKER"), __import__("http.client").client.BadStatusLine("PRIVATE_PROTOCOL_MARKER")])
+def test_all_http_protocol_exceptions_are_sanitized_at_boundary(monkeypatch, error):
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    api = runner.Transport("http://127.0.0.1", "TOKEN")
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(api.opener, "open", fail)
+    with pytest.raises(runner.Rejected, match="^TRANSPORT_FAILED$") as rejected:
+        api._request_local("GET", "/data")
+    assert rejected.value.__suppress_context__ is True
+
+
+def test_timed_out_post_preserves_unknown_before_worker_can_submit_late(tmp_path, monkeypatch):
+    command, entered, late = deadline_worker(tmp_path, "dns")
+    monkeypatch.setattr(runner, "_http_worker_command", lambda: command)
+    monkeypatch.setattr(runner, "TIMEOUT", 1.0)
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    sample = manifest()["samples"][0]; checkpoint = tmp_path / "cp.json"
+    class API:
+        base_url = "http://127.0.0.1:9"
+        def __init__(self): self.posts = 0
+        def request(self, method, path, body=None, key=None):
+            if method == "GET":
+                return dict(id="quote1", project_version=1)
+            self.posts += 1
+            saved = json.loads(checkpoint.read_text())
+            assert saved["state"] == "submitting" and saved["key"] == key and saved["quote_id"] == "quote1"
+            return runner.Transport(self.base_url, "TOKEN", True).request(method, path, body, key)
+    api = API()
+    with pytest.raises(runner.Rejected, match="AMBIGUOUS_SUBMISSION_STOP"):
+        runner.dispatch(api, sample, snapshot(), checkpoint, "generate", "a_closeup", True)
+    assert json.loads(checkpoint.read_text())["state"] == "unknown" and entered.exists() and not late.exists()
+    with pytest.raises(runner.Rejected, match="EXISTING_CHECKPOINT_RESUME_ONLY"):
+        runner.dispatch(api, sample, snapshot(), checkpoint, "generate", "a_closeup", True)
+    with pytest.raises(runner.Rejected, match="AMBIGUOUS_SUBMISSION_STOP"):
+        runner.resume(api, sample, checkpoint)
+    assert api.posts == 1
+
+
+def test_control_input_is_bounded_before_worker_start(monkeypatch):
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("oversized control must not start a worker")
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    with pytest.raises(runner.Rejected, match="REQUEST_TOO_LARGE"):
+        runner.Transport("http://127.0.0.1", "TOKEN", True).request("POST", "/data", {"padding": "x" * runner.MAX_BYTES})
+
+
+@pytest.mark.parametrize("source,reason", [
+    ("import sys; sys.stdout.buffer.write(b'x' * (5 * 1024 * 1024))", "RESPONSE_TOO_LARGE"),
+    ("print('not json PRIVATE_MARKER')", "TRANSPORT_FAILED"),
+    ("print('{\"ok\":false,\"reason\":\"PRIVATE_MARKER\"}')", "TRANSPORT_FAILED"),
+])
+def test_worker_output_is_bounded_and_untrusted_errors_stay_private(tmp_path, monkeypatch, source, reason):
+    path = tmp_path / "worker.py"; path.write_text("import sys; sys.stdin.buffer.read()\n" + source)
+    monkeypatch.setattr(runner, "_http_worker_command", lambda: [sys.executable, "-I", "-B", str(path)])
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    with pytest.raises(runner.Rejected, match=reason):
+        runner.Transport("http://127.0.0.1", "TOKEN").request("GET", "/data")
+
+
+def test_worker_protocol_is_bounded_and_sanitized_in_process(monkeypatch):
+    from types import SimpleNamespace
+    payload = dict(base_url="http://127.0.0.1", token_env="TOKEN", token="synthetic-only",
+                   execute_paid=False, method="GET", path="/data", body=None, key=None)
+    output = BytesIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(json.dumps(payload).encode())))
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(buffer=output))
+    monkeypatch.setattr(runner.Transport, "_request_local", lambda *args: {"safe": True})
+    runner.http_worker_main()
+    assert json.loads(output.getvalue()) == {"ok": True, "result": {"safe": True}}
+    output.seek(0); output.truncate()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(b"x" * (runner.MAX_BYTES + 1))))
+    runner.http_worker_main()
+    assert json.loads(output.getvalue()) == {"ok": False, "reason": "REQUEST_TOO_LARGE"}
+    output.seek(0); output.truncate()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(b"PRIVATE_MARKER")))
+    runner.http_worker_main()
+    assert json.loads(output.getvalue()) == {"ok": False, "reason": "TRANSPORT_FAILED"}
+
+
+def test_production_worker_returns_successful_bounded_response(monkeypatch):
+    server = socket.socket(); server.bind(("127.0.0.1", 0)); server.listen(1); server.settimeout(8)
+    port = server.getsockname()[1]; received = []
+    def reply():
+        try:
+            connection, _ = server.accept()
+            with connection:
+                received.append(connection.recv(8192))
+                connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{"safe":true}')
+        finally:
+            server.close()
+    thread = threading.Thread(target=reply, daemon=True); thread.start()
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    assert runner.Transport(f"http://127.0.0.1:{port}", "TOKEN").request("GET", "/data") == {"safe": True}
+    thread.join(2)
+    assert b"Authorization: Bearer synthetic-only" in received[0]
+
+
+def test_expired_process_start_never_delivers_request_control(tmp_path, monkeypatch):
+    marker = tmp_path / "control-delivered"
+    driver = tmp_path / "worker.py"
+    driver.write_text("import sys, pathlib\npayload = sys.stdin.buffer.read()\nif payload: pathlib.Path(" + repr(str(marker)) + ").write_text('sent')\n")
+    monkeypatch.setattr(runner, "_http_worker_command", lambda: [sys.executable, "-I", "-B", str(driver)])
+    monkeypatch.setattr(runner, "TIMEOUT", .2)
+    monkeypatch.setenv("TOKEN", "synthetic-only")
+    original_popen = subprocess.Popen; children = []
+    def slow_start(*args, **kwargs):
+        child = original_popen(*args, **kwargs); children.append(child)
+        time.sleep(.4)
+        return child
+    monkeypatch.setattr(subprocess, "Popen", slow_start)
+    with pytest.raises(runner.Rejected, match="RESPONSE_TIMEOUT"):
+        runner.Transport("http://127.0.0.1", "TOKEN", True).request("POST", "/data", {})
+    assert children[0].poll() is not None and not marker.exists()
