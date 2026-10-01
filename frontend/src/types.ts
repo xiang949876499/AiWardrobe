@@ -223,3 +223,155 @@ export type AuthResponse = {
   token_type: string;
   user: User;
 };
+
+export type WeddingStyle = "warm_documentary" | "romantic_film" | "fresh_illustration";
+export type WeddingPersonKey = "A" | "B";
+
+export type WeddingProject = {
+  id: string;
+  title: string;
+  status: string;
+  version: number;
+  style: WeddingStyle;
+  target_duration_ms: number;
+  aspect_ratio: string;
+  budget_limit_fen: number;
+  budget_reserved_fen: number;
+  budget_spent_fen: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WeddingParticipant = {
+  person_key: WeddingPersonKey;
+  display_name: string;
+  consent_status: "pending" | "active" | "revoked" | "declined";
+  confirmed_at: string | null;
+};
+
+export type WeddingProjectDetail = WeddingProject & {
+  participants: WeddingParticipant[];
+  story_text: string | null;
+};
+
+export type WeddingAsset = {
+  id: string;
+  asset_type: string;
+  person_key: WeddingPersonKey | null;
+  mime: string;
+  size_bytes: number;
+  width: number | null;
+  height: number | null;
+  generated: boolean;
+  created_at: string;
+};
+
+export type WeddingIdentityReview = {
+  person_key: WeddingPersonKey;
+  asset_id: string;
+  result: "approved" | "rejected";
+  confirmed_at: string;
+};
+
+export type WeddingFact = {
+  id: string;
+  source_field: string;
+  text: string;
+  confirmed_at: string | null;
+};
+
+export type WeddingShot = {
+  id: string;
+  project_version: number;
+  shot_index: number;
+  shot_type: "person_ai" | "scene_ai" | "photo";
+  duration_ms: number;
+  person_keys: WeddingPersonKey[];
+  fact_ids: string[];
+  description: string;
+  subtitle: string;
+  creative_scene: boolean;
+  frame_asset_id: string | null;
+  selected_asset_id: string | null;
+  selected_candidate_id: string | null;
+  status: string;
+  identity_reviews: WeddingIdentityReview[];
+};
+
+export type WeddingStoryboard = {
+  id: string;
+  version: number;
+  story_text: string;
+  style: WeddingStyle;
+  status: string;
+  owner_approved_at: string | null;
+  facts: WeddingFact[];
+  shots: WeddingShot[];
+};
+
+export type WeddingJob = {
+  id: string;
+  project_id: string;
+  project_version: number;
+  status: "queued" | "processing" | "needs_action" | "completed" | "failed" | "cancel_requested" | "cancelled";
+  progress_stage: string;
+  completed_shots: number;
+  total_shots: number;
+  reserved_amount_fen: number;
+  actual_cost_fen: number;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WeddingCandidate = {
+  id: string;
+  shot_id: string;
+  generation_job_id: string;
+  asset_id: string;
+  asset: WeddingAsset;
+  provider: string;
+  model_version: string;
+  quality_flags: string[];
+  review_result: "pending" | "approved" | "rejected";
+  actual_cost_fen: number;
+  created_at: string;
+};
+
+export type WeddingRender = {
+  id: string;
+  project_version: number;
+  version: number;
+  status: "queued" | "processing" | "ready" | "approved" | "failed" | "cancelled";
+  preview_asset_id: string | null;
+  export_asset_id: string | null;
+  output_duration_ms: number | null;
+  owner_approved_at: string | null;
+  created_at: string;
+  identity_reviews: WeddingIdentityReview[];
+};
+
+export type WeddingCapabilities = {
+  mode: "disabled" | "demo";
+  demo_only: boolean;
+  providers: Record<string, { provider: string; configured: boolean; available: boolean; reason: string }>;
+  ffmpeg_available: boolean;
+  licensed_music_available: boolean;
+  real_export_available: boolean;
+};
+
+export type WeddingStoryDraft = {
+  version: number;
+  story_text: string;
+  facts: Array<{ source_field: string; text: string }>;
+  shots: Array<{
+    shot_index: number;
+    shot_type: WeddingShot["shot_type"];
+    duration_ms: number;
+    person_keys: WeddingPersonKey[];
+    fact_indexes: number[];
+    description: string;
+    subtitle: string;
+    creative_scene: boolean;
+  }>;
+};

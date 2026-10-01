@@ -75,6 +75,7 @@ def _confirm_partner(client: TestClient, owner_token: str, project_id: str) -> s
         json={"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"},
     )
     assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["project_id"] == project_id
     return confirmed.json()["access_token"]
 
 
@@ -208,6 +209,336 @@ def test_invite_is_hashed_single_use_and_participant_asset_access_is_scoped(clie
         assert participant.consent_status == "revoked"
         assert db.query(WeddingConsent).filter_by(participant_id=participant.id, revoked_at=None).count() == 0
     assert client.get(f"/wedding-assets/{partner_asset['id']}", headers=_headers(participant_token)).status_code == 401
+
+
+def test_wedding_read_models_restore_owner_and_participant_scopes(client: TestClient) -> None:
+    from datetime import timedelta
+
+    from app.models import (
+        GenerationJob,
+        RenderVersion,
+        ShotCandidate,
+        ParticipantReview,
+        StoryboardShot,
+        StoryFact,
+        StoryVersion,
+        WeddingAssetType,
+        WeddingQuote,
+        utc_now,
+    )
+
+    owner_token = login(client, "restore-owner@example.com")
+    outsider_token = login(client, "restore-outsider@example.com")
+    project_id = _create_project(client, owner_token)["id"]
+    client.post(
+        f"/wedding-projects/{project_id}/self-consent",
+        headers=_headers(owner_token),
+        json={"terms_version": "portrait-v1", "scope": ["portrait_processing"], "provider_list": ["local_demo"]},
+    )
+    participant_token = _confirm_partner(client, owner_token, project_id)
+    owner_photo = _image_upload(client, owner_token, project_id, "A")
+    partner_photo = _image_upload(client, participant_token, project_id, "B")
+
+    submitted = client.post(
+        f"/wedding-projects/{project_id}/storyboard",
+        headers=_headers(owner_token),
+        json={
+            "version": 1,
+            "story_text": "我们在春天相遇，一起走向新的生活。",
+            "facts": [
+                {"source_field": "相识", "text": "A 的相识事实"},
+                {"source_field": "共同生活", "text": "B 的共同生活事实"},
+            ],
+            "shots": [
+                {"shot_index": 1, "shot_type": "person_ai", "duration_ms": 5000, "person_keys": ["A"], "fact_indexes": [0], "description": "A 的镜头", "subtitle": "A 字幕"},
+                {"shot_index": 2, "shot_type": "person_ai", "duration_ms": 5000, "person_keys": ["B"], "fact_indexes": [1], "description": "B 的镜头", "subtitle": "B 字幕"},
+            ],
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    approved = client.post(
+        f"/wedding-projects/{project_id}/storyboard/approve",
+        headers=_headers(owner_token),
+        json={"version": 1},
+    )
+    assert approved.status_code == 200, approved.text
+    shot_a, shot_b = submitted.json()["shots"]
+    photo_frames = client.post(
+        f"/wedding-projects/{project_id}/frames/approve",
+        headers=_headers(owner_token),
+        json={"version": 1, "frames": [
+            {"shot_id": shot_a["id"], "asset_id": owner_photo["id"]},
+            {"shot_id": shot_b["id"], "asset_id": partner_photo["id"]},
+        ]},
+    )
+    assert photo_frames.status_code == 200, photo_frames.text
+
+    with get_session_factory()() as db:
+        now = utc_now()
+        story = db.query(StoryVersion).filter_by(project_id=project_id).one()
+        quote = WeddingQuote(
+            project_id=project_id,
+            project_version=1,
+            max_budget_fen=1000,
+            expires_at=now + timedelta(minutes=30),
+        )
+        db.add(quote)
+        db.flush()
+        job_a = GenerationJob(
+            project_id=project_id,
+            story_version_id=story.id,
+            quote_id=quote.id,
+            target_shot_id=shot_a["id"],
+            project_version=1,
+            idempotency_key="restore-job-a",
+            request_fingerprint="a" * 64,
+            status="completed",
+            progress_stage="completed",
+            total_shots=1,
+            completed_shots=1,
+        )
+        job_b = GenerationJob(
+            project_id=project_id,
+            story_version_id=story.id,
+            quote_id=quote.id,
+            target_shot_id=shot_b["id"],
+            project_version=1,
+            idempotency_key="restore-job-b",
+            request_fingerprint="b" * 64,
+            status="failed",
+            progress_stage="failed",
+            total_shots=1,
+            error_code="PROVIDER_UNAVAILABLE",
+        )
+        db.add_all([job_a, job_b])
+        db.flush()
+        job_a_id = job_a.id
+        job_b_id = job_b.id
+
+        candidate_a_asset = WeddingAsset(
+            project_id=project_id,
+            person_key=None,
+            asset_type=WeddingAssetType.GENERATED_FRAME,
+            object_key=f"{project_id}/candidate-a.png",
+            sha256="a" * 64,
+            mime="image/png",
+            size_bytes=8,
+            generated=True,
+        )
+        candidate_b_asset = WeddingAsset(
+            project_id=project_id,
+            person_key=None,
+            asset_type=WeddingAssetType.GENERATED_FRAME,
+            object_key=f"{project_id}/candidate-b.png",
+            sha256="b" * 64,
+            mime="image/png",
+            size_bytes=8,
+            generated=True,
+        )
+        export_asset = WeddingAsset(
+            project_id=project_id,
+            person_key=None,
+            asset_type=WeddingAssetType.FINAL_VIDEO,
+            object_key=f"{project_id}/export.mp4",
+            sha256="e" * 64,
+            mime="video/mp4",
+            size_bytes=20,
+            generated=True,
+        )
+        preview = WeddingAsset(
+            project_id=project_id,
+            person_key=None,
+            asset_type=WeddingAssetType.PREVIEW_VIDEO,
+            object_key=f"{project_id}/preview.mp4",
+            sha256="c" * 64,
+            mime="video/mp4",
+            size_bytes=16,
+            generated=True,
+        )
+        db.add_all([candidate_a_asset, candidate_b_asset, preview, export_asset])
+        db.flush()
+        candidate_a_asset_id = candidate_a_asset.id
+        candidate_b_asset_id = candidate_b_asset.id
+        preview_asset_id = preview.id
+        export_asset_id = export_asset.id
+        render = RenderVersion(
+            project_id=project_id,
+            project_version=1,
+            version=1,
+            status="ready",
+            timeline_hash="d" * 64,
+            input_asset_ids=[owner_photo["id"], partner_photo["id"]],
+            preview_asset_id=preview.id,
+            export_asset_id=export_asset.id,
+            output_duration_ms=90000,
+        )
+        db.add_all(
+            [
+                ShotCandidate(
+                    project_id=project_id,
+                    shot_id=shot_a["id"],
+                    generation_job_id=job_a.id,
+                    asset_id=candidate_a_asset.id,
+                    provider="local_demo",
+                    model_version="local-demo-v1",
+                ),
+                ShotCandidate(
+                    project_id=project_id,
+                    shot_id=shot_b["id"],
+                    generation_job_id=job_b.id,
+                    asset_id=candidate_b_asset.id,
+                    provider="local_demo",
+                    model_version="local-demo-v1",
+                ),
+                render,
+            ]
+        )
+        db.flush()
+        render_id = render.id
+        db.commit()
+
+    owner_headers = _headers(owner_token)
+    partner_headers = _headers(participant_token)
+    outsider_headers = _headers(outsider_token)
+    review_a = client.post(
+        f"/participant-reviews/{shot_a['id']}",
+        headers=owner_headers,
+        json={"asset_id": candidate_a_asset_id, "result": "approved", "project_version": 1},
+    )
+    review_b = client.post(
+        f"/participant-reviews/{shot_b['id']}",
+        headers=partner_headers,
+        json={"asset_id": candidate_b_asset_id, "result": "approved", "project_version": 1},
+    )
+    assert review_a.status_code == 200, review_a.text
+    assert review_b.status_code == 200, review_b.text
+    render_review_a = client.post(
+        f"/wedding-projects/{project_id}/render-reviews",
+        headers=owner_headers,
+        params={"render_version_id": render_id},
+        json={"asset_id": preview_asset_id, "result": "approved", "project_version": 1},
+    )
+    render_review_b = client.post(
+        f"/wedding-projects/{project_id}/render-reviews",
+        headers=partner_headers,
+        params={"render_version_id": render_id},
+        json={"asset_id": preview_asset_id, "result": "approved", "project_version": 1},
+    )
+    assert render_review_a.status_code == 200, render_review_a.text
+    assert render_review_b.status_code == 200, render_review_b.text
+    owner_story = client.get(f"/wedding-projects/{project_id}/storyboard", headers=owner_headers)
+    partner_story = client.get(f"/wedding-projects/{project_id}/storyboard", headers=partner_headers)
+    assert owner_story.status_code == 200, owner_story.text
+    assert len(owner_story.json()["shots"]) == 2
+    assert owner_story.json()["shots"][0]["selected_asset_id"] is None
+    assert owner_story.json()["shots"][0]["selected_candidate_id"] is None
+    assert partner_story.status_code == 200, partner_story.text
+    assert [shot["id"] for shot in partner_story.json()["shots"]] == [shot_b["id"]]
+    assert partner_story.json()["facts"][0]["text"] == "B 的共同生活事实"
+    assert partner_story.json()["story_text"] == ""
+    assert [item["person_key"] for item in owner_story.json()["shots"][1]["identity_reviews"]] == ["B"]
+    assert [item["person_key"] for item in partner_story.json()["shots"][0]["identity_reviews"]] == ["B"]
+
+    owner_assets = client.get(f"/wedding-projects/{project_id}/assets", headers=owner_headers)
+    partner_assets = client.get(f"/wedding-projects/{project_id}/assets", headers=partner_headers)
+    assert owner_assets.status_code == 200
+    assert {item["id"] for item in owner_assets.json()} >= {owner_photo["id"], partner_photo["id"]}
+    assert partner_assets.status_code == 200
+    assert {item["id"] for item in partner_assets.json()} == {partner_photo["id"], candidate_b_asset_id, preview_asset_id}
+    assert export_asset_id not in {item["id"] for item in partner_assets.json()}
+    assert client.get(f"/wedding-assets/{export_asset_id}", headers=partner_headers).status_code == 404
+
+    owner_jobs = client.get(f"/wedding-projects/{project_id}/generation-jobs", headers=owner_headers)
+    partner_jobs = client.get(f"/wedding-projects/{project_id}/generation-jobs", headers=partner_headers)
+    assert owner_jobs.status_code == 200 and len(owner_jobs.json()) == 2
+    assert partner_jobs.status_code == 200 and {item["id"] for item in partner_jobs.json()} == {job_b_id}
+
+    owner_candidates = client.get(f"/wedding-projects/{project_id}/candidates", headers=owner_headers)
+    partner_candidates = client.get(f"/wedding-projects/{project_id}/candidates", headers=partner_headers)
+    assert owner_candidates.status_code == 200 and len(owner_candidates.json()) == 2
+    assert partner_candidates.status_code == 200
+    assert [item["shot_id"] for item in partner_candidates.json()] == [shot_b["id"]]
+
+    owner_renders = client.get(f"/wedding-projects/{project_id}/renders", headers=owner_headers)
+    partner_renders = client.get(f"/wedding-projects/{project_id}/renders", headers=partner_headers)
+    assert owner_renders.status_code == 200 and owner_renders.json()[0]["preview_asset_id"] == preview_asset_id
+    assert owner_renders.json()[0]["export_asset_id"] == export_asset_id
+    assert partner_renders.status_code == 200
+    assert partner_renders.json()[0]["preview_asset_id"] == preview_asset_id
+    assert partner_renders.json()[0]["export_asset_id"] is None
+    assert [item["person_key"] for item in owner_renders.json()[0]["identity_reviews"]] == ["A", "B"]
+    assert [item["person_key"] for item in partner_renders.json()[0]["identity_reviews"]] == ["B"]
+
+    for path in (
+        f"/wedding-projects/{project_id}/storyboard",
+        f"/wedding-projects/{project_id}/assets",
+        f"/wedding-projects/{project_id}/generation-jobs",
+        f"/wedding-projects/{project_id}/candidates",
+        f"/wedding-projects/{project_id}/renders",
+    ):
+        assert client.get(path, headers=outsider_headers).status_code == 404
+
+
+def test_wedding_capabilities_report_demo_and_unavailable_without_credentials(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("WEDDING_MEDIA_MODE", "disabled")
+    monkeypatch.setenv("WEDDING_STORY_PROVIDER", "ark_seed")
+    monkeypatch.setenv("WEDDING_STORY_API_KEY", "must-not-be-returned")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    assert client.get("/wedding-capabilities").status_code == 401
+    token = login(client, "capability-reader@example.com")
+    response = client.get("/wedding-capabilities", headers=_headers(token))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["demo_only"] is False
+    assert data["providers"]["story"]["available"] is False
+    assert data["providers"]["story"]["reason"] == "LIVE_ADAPTER_UNAVAILABLE"
+    assert "credentials_present" not in data["providers"]["story"]
+    assert "must-not-be-returned" not in response.text
+
+
+def test_storyboard_draft_can_be_updated_but_approved_story_is_immutable(client: TestClient) -> None:
+    token = login(client, "story-editor@example.com")
+    project_id = _create_project(client, token)["id"]
+    headers = _headers(token)
+
+    def payload(story_text: str, subtitle: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "story_text": story_text,
+            "facts": [{"source_field": "相识", "text": "确认过的事实"}],
+            "shots": [
+                {
+                    "shot_index": 1,
+                    "shot_type": "photo",
+                    "duration_ms": 5000,
+                    "person_keys": ["A"],
+                    "fact_indexes": [0],
+                    "description": "用户确认的画面",
+                    "subtitle": subtitle,
+                }
+            ],
+        }
+
+    first = client.post(f"/wedding-projects/{project_id}/storyboard", headers=headers, json=payload("初稿", "初稿字幕"))
+    assert first.status_code == 201, first.text
+    updated = client.put(f"/wedding-projects/{project_id}/storyboard", headers=headers, json=payload("修订稿", "修订后的字幕"))
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["id"] == first.json()["id"]
+    assert updated.json()["shots"][0]["id"] != first.json()["shots"][0]["id"]
+    assert updated.json()["story_text"] == "修订稿"
+    assert updated.json()["shots"][0]["subtitle"] == "修订后的字幕"
+
+    approved = client.post(
+        f"/wedding-projects/{project_id}/storyboard/approve",
+        headers=headers,
+        json={"version": 1},
+    )
+    assert approved.status_code == 200
+    immutable = client.put(f"/wedding-projects/{project_id}/storyboard", headers=headers, json=payload("不能覆盖", "不应生效"))
+    assert immutable.status_code == 409
+    assert immutable.json()["detail"] == "APPROVED_STORYBOARD_IMMUTABLE"
 
 
 def test_concurrent_invite_redemption_returns_one_participant_session(client: TestClient, monkeypatch) -> None:

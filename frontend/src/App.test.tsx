@@ -259,8 +259,13 @@ function mockFetchOnce(body: unknown, status = 200) {
   } as Response);
 }
 
+function jsonResponse(body: unknown, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body, blob: async () => new Blob() } as Response;
+}
+
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   vi.stubGlobal("fetch", vi.fn());
   vi.stubGlobal("navigator", {
     ...navigator,
@@ -274,6 +279,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("AiWardrobe app", () => {
@@ -288,7 +294,7 @@ describe("AiWardrobe app", () => {
     expect(screen.getByRole("button", { name: "粘贴商品链接" })).toBeInTheDocument();
   });
 
-  test("main navigation exposes the five core entries without AI try-on", async () => {
+  test("main navigation includes wedding studio alongside core entries", async () => {
     localStorage.setItem("aiwardrobe_token", "token");
     mockFetchOnce({ items: [] });
 
@@ -299,7 +305,76 @@ describe("AiWardrobe app", () => {
     for (const label of ["首页", "衣橱", "搭配", "报告", "历史"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+    expect(screen.getByRole("button", { name: "婚礼 MV" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "AI 换装" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "婚礼 MV" }));
+    expect(await screen.findByRole("heading", { name: "开始共同创作" })).toBeInTheDocument();
+  });
+
+  test("opens a bare wedding invite directly without requiring wardrobe login", async () => {
+    const user = userEvent.setup();
+    const inviteToken = "one-use-invite";
+    const serverProjectId = "server-project-id";
+    const project = {
+      id: serverProjectId, title: "新人项目", status: "draft", version: 1, style: "warm_documentary",
+      target_duration_ms: 90000, aspect_ratio: "16:9", budget_limit_fen: 10000,
+      budget_reserved_fen: 0, budget_spent_fen: 0, created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z", participants: [{ person_key: "B", display_name: "小林", consent_status: "active", confirmed_at: "2026-10-01T00:00:00Z" }], story_text: null
+    };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === `/consent-invites/${inviteToken}/confirm`) return jsonResponse({ accepted: true, access_token: "participant-only-token", project_id: serverProjectId, participant: { person_key: "B", display_name: "小林", consent_status: "active", confirmed_at: "2026-10-01T00:00:00Z" } });
+      if (path === "/wedding-capabilities") return jsonResponse({ mode: "demo", demo_only: true, providers: {}, ffmpeg_available: false, licensed_music_available: false, real_export_available: false });
+      if (path === `/wedding-projects/${serverProjectId}`) return jsonResponse(project);
+      if (path.endsWith("/assets") || path.endsWith("/generation-jobs") || path.endsWith("/candidates") || path.endsWith("/renders")) return jsonResponse([]);
+      if (path.endsWith("/storyboard")) return jsonResponse({ detail: "STORYBOARD_NOT_APPROVED" }, 409);
+      return jsonResponse({ detail: "unexpected request" }, 404);
+    });
+    window.history.replaceState({}, "", `/?wedding_project=untrusted-query-id&wedding_invite=${inviteToken}`);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "一起制作你们的婚礼 MV" })).toBeInTheDocument();
+    expect(screen.getByLabelText("你的称呼")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /欢迎回来|创建你的账号/ })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("你的称呼"), "小林");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "接受邀请并继续" }));
+    expect(await screen.findByText("新人项目")).toBeInTheDocument();
+    expect(sessionStorage.getItem(`wedding_participant:${serverProjectId}`)).toBe("participant-only-token");
+    expect(sessionStorage.getItem("wedding_participant:untrusted-query-id")).toBeNull();
+    expect(localStorage.getItem("aiwardrobe_token")).toBeNull();
+    window.history.replaceState({}, "", "/");
+  });
+
+  test("restores the participant project from session storage without replacing the wardrobe JWT", async () => {
+    const projectId = "project-session-1";
+    const participantToken = "wedding-session-token";
+    localStorage.setItem("aiwardrobe_token", "wardrobe-jwt-stays");
+    sessionStorage.setItem("wedding_active_project", projectId);
+    sessionStorage.setItem(`wedding_participant:${projectId}`, participantToken);
+    const project = {
+      id: projectId, title: "夏日婚礼", status: "draft", version: 1, style: "warm_documentary",
+      target_duration_ms: 90000, aspect_ratio: "16:9", budget_limit_fen: 10000,
+      budget_reserved_fen: 0, budget_spent_fen: 0, created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z", participants: [{ person_key: "B", display_name: "小林", consent_status: "active", confirmed_at: "2026-10-01T00:00:00Z" }], story_text: null
+    };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/garments") return jsonResponse({ items: [] });
+      if (path === "/wedding-capabilities") return jsonResponse({ mode: "demo", demo_only: true, providers: {}, ffmpeg_available: false, licensed_music_available: false, real_export_available: false });
+      if (path === `/wedding-projects/${projectId}`) return jsonResponse(project);
+      if (path.endsWith("/assets") || path.endsWith("/generation-jobs") || path.endsWith("/candidates") || path.endsWith("/renders")) return jsonResponse([]);
+      if (path.endsWith("/storyboard")) return jsonResponse({ detail: "STORYBOARD_NOT_APPROVED" }, 409);
+      return jsonResponse({ detail: "unexpected request" }, 404);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("夏日婚礼")).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([, init]) => new Headers(init?.headers).get("Authorization") === `Bearer ${participantToken}`)).toBe(true));
+    expect(localStorage.getItem("aiwardrobe_token")).toBe("wardrobe-jwt-stays");
+    expect(sessionStorage.getItem(`wedding_participant:${projectId}`)).toBe(participantToken);
   });
 
   test("shows a skippable preference panel after three ready garments and saves it", async () => {

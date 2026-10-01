@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import secrets
+import shutil
 from datetime import timedelta
+from pathlib import Path
 from typing import Literal
 
 import jwt
@@ -45,6 +47,8 @@ from app.models import (
 )
 from app.schemas import (
     CandidateSelectionRequest,
+    WeddingCandidateResponse,
+    WeddingCapabilitiesResponse,
     ConsentConfirmRequest,
     ConsentInviteCreate,
     ConsentInviteResponse,
@@ -59,6 +63,8 @@ from app.schemas import (
     ParticipantSessionResponse,
     RenderCreateRequest,
     RenderVersionResponse,
+    WeddingRenderReviewSummary,
+    WeddingShotReviewSummary,
     StoryVersionResponse,
     VersionRequest,
     WeddingAssetResponse,
@@ -165,9 +171,51 @@ def _story_response(story: StoryVersion) -> StoryVersionResponse:
                 "subtitle": shot.subtitle,
                 "creative_scene": shot.creative_scene,
                 "frame_asset_id": shot.frame_asset_id,
+                "selected_asset_id": shot.selected_asset_id,
+                "selected_candidate_id": shot.selected_candidate_id,
                 "status": shot.status,
+                "identity_reviews": [
+                    WeddingShotReviewSummary(
+                        person_key=review.person_key,
+                        asset_id=review.asset_id,
+                        result=review.result,
+                        confirmed_at=review.confirmed_at,
+                    )
+                    for review in sorted(shot.reviews, key=lambda item: (item.person_key, item.confirmed_at))
+                    if review.shot_id == shot.id and review.render_version_id is None
+                ],
             }
             for shot in sorted(story.shots, key=lambda item: item.shot_index)
+        ],
+    )
+
+
+def _render_response(
+    render: RenderVersion,
+    *,
+    participant: bool = False,
+    participant_person_key: str | None = None,
+) -> RenderVersionResponse:
+    return RenderVersionResponse(
+        id=render.id,
+        project_version=render.project_version,
+        version=render.version,
+        status=render.status,
+        preview_asset_id=render.preview_asset_id,
+        export_asset_id=None if participant else render.export_asset_id,
+        output_duration_ms=render.output_duration_ms,
+        owner_approved_at=render.owner_approved_at,
+        created_at=render.created_at,
+        identity_reviews=[
+            WeddingRenderReviewSummary(
+                person_key=review.person_key,
+                asset_id=review.asset_id,
+                result=review.result,
+                confirmed_at=review.confirmed_at,
+            )
+            for review in sorted(render.participant_reviews, key=lambda item: item.person_key)
+            if review.render_version_id == render.id
+            and (not participant or review.person_key == participant_person_key)
         ],
     )
 
@@ -287,11 +335,18 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
         return actor.owner_id == project.owner_id
     if actor.project_id != project.id or not actor.person_key:
         return False
+    if asset.asset_type == WeddingAssetType.FINAL_VIDEO:
+        return False
     if asset.person_key == actor.person_key:
         return True
-    if asset.asset_type in {WeddingAssetType.PREVIEW_VIDEO, WeddingAssetType.FINAL_VIDEO}:
+    if asset.asset_type == WeddingAssetType.PREVIEW_VIDEO:
         return True
-    if asset.asset_type not in {WeddingAssetType.STORYBOARD_FRAME, WeddingAssetType.GENERATED_FRAME}:
+    if asset.asset_type not in {
+        WeddingAssetType.PHOTO,
+        WeddingAssetType.STORYBOARD_FRAME,
+        WeddingAssetType.GENERATED_FRAME,
+        WeddingAssetType.VIDEO_CANDIDATE,
+    }:
         return False
     linked_shot = db.execute(
         select(StoryboardShot).where(
@@ -299,7 +354,50 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
             (StoryboardShot.frame_asset_id == asset.id) | (StoryboardShot.selected_asset_id == asset.id),
         )
     ).scalar_one_or_none()
-    return linked_shot is not None and actor.person_key in linked_shot.person_keys
+    if linked_shot is not None and actor.person_key in linked_shot.person_keys:
+        return True
+    candidate_shot_ids = db.execute(
+        select(ShotCandidate.shot_id).where(
+            ShotCandidate.project_id == project.id,
+            ShotCandidate.asset_id == asset.id,
+        )
+    ).scalars()
+    return any(
+        (shot := db.get(StoryboardShot, shot_id)) is not None and actor.person_key in shot.person_keys
+        for shot_id in candidate_shot_ids
+    )
+
+
+def _readable_project(db: Session, actor: WeddingActor, project_id: str) -> WeddingProject:
+    project = db.get(WeddingProject, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Wedding project not found")
+    if actor.kind == "owner" and actor.owner_id == project.owner_id:
+        return project
+    if actor.kind == "participant" and actor.project_id == project.id and actor.person_key in {"A", "B"}:
+        return project
+    raise HTTPException(status_code=404, detail="Wedding project not found")
+
+
+def _capability(
+    provider: str,
+    *,
+    demo: bool,
+) -> dict[str, object]:
+    if demo:
+        return {
+            "provider": "local_demo",
+            "configured": True,
+            "available": True,
+            "reason": "DEMO_ONLY_NO_AI_MOTION",
+        }
+    configured = provider.strip().lower() not in {"", "disabled"}
+    return {
+        "provider": provider,
+        "configured": configured,
+        "available": False,
+        "reason": "LIVE_ADAPTER_UNAVAILABLE" if configured else "DISABLED",
+    }
 
 
 def _check_job_prerequisites(db: Session, project: WeddingProject, version: int) -> StoryVersion:
@@ -354,13 +452,48 @@ def list_wedding_projects(
     return [_project_response(project) for project in projects]
 
 
+@router.get("/wedding-capabilities", response_model=WeddingCapabilitiesResponse)
+def get_wedding_capabilities(
+    actor: WeddingActor = Depends(get_wedding_actor),
+) -> WeddingCapabilitiesResponse:
+    del actor
+    settings = get_settings()
+    demo = settings.wedding_media_mode.strip().lower() == "demo"
+    configured_ffmpeg = settings.wedding_ffmpeg_path
+    ffmpeg_available = bool(
+        (Path(configured_ffmpeg).is_file() if configured_ffmpeg else shutil.which("ffmpeg"))
+    )
+    licensed_music_available = bool(
+        settings.wedding_music_file
+        and settings.wedding_music_license_id
+        and Path(settings.wedding_music_file).is_file()
+    )
+    providers = {
+        "story": _capability(settings.wedding_story_provider, demo=demo),
+        "frame": _capability(settings.wedding_frame_provider, demo=demo),
+        "character_video": _capability(
+            settings.wedding_character_video_provider,
+            demo=demo,
+        ),
+        "scene_video": _capability(settings.wedding_scene_video_provider, demo=demo),
+    }
+    return WeddingCapabilitiesResponse(
+        mode="demo" if demo else "disabled",
+        demo_only=demo,
+        providers=providers,
+        ffmpeg_available=ffmpeg_available,
+        licensed_music_available=licensed_music_available,
+        real_export_available=ffmpeg_available and licensed_music_available and not demo,
+    )
+
+
 @router.get("/wedding-projects/{project_id}", response_model=WeddingProjectDetailResponse)
 def get_wedding_project(
     project_id: str,
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> WeddingProjectDetailResponse:
-    project = require_project_owner(db, actor, project_id)
+    project = _readable_project(db, actor, project_id)
     story = db.execute(
         select(StoryVersion)
         .where(StoryVersion.project_id == project.id, StoryVersion.version == project.current_version)
@@ -379,9 +512,128 @@ def get_wedding_project(
             }
             for participant in participants
         ],
-        story_text=story.story_text if story else None,
+        story_text=story.story_text if story and actor.kind == "owner" else None,
     )
     return response
+
+
+@router.get("/wedding-projects/{project_id}/storyboard", response_model=StoryVersionResponse)
+def get_current_wedding_storyboard(
+    project_id: str,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> StoryVersionResponse:
+    project = _readable_project(db, actor, project_id)
+    story = _current_story(db, project)
+    response = _story_response(story)
+    if actor.kind == "owner":
+        return response
+    if story.status != StoryVersionStatus.APPROVED:
+        raise HTTPException(status_code=409, detail="STORYBOARD_NOT_APPROVED")
+    visible_shots = [
+        shot.model_copy(
+            update={
+                "identity_reviews": [
+                    review for review in shot.identity_reviews if review.person_key == actor.person_key
+                ]
+            }
+        )
+        for shot in response.shots
+        if actor.person_key in shot.person_keys
+    ]
+    visible_fact_ids = {fact_id for shot in visible_shots for fact_id in shot.fact_ids}
+    return response.model_copy(
+        update={
+            "story_text": "",
+            "shots": visible_shots,
+            "facts": [fact for fact in response.facts if fact.id in visible_fact_ids],
+        }
+    )
+
+
+@router.get("/wedding-projects/{project_id}/assets", response_model=list[WeddingAssetResponse])
+def list_wedding_assets(
+    project_id: str,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> list[WeddingAssetResponse]:
+    project = _readable_project(db, actor, project_id)
+    assets = db.execute(
+        select(WeddingAsset).where(WeddingAsset.project_id == project.id).order_by(WeddingAsset.created_at)
+    ).scalars()
+    return [_asset_response(asset) for asset in assets if _can_read_asset(db, asset, actor)]
+
+
+@router.get("/wedding-projects/{project_id}/generation-jobs", response_model=list[GenerationJobResponse])
+def list_wedding_generation_jobs(
+    project_id: str,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> list[GenerationJobResponse]:
+    project = _readable_project(db, actor, project_id)
+    query = select(GenerationJob).where(GenerationJob.project_id == project.id).order_by(GenerationJob.created_at)
+    if actor.kind == "participant":
+        visible_shot_ids = {
+            shot.id
+            for shot in db.execute(
+                select(StoryboardShot).where(
+                    StoryboardShot.project_id == project.id,
+                    StoryboardShot.project_version == project.current_version,
+                )
+            ).scalars()
+            if actor.person_key in shot.person_keys
+        }
+        jobs = db.execute(query).scalars()
+        return [
+            _job_response(job)
+            for job in jobs
+            if (
+                job.target_shot_id is None and job.project_version == project.current_version
+            )
+            or job.target_shot_id in visible_shot_ids
+        ]
+    return [_job_response(job) for job in db.execute(query).scalars()]
+
+
+@router.get("/wedding-projects/{project_id}/candidates", response_model=list[WeddingCandidateResponse])
+def list_wedding_candidates(
+    project_id: str,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> list[WeddingCandidateResponse]:
+    project = _readable_project(db, actor, project_id)
+    candidates = db.execute(
+        select(ShotCandidate)
+        .join(StoryboardShot, StoryboardShot.id == ShotCandidate.shot_id)
+        .where(ShotCandidate.project_id == project.id)
+        .order_by(ShotCandidate.created_at)
+    ).scalars()
+    visible: list[WeddingCandidateResponse] = []
+    for candidate in candidates:
+        shot = db.get(StoryboardShot, candidate.shot_id)
+        asset = db.get(WeddingAsset, candidate.asset_id)
+        if shot is None or asset is None:
+            continue
+        if actor.kind == "participant" and actor.person_key not in shot.person_keys:
+            continue
+        if not _can_read_asset(db, asset, actor):
+            continue
+        visible.append(
+            WeddingCandidateResponse(
+                id=candidate.id,
+                shot_id=candidate.shot_id,
+                generation_job_id=candidate.generation_job_id,
+                asset_id=candidate.asset_id,
+                asset=_asset_response(asset),
+                provider=candidate.provider,
+                model_version=candidate.model_version,
+                quality_flags=candidate.quality_flags,
+                review_result=candidate.review_result,
+                actual_cost_fen=candidate.actual_cost_fen,
+                created_at=candidate.created_at,
+            )
+        )
+    return visible
 
 
 @router.patch("/wedding-projects/{project_id}", response_model=WeddingProjectResponse)
@@ -639,6 +891,7 @@ def confirm_consent_invite(
         db.commit()
         return ParticipantSessionResponse(
             accepted=False,
+            project_id=project.id,
             participant={
                 "person_key": participant.person_key,
                 "display_name": participant.display_name,
@@ -707,6 +960,7 @@ def confirm_consent_invite(
     return ParticipantSessionResponse(
         access_token=participant_token,
         accepted=True,
+        project_id=project.id,
         participant={
             "person_key": participant.person_key,
             "display_name": participant.display_name,
@@ -960,6 +1214,61 @@ def submit_storyboard(
     return _story_response(story)
 
 
+@router.put("/wedding-projects/{project_id}/storyboard", response_model=StoryVersionResponse)
+def update_storyboard_draft(
+    project_id: str,
+    body: StoryboardSubmitRequest,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> StoryVersionResponse:
+    project = require_project_owner(db, actor, project_id)
+    _check_version(project, body.version)
+    story = _current_story(db, project)
+    if story.status != StoryVersionStatus.DRAFT or story.owner_approved_at is not None:
+        raise HTTPException(status_code=409, detail="APPROVED_STORYBOARD_IMMUTABLE")
+    if len({shot.shot_index for shot in body.shots}) != len(body.shots):
+        raise HTTPException(status_code=422, detail="SHOT_INDEX_DUPLICATE")
+    if any(index < 0 or index >= len(body.facts) for shot in body.shots for index in shot.fact_indexes):
+        raise HTTPException(status_code=422, detail="FACT_REFERENCE_INVALID")
+    if any(shot.shot_type == "person_ai" and not shot.person_keys for shot in body.shots):
+        raise HTTPException(status_code=422, detail="PERSON_KEYS_REQUIRED")
+
+    # Only the unapproved current draft is replaceable. Approved facts, shots, renders,
+    # and exports keep their original version and IDs.
+    story.shots.clear()
+    story.facts.clear()
+    db.flush()
+    story.story_text = body.story_text
+    story.style = project.style
+    for fact in body.facts:
+        story.facts.append(StoryFact(source_field=fact.source_field, text=fact.text))
+    db.flush()
+    facts = list(story.facts)
+    for shot in body.shots:
+        story.shots.append(
+            StoryboardShot(
+                project_id=project.id,
+                story_version_id=story.id,
+                project_version=project.current_version,
+                shot_index=shot.shot_index,
+                shot_type=shot.shot_type,
+                duration_ms=shot.duration_ms,
+                person_keys=shot.person_keys,
+                fact_ids=[facts[index].id for index in shot.fact_indexes],
+                description=shot.description,
+                subtitle=shot.subtitle,
+                creative_scene=shot.creative_scene,
+                status=StoryboardShotStatus.DRAFT,
+            )
+        )
+    project.frame_approved_version = None
+    _set_project_status(project, WeddingProjectStatus.STORY_REVIEW)
+    _record_audit(db, project, actor, "storyboard.draft_updated", "story_version", story.id)
+    db.commit()
+    db.refresh(story)
+    return _story_response(story)
+
+
 @router.post("/wedding-projects/{project_id}/storyboard/approve", response_model=StoryVersionResponse)
 def approve_storyboard(
     project_id: str,
@@ -1014,10 +1323,21 @@ def approve_storyboard_frames(
     }
     for shot_id, asset_id in assignments.items():
         asset = assets.get(asset_id)
-        if asset is None or asset.asset_type not in {WeddingAssetType.STORYBOARD_FRAME, WeddingAssetType.GENERATED_FRAME}:
+        if asset is None or asset.asset_type not in {
+            WeddingAssetType.PHOTO,
+            WeddingAssetType.STORYBOARD_FRAME,
+            WeddingAssetType.GENERATED_FRAME,
+        }:
             raise HTTPException(status_code=422, detail="FRAME_ASSET_INVALID")
-        shots[shot_id].frame_asset_id = asset_id
-        set_shot_status(shots[shot_id], StoryboardShotStatus.FRAME_APPROVED)
+        shot = shots[shot_id]
+        if (
+            asset.asset_type == WeddingAssetType.PHOTO
+            and shot.person_keys
+            and asset.person_key not in shot.person_keys
+        ):
+            raise HTTPException(status_code=422, detail="FRAME_ASSET_PERSON_SCOPE_INVALID")
+        shot.frame_asset_id = asset_id
+        set_shot_status(shot, StoryboardShotStatus.FRAME_APPROVED)
     project.frame_approved_version = project.current_version
     _set_project_status(project, WeddingProjectStatus.READY_TO_GENERATE)
     _record_audit(db, project, actor, "frames.approved", "story_version", story.id)
@@ -1421,16 +1741,53 @@ def create_render_version(
     _record_audit(db, project, actor, "render.queued", "render_version", render.id)
     db.commit()
     db.refresh(render)
-    return RenderVersionResponse(
-        id=render.id,
-        project_version=render.project_version,
-        version=render.version,
-        status=render.status,
-        preview_asset_id=render.preview_asset_id,
-        export_asset_id=render.export_asset_id,
-        output_duration_ms=render.output_duration_ms,
-        owner_approved_at=render.owner_approved_at,
-        created_at=render.created_at,
+    return _render_response(render)
+
+
+@router.get("/wedding-projects/{project_id}/renders", response_model=list[RenderVersionResponse])
+def list_wedding_renders(
+    project_id: str,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> list[RenderVersionResponse]:
+    project = _readable_project(db, actor, project_id)
+    renders = db.execute(
+        select(RenderVersion).where(RenderVersion.project_id == project.id).order_by(RenderVersion.version.desc())
+    ).scalars()
+    responses: list[RenderVersionResponse] = []
+    for render in renders:
+        response = _render_response(
+            render,
+            participant=actor.kind == "participant",
+            participant_person_key=actor.person_key,
+        )
+        if actor.kind == "participant" and render.preview_asset_id:
+            preview = db.get(WeddingAsset, render.preview_asset_id)
+            if preview is None or not _can_read_asset(db, preview, actor):
+                response = response.model_copy(update={"preview_asset_id": None})
+        responses.append(response)
+    return responses
+
+
+@router.get("/wedding-projects/{project_id}/renders/{render_id}", response_model=RenderVersionResponse)
+def get_wedding_render(
+    project_id: str,
+    render_id: str,
+    actor: WeddingActor = Depends(get_wedding_actor),
+    db: Session = Depends(get_db),
+) -> RenderVersionResponse:
+    project = _readable_project(db, actor, project_id)
+    render = db.get(RenderVersion, render_id)
+    if render is None or render.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Wedding render not found")
+    if actor.kind == "participant" and render.preview_asset_id:
+        preview = db.get(WeddingAsset, render.preview_asset_id)
+        if preview is None or not _can_read_asset(db, preview, actor):
+            raise HTTPException(status_code=404, detail="Wedding render not found")
+    return _render_response(
+        render,
+        participant=actor.kind == "participant",
+        participant_person_key=actor.person_key,
     )
 
 

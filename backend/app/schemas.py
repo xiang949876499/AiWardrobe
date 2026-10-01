@@ -629,6 +629,7 @@ class ParticipantSessionResponse(BaseModel):
     access_token: str | None = None
     token_type: str = "bearer"
     accepted: bool
+    project_id: str
     participant: WeddingParticipantSummary
 
 
@@ -667,6 +668,13 @@ class StoryboardShotInput(BaseModel):
     creative_scene: bool = False
 
 
+class WeddingShotReviewSummary(BaseModel):
+    person_key: WeddingPersonKey
+    asset_id: str
+    result: Literal["approved", "rejected"]
+    confirmed_at: datetime
+
+
 class StoryboardShotResponse(BaseModel):
     id: str
     project_version: int
@@ -679,7 +687,10 @@ class StoryboardShotResponse(BaseModel):
     subtitle: str
     creative_scene: bool
     frame_asset_id: str | None = None
+    selected_asset_id: str | None = None
+    selected_candidate_id: str | None = None
     status: str
+    identity_reviews: list[WeddingShotReviewSummary] = Field(default_factory=list)
 
 
 class StoryboardSubmitRequest(BaseModel):
@@ -770,6 +781,36 @@ class CandidateSelectionRequest(BaseModel):
     candidate_id: str
 
 
+class WeddingCandidateResponse(BaseModel):
+    id: str
+    shot_id: str
+    generation_job_id: str
+    asset_id: str
+    asset: WeddingAssetResponse
+    provider: str
+    model_version: str
+    quality_flags: list[str]
+    review_result: Literal["pending", "approved", "rejected"]
+    actual_cost_fen: int
+    created_at: datetime
+
+
+class WeddingProviderAvailability(BaseModel):
+    provider: str
+    configured: bool
+    available: bool
+    reason: str
+
+
+class WeddingCapabilitiesResponse(BaseModel):
+    mode: Literal["disabled", "demo"]
+    demo_only: bool
+    providers: dict[str, WeddingProviderAvailability]
+    ffmpeg_available: bool
+    licensed_music_available: bool
+    real_export_available: bool
+
+
 class FallbackAcceptRequest(BaseModel):
     project_version: int = Field(ge=1)
     asset_id: str
@@ -777,6 +818,13 @@ class FallbackAcceptRequest(BaseModel):
 
 class RenderCreateRequest(BaseModel):
     version: int = Field(ge=1)
+
+
+class WeddingRenderReviewSummary(BaseModel):
+    person_key: WeddingPersonKey
+    asset_id: str
+    result: Literal["approved", "rejected"]
+    confirmed_at: datetime
 
 
 class RenderVersionResponse(BaseModel):
@@ -789,6 +837,7 @@ class RenderVersionResponse(BaseModel):
     output_duration_ms: int | None = None
     owner_approved_at: datetime | None = None
     created_at: datetime
+    identity_reviews: list[WeddingRenderReviewSummary] = Field(default_factory=list)
 
 
 class ExportResponse(BaseModel):

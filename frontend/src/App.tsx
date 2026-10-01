@@ -1,5 +1,6 @@
 import {
   Archive,
+  Clapperboard,
   Check,
   ExternalLink,
   Heart,
@@ -63,6 +64,7 @@ import type {
 } from "./types";
 import { GarmentCardSkeleton } from "./Skeleton";
 import { compressImageFile } from "./imageCompression";
+import WeddingStudio from "./WeddingStudio";
 
 const categories: Array<{ value: "all" | Category; label: string }> = [
   { value: "all", label: "全部" },
@@ -87,7 +89,8 @@ const navItems = [
   { id: "wardrobe", label: "衣橱", icon: Shirt },
   { id: "outfit", label: "搭配", icon: Sparkles },
   { id: "report", label: "报告", icon: Archive },
-  { id: "history", label: "历史", icon: Archive }
+  { id: "history", label: "历史", icon: Archive },
+  { id: "wedding", label: "婚礼 MV", icon: Clapperboard }
 ] as const;
 
 type View = (typeof navItems)[number]["id"] | "upload" | "purchase" | "shopping" | "detail";
@@ -119,7 +122,10 @@ function BlurImage({ src, alt, className = "" }: { src: string; alt: string; cla
 
 function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
-  const [activeView, setActiveView] = useState<View>("home");
+  const [activeView, setActiveView] = useState<View>(() => {
+    const query = new URLSearchParams(window.location.search);
+    return query.has("wedding_invite") || query.has("wedding_project") || sessionStorage.getItem("wedding_active_project") ? "wedding" : "home";
+  });
   const [garments, setGarments] = useState<Garment[]>([]);
   const [selectedGarment, setSelectedGarment] = useState<Garment | null>(null);
   const [outfits, setOutfits] = useState<Outfit[]>([]);
@@ -238,6 +244,14 @@ function App() {
     setPurchaseAnalysisDone(false);
     setActiveView("home");
   }, []);
+
+  const weddingQuery = new URLSearchParams(window.location.search);
+  const weddingInvite = weddingQuery.get("wedding_invite");
+  const weddingProject = weddingQuery.get("wedding_project") || sessionStorage.getItem("wedding_active_project");
+
+  if (!token && activeView === "wedding") {
+    return <WeddingStudio ownerToken={null} inviteToken={weddingInvite} initialProjectId={weddingProject} />;
+  }
 
   if (!token) {
     return (
@@ -377,6 +391,7 @@ function App() {
             onDelete={(id) => void handleDeleteOutfit(id)}
           />
         )}
+        {activeView === "wedding" && <WeddingStudio ownerToken={token} inviteToken={weddingInvite} initialProjectId={weddingProject} />}
       </main>
 
       <nav className="bottomNav" aria-label="移动端主导航">
