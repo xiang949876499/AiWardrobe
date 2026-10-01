@@ -378,6 +378,7 @@ class WeddingProject(Base):
     quotes: Mapped[list["WeddingQuote"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     budget_entries: Mapped[list["BudgetLedger"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     audit_events: Mapped[list["WeddingAuditEvent"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    creation_jobs: Mapped[list["WeddingCreationJob"]] = relationship(cascade="all, delete-orphan")
 
 
 class WeddingParticipant(Base):
@@ -388,6 +389,7 @@ class WeddingParticipant(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("wedding_projects.id"), index=True, nullable=False)
     person_key: Mapped[str] = mapped_column(String(1), nullable=False)
     display_name: Mapped[str] = mapped_column(String(60), default="", nullable=False)
+    primary_photo_asset_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_assets.id", ondelete="SET NULL", use_alter=True), nullable=True)
     is_owner: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     consent_status: Mapped[WeddingConsentStatus] = mapped_column(
@@ -716,3 +718,55 @@ class WeddingAuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped[WeddingProject] = relationship(back_populates="audit_events")
+
+
+class WeddingAccountUsage(Base):
+    __tablename__ = 'wedding_account_usage'
+    owner_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reserved_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    spent_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class WeddingBillingReceipt(Base):
+    """Minimal accounting deliberately has no cascading private project foreign keys."""
+    __tablename__ = 'wedding_billing_receipts'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    operation_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    job_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(120), nullable=False)
+    task_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    request_id: Mapped[str | None] = mapped_column(String(160))
+    state: Mapped[str] = mapped_column(String(24), default='reserved', nullable=False)
+    reserved_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    estimated_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    billed_fen: Mapped[int | None] = mapped_column(Integer)
+    settled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    usage: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    price_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class WeddingCreationJob(Base):
+    __tablename__ = 'wedding_creation_jobs'
+    __table_args__ = (UniqueConstraint('project_id', 'idempotency_key', name='uq_wedding_creation_idempotency'),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey('wedding_projects.id'), index=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    project_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    draft_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default='queued', index=True, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    completed_operations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_operations: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    result_story_id: Mapped[str | None] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)

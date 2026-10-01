@@ -213,7 +213,7 @@ def get_wedding_actor(
 
 
 def require_project_owner(db: Session, actor: WeddingActor, project_id: str) -> WeddingProject:
-    project = db.get(WeddingProject, project_id)
+    project = db.scalar(select(WeddingProject).where(WeddingProject.id == project_id).with_for_update())
     if project is None or actor.kind != "owner" or actor.owner_id != project.owner_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wedding project not found")
     return project
@@ -341,48 +341,8 @@ def reserve_generation_budget(
         return existing
     if amount_fen <= 0:
         raise HTTPException(status_code=409, detail="BUDGET_RESERVATION_REQUIRED")
-    # Serialize reservations for one owner across all projects. The row lock is
-    # held by the caller's transaction until its commit, so a competing reserve
-    # observes the first reservation before calculating its own headroom.
-    owner_id = db.execute(
-        select(User.id).where(User.id == project.owner_id).with_for_update()
-    ).scalar_one_or_none()
-    if owner_id is None:
-        raise HTTPException(status_code=409, detail="BUDGET_OWNER_NOT_FOUND")
-    if db.get_bind().dialect.name == "sqlite":
-        # SQLite omits FOR UPDATE. A no-op owner-row update acquires its coarse
-        # writer lock before the aggregate read, mirroring the PostgreSQL row lock.
-        db.execute(
-            update(User)
-            .where(User.id == owner_id)
-            .values(updated_at=User.updated_at)
-            .execution_options(synchronize_session=False)
-        )
-    account_reserved_and_spent = db.scalar(
-        select(
-            func.coalesce(
-                func.sum(WeddingProject.budget_spent_fen + WeddingProject.budget_reserved_fen),
-                0,
-            )
-        ).where(WeddingProject.owner_id == owner_id)
-    )
-    if int(account_reserved_and_spent or 0) + amount_fen > get_settings().wedding_account_budget_limit_fen:
-        raise HTTPException(status_code=409, detail="ACCOUNT_BUDGET_LIMIT_EXCEEDED")
-    result = db.execute(
-        update(WeddingProject)
-        .where(
-            WeddingProject.id == project.id,
-            WeddingProject.budget_spent_fen
-            + WeddingProject.budget_reserved_fen
-            + WeddingProject.budget_delivery_reserve_fen
-            + amount_fen
-            <= WeddingProject.budget_limit_fen,
-        )
-        .values(budget_reserved_fen=WeddingProject.budget_reserved_fen + amount_fen)
-        .execution_options(synchronize_session=False)
-    )
-    if result.rowcount != 1:
-        raise HTTPException(status_code=409, detail="BUDGET_LIMIT_EXCEEDED")
+    from app.wedding_accounting import reserve
+    reserve(db, project, amount_fen)
     entry = BudgetLedger(
         project_id=project.id,
         generation_job_id=job.id,
@@ -391,6 +351,10 @@ def reserve_generation_budget(
         reserved_fen=amount_fen,
     )
     job.reserved_amount_fen = amount_fen
+    from app.models import WeddingBillingReceipt
+    db.add(WeddingBillingReceipt(operation_key=f'reservation:{job.id}', owner_id=project.owner_id,
+        project_id=project.id, job_id=job.id, provider='budget_envelope', model='budget_envelope',
+        reserved_fen=amount_fen, provenance={'price_version': 'quote-envelope'}))
     db.add(entry)
     db.flush()
     db.expire(project, ["budget_reserved_fen"])
@@ -406,17 +370,15 @@ def settle_generation_budget(db: Session, job: GenerationJob, actual_fen: int) -
         return entry
     if entry.status != BudgetLedgerStatus.RESERVED or actual_fen < 0 or actual_fen > entry.reserved_fen:
         raise ValueError("Invalid generation budget settlement")
-    result = db.execute(
-        update(WeddingProject)
-        .where(WeddingProject.id == job.project_id, WeddingProject.budget_reserved_fen >= entry.reserved_fen)
-        .values(
-            budget_reserved_fen=WeddingProject.budget_reserved_fen - entry.reserved_fen,
-            budget_spent_fen=WeddingProject.budget_spent_fen + actual_fen,
-        )
-        .execution_options(synchronize_session=False)
-    )
-    if result.rowcount != 1:
-        raise ValueError("Wedding budget reservation is inconsistent")
+    from app.wedding_accounting import settle
+    project = db.get(WeddingProject, job.project_id)
+    settle(db, project, entry.reserved_fen, actual_fen)
+    from app.models import WeddingBillingReceipt
+    for receipt in db.scalars(select(WeddingBillingReceipt).where(WeddingBillingReceipt.job_id == job.id)):
+        receipt.settled = True
+        if receipt.provider in ('budget_envelope', 'legacy_unknown'):
+            receipt.estimated_fen = actual_fen
+            receipt.state = 'succeeded'
     set_budget_status(entry, BudgetLedgerStatus.SETTLED)
     entry.actual_fen = actual_fen
     entry.released_fen = entry.reserved_fen - actual_fen
@@ -433,14 +395,13 @@ def release_generation_budget(db: Session, job: GenerationJob) -> BudgetLedger:
         return entry
     if entry.status != BudgetLedgerStatus.RESERVED:
         raise ValueError("Only an unsettled reservation can be released")
-    result = db.execute(
-        update(WeddingProject)
-        .where(WeddingProject.id == job.project_id, WeddingProject.budget_reserved_fen >= entry.reserved_fen)
-        .values(budget_reserved_fen=WeddingProject.budget_reserved_fen - entry.reserved_fen)
-        .execution_options(synchronize_session=False)
-    )
-    if result.rowcount != 1:
-        raise ValueError("Wedding budget reservation is inconsistent")
+    from app.models import WeddingBillingReceipt
+    if db.scalar(select(WeddingBillingReceipt.id).where(WeddingBillingReceipt.job_id == job.id,
+            WeddingBillingReceipt.state.in_(['dispatching','running','unknown']))):
+        return entry
+    from app.wedding_accounting import settle
+    project = db.get(WeddingProject, job.project_id)
+    settle(db, project, entry.reserved_fen, 0)
     set_budget_status(entry, BudgetLedgerStatus.RELEASED)
     entry.released_fen = entry.reserved_fen
     entry.settled_at = utc_now()

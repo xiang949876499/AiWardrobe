@@ -803,7 +803,7 @@ class WeddingProviderAvailability(BaseModel):
 
 
 class WeddingCapabilitiesResponse(BaseModel):
-    mode: Literal["disabled", "demo"]
+    mode: Literal["disabled", "demo", "live"]
     demo_only: bool
     providers: dict[str, WeddingProviderAvailability]
     ffmpeg_available: bool

@@ -2,7 +2,7 @@ from collections.abc import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -15,7 +15,8 @@ class Base(DeclarativeBase):
 def _connect_args(database_url: str) -> dict[str, object]:
     if database_url.startswith("sqlite"):
         return {"check_same_thread": False}
-    return {}
+    options = str(make_url(database_url).query.get("options", ""))
+    return {"connect_timeout": 3, "options": options + " -c statement_timeout=5000 -c lock_timeout=2000"}
 
 
 _engine: Engine | None = None
@@ -28,7 +29,7 @@ def get_engine() -> Engine:
     settings = get_settings()
     if _engine is None or _database_url != settings.database_url:
         _database_url = settings.database_url
-        _engine = create_engine(settings.database_url, connect_args=_connect_args(settings.database_url))
+        _engine = create_engine(settings.database_url, connect_args=_connect_args(settings.database_url), pool_timeout=3)
         _session_factory = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
     return _engine
 
@@ -55,6 +56,8 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_lightweight_columns(engine)
     _ensure_wedding_project_columns(engine)
+    from app.wedding_migrations import migrate_creation
+    migrate_creation(engine)
 
 
 def _ensure_lightweight_columns(engine: Engine) -> None:

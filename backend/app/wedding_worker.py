@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.exc import OperationalError, DBAPIError
 
 from app.config import Settings, get_settings
 from app.database import get_session_factory, init_db
@@ -28,6 +29,7 @@ from app.models import (
     WeddingAuditEvent,
     WeddingJobStatus,
     WeddingProject,
+    WeddingAccountUsage, WeddingBillingReceipt,
     utc_now,
 )
 from app.wedding_media import (
@@ -209,7 +211,10 @@ def _recover_stale_generation_jobs(
             if job is None:
                 continue
             previous_stage = job.progress_stage
-            in_flight = previous_stage.startswith("dispatching_") or previous_stage == "provider_result_received"
+            known_running = db.scalar(select(WeddingBillingReceipt.id).where(
+                WeddingBillingReceipt.job_id == job.id, WeddingBillingReceipt.state == 'running',
+                WeddingBillingReceipt.task_id.is_not(None))) is not None
+            in_flight = (previous_stage.startswith("dispatching_") or previous_stage == "provider_result_received") and not known_running
             # A provider may already be charging or returning bytes. Quarantine
             # this attempt for reconciliation instead of risking redispatch.
             set_job_status(job, WeddingJobStatus.NEEDS_ACTION)
@@ -294,6 +299,9 @@ def _complete_or_release_reservation(db: Session, job: GenerationJob, *, success
         return False
     if entry.status.value != "reserved":
         return True
+    if db.scalar(select(WeddingBillingReceipt.id).where(WeddingBillingReceipt.job_id == job.id,
+            WeddingBillingReceipt.state.in_(['dispatching', 'running', 'unknown']))):
+        return False
     actual = int(job.actual_cost_fen or 0)
     if actual > entry.reserved_fen:
         # Keep the full reservation held for reconciliation; never disguise an overrun as a lower cost.
@@ -425,15 +433,9 @@ def _dispatch_preflight(
             > project.budget_limit_fen
         ):
             return None, "BUDGET_LIMIT_EXCEEDED"
-        account_total_fen = db.scalar(
-            select(
-                func.coalesce(
-                    func.sum(WeddingProject.budget_spent_fen + WeddingProject.budget_reserved_fen),
-                    0,
-                )
-            ).where(WeddingProject.owner_id == project.owner_id)
-        )
-        if int(account_total_fen or 0) > get_settings().wedding_account_budget_limit_fen:
+        from app.wedding_accounting import lock_account
+        account = lock_account(db, project.owner_id)
+        if account.spent_fen + account.reserved_fen > get_settings().wedding_account_budget_limit_fen:
             return None, "ACCOUNT_BUDGET_LIMIT_EXCEEDED"
         ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == job.id)).scalar_one_or_none()
         if ledger is None or ledger.status.value != "reserved" or ledger.reserved_fen != job.reserved_amount_fen:
@@ -460,6 +462,12 @@ def _dispatch_preflight(
         frame = db.get(WeddingAsset, shot.frame_asset_id)
         if frame is None or frame.project_id != project.id:
             return None, "STATIC_FRAME_MISSING"
+        if mark_dispatching:
+            from app.wedding_video_operations import prepare_receipt
+            try:
+                prepare_receipt(db, project, job, shot)
+            except HTTPException as exc:
+                return None, str(exc.detail)
         operation = "character_video" if shot.shot_type == "person_ai" else "scene_video"
         job.progress_stage = (
             f"dispatching_{operation}" if mark_dispatching else f"preparing_{operation}"
@@ -587,17 +595,14 @@ def process_claimed_generation_job(
             frame = db.get(WeddingAsset, db.get(StoryboardShot, shot_id).frame_asset_id)
             if frame is None:
                 return _finalize_job(session_factory, job_id, status=WeddingJobStatus.FAILED, error_code="STATIC_FRAME_MISSING", lease_token=lease_token)
-            try:
-                reference_bytes = storage.read(frame.object_key)
-            except OSError:
-                return _finalize_job(
-                    session_factory,
-                    job_id,
-                    status=WeddingJobStatus.FAILED,
-                    error_code="STATIC_FRAME_BYTES_UNAVAILABLE",
-                    error_category="storage",
-                    lease_token=lease_token,
-                )
+            frame_object_key = frame.object_key
+        try:
+            reference_bytes = storage.read(frame_object_key)
+        except OSError:
+            return _finalize_job(
+                session_factory, job_id, status=WeddingJobStatus.FAILED,
+                error_code="STATIC_FRAME_BYTES_UNAVAILABLE", error_category="storage", lease_token=lease_token,
+            )
         request, preflight_error = _dispatch_preflight(
             session_factory,
             job_id,
@@ -634,8 +639,15 @@ def process_claimed_generation_job(
         try:
             if provider is None:
                 raise ProviderUnavailable("PROVIDER_UNAVAILABLE", "No provider is configured for this shot type")
+            from app.wedding_video_operations import attach_request, record_result
+            request = attach_request(session_factory, request, lease_token, storage)
             output = provider.generate(request)
+            record_result(session_factory, job_id, shot_id, output, 'succeeded', lease_token)
         except ProviderUnavailable as exc:
+            from app.wedding_video_operations import record_result
+            record_result(session_factory, job_id, shot_id, exc, exc.submission_state, lease_token)
+            if exc.submission_state in ('unknown', 'running'):
+                return _status_result(job_id, session_factory)
             failure_codes.append(exc.code)
             late_result = _record_provider_failure(
                 session_factory, job_id, shot_id, exc.code, exc.actual_cost_fen, lease_token
@@ -643,15 +655,11 @@ def process_claimed_generation_job(
             if late_result is not None:
                 return late_result
             continue
-        except Exception as exc:
-            actual = max(0, int(getattr(exc, "actual_cost_fen", 0) or 0))
-            failure_codes.append("PROVIDER_ERROR")
-            late_result = _record_provider_failure(
-                session_factory, job_id, shot_id, "PROVIDER_ERROR", actual, lease_token
-            )
-            if late_result is not None:
-                return late_result
-            continue
+        except Exception:
+            from app.wedding_video_operations import record_result
+            unknown = ProviderUnavailable('PROVIDER_OUTCOME_UNKNOWN', 'Provider outcome unknown', submission_state='unknown')
+            record_result(session_factory, job_id, shot_id, unknown, 'unknown', lease_token)
+            return _status_result(job_id, session_factory)
 
         result = _record_provider_output(session_factory, job_id, shot_id, output, storage, lease_token)
         if result is not None:
@@ -732,7 +740,7 @@ def _record_provider_failure(
     lease_token: str,
 ) -> WorkerResult | None:
     with session_factory() as db:
-        job = _locked_generation_job(db, job_id)
+        _, _, job = _lock_project_then_generation_job(db, job_id)
         shot = db.get(StoryboardShot, shot_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
@@ -767,7 +775,7 @@ def _record_provider_output(
     lease_token: str,
 ) -> WorkerResult | None:
     with session_factory() as db:
-        job = _locked_generation_job(db, job_id)
+        _, _, job = _lock_project_then_generation_job(db, job_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
         if job.status == WeddingJobStatus.NEEDS_ACTION and job.error_code == "PROVIDER_OUTCOME_UNKNOWN":
@@ -799,129 +807,151 @@ def _record_provider_output(
         job.progress_stage = "provider_result_received"
         db.commit()
 
-    # Provider cost is durable before late cancellation/version checks. The
-    # result stage is also a recovery marker so a crash here is never retried.
-    with session_factory() as db:
-        project_id, project, job = _lock_project_then_generation_job(db, job_id)
-        shot = db.get(StoryboardShot, shot_id)
-        if job is None:
-            return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
-        if job.project_id != project_id:
-            return WorkerResult(job.id, str(job.status), "WORKER_PROJECT_CHANGED")
-        if project is None:
-            return WorkerResult(job.id, str(job.status), "PROJECT_NOT_FOUND")
-        if shot is None:
-            return _finalize_job_in_session(
-                db,
-                job,
-                project=project,
-                status=WeddingJobStatus.FAILED,
-                error_code="SHOT_NOT_FOUND",
-            )
-        if job.status == WeddingJobStatus.NEEDS_ACTION and job.error_code == "PROVIDER_OUTCOME_UNKNOWN":
-            return WorkerResult(job.id, str(job.status), "PROVIDER_OUTCOME_UNKNOWN")
-        if not _lease_matches(job, lease_token):
-            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
-        if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
-            return _finalize_job_in_session(
-                db,
-                job,
-                project=project,
-                status=WeddingJobStatus.CANCELLED,
-                error_code=None,
-            )
-        if job.status != WeddingJobStatus.PROCESSING:
-            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
-        if job.progress_stage != "provider_result_received":
-            return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
-        if project.current_version != job.project_version or shot.project_version != job.project_version:
-            return _finalize_job_in_session(
-                db,
-                job,
-                project=project,
-                status=WeddingJobStatus.FAILED,
-                error_code="PROJECT_VERSION_STALE",
-                error_category="version",
-            )
+    staged_key = None
+    persisted_key = None
+    suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm"}.get(output.mime)
+    if suffix and output.data and output.actual_cost_fen >= 0:
+        # Upload private bytes without a DB transaction, then re-check every fence
+        # under the parent lock before making them reachable through asset metadata.
         try:
-            validate_active_consents(db, project)
-        except HTTPException:
-            return _finalize_job_in_session(
-                db,
-                job,
-                project=project,
-                status=WeddingJobStatus.CANCELLED,
-                error_code="CONSENT_REQUIRED",
-                error_category="consent",
-            )
-        if output.actual_cost_fen < 0 or not output.data or not output.mime or not output.provider or not output.model_version:
-            _apply_provider_failure(job, shot, "PROVIDER_RESULT_INVALID", 0)
-            db.commit()
-            return None
-        if job.actual_cost_fen > job.reserved_amount_fen:
-            return _finalize_job_in_session(
-                db,
-                job,
-                project=project,
-                status=WeddingJobStatus.NEEDS_ACTION,
-                error_code="ACTUAL_COST_EXCEEDS_RESERVATION",
-                error_category="budget",
-                progress_stage="needs_action",
-            )
-        if output.mime not in {"image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm"}:
-            _apply_provider_failure(job, shot, "PROVIDER_RESULT_UNSUPPORTED", 0)
-            db.commit()
-            return None
-        existing = db.execute(
-            select(ShotCandidate.id).where(
-                ShotCandidate.generation_job_id == job_id,
-                ShotCandidate.shot_id == shot_id,
-            )
-        ).first()
-        if existing is not None:
-            return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
-        asset_type = WeddingAssetType.VIDEO_CANDIDATE if output.mime.startswith("video/") else WeddingAssetType.GENERATED_FRAME
-        suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm"}[output.mime]
-        object_key = None
-        # The byte write and metadata insert are kept together; failed commits remove the orphan object.
-        try:
-            object_key = storage.put(project.id, output.data, suffix, output.mime)
-            asset = WeddingAsset(
-                project_id=project.id,
-                asset_type=asset_type,
-                object_key=object_key,
-                sha256=hashlib.sha256(output.data).hexdigest(),
-                mime=output.mime,
-                size_bytes=len(output.data),
-                generated=True,
-                provider=output.provider,
-            )
-            db.add(asset)
-            db.flush()
-            candidate = ShotCandidate(
-                project_id=project.id,
-                shot_id=shot.id,
-                generation_job_id=job.id,
-                asset_id=asset.id,
-                provider=output.provider,
-                model_version=output.model_version,
-                review_result=CandidateReviewStatus.PENDING,
-                actual_cost_fen=output.actual_cost_fen,
-            )
-            db.add(candidate)
-            set_shot_status(shot, StoryboardShotStatus.CANDIDATE_REVIEW)
-            job.completed_shots += 1
-            job.progress_stage = "candidate_review"
-            db.commit()
+            with session_factory() as db:
+                staged_project_id = db.scalar(select(GenerationJob.project_id).where(GenerationJob.id == job_id))
+            if staged_project_id:
+                staged_key = storage.put(staged_project_id, output.data, suffix, output.mime)
         except Exception:
-            db.rollback()
-            if object_key:
-                storage.delete(object_key)
-            _record_provider_failure(
-                session_factory, job_id, shot_id, "OUTPUT_PERSISTENCE_FAILED", 0, lease_token
-            )
+            _record_provider_failure(session_factory, job_id, shot_id, "OUTPUT_PERSISTENCE_FAILED", 0, lease_token)
             return None
-    return None
+    try:
+        # Provider cost is durable before late cancellation/version checks. The
+        # result stage is also a recovery marker so a crash here is never retried.
+        with session_factory() as db:
+            project_id, project, job = _lock_project_then_generation_job(db, job_id)
+            shot = db.get(StoryboardShot, shot_id)
+            if job is None:
+                return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+            if job.project_id != project_id:
+                return WorkerResult(job.id, str(job.status), "WORKER_PROJECT_CHANGED")
+            if project is None:
+                return WorkerResult(job.id, str(job.status), "PROJECT_NOT_FOUND")
+            if shot is None:
+                return _finalize_job_in_session(
+                    db,
+                    job,
+                    project=project,
+                    status=WeddingJobStatus.FAILED,
+                    error_code="SHOT_NOT_FOUND",
+                )
+            if job.status == WeddingJobStatus.NEEDS_ACTION and job.error_code == "PROVIDER_OUTCOME_UNKNOWN":
+                return WorkerResult(job.id, str(job.status), "PROVIDER_OUTCOME_UNKNOWN")
+            if not _lease_matches(job, lease_token):
+                return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+            if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
+                return _finalize_job_in_session(
+                    db,
+                    job,
+                    project=project,
+                    status=WeddingJobStatus.CANCELLED,
+                    error_code=None,
+                )
+            if job.status != WeddingJobStatus.PROCESSING:
+                return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+            if job.progress_stage != "provider_result_received":
+                return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
+            if project.current_version != job.project_version or shot.project_version != job.project_version:
+                return _finalize_job_in_session(
+                    db,
+                    job,
+                    project=project,
+                    status=WeddingJobStatus.FAILED,
+                    error_code="PROJECT_VERSION_STALE",
+                    error_category="version",
+                )
+            try:
+                validate_active_consents(db, project)
+                from app.wedding_video_operations import receipt_for, validate_receipt_provenance
+                receipt = receipt_for(db, job_id, shot_id)
+                if receipt:
+                    validate_receipt_provenance(db, project, shot, receipt)
+            except HTTPException:
+                return _finalize_job_in_session(
+                    db,
+                    job,
+                    project=project,
+                    status=WeddingJobStatus.CANCELLED,
+                    error_code="CONSENT_REQUIRED",
+                    error_category="consent",
+                )
+            if output.actual_cost_fen < 0 or not output.data or not output.mime or not output.provider or not output.model_version:
+                _apply_provider_failure(job, shot, "PROVIDER_RESULT_INVALID", 0)
+                db.commit()
+                return None
+            if job.actual_cost_fen > job.reserved_amount_fen:
+                return _finalize_job_in_session(
+                    db,
+                    job,
+                    project=project,
+                    status=WeddingJobStatus.NEEDS_ACTION,
+                    error_code="ACTUAL_COST_EXCEEDS_RESERVATION",
+                    error_category="budget",
+                    progress_stage="needs_action",
+                )
+            if output.mime not in {"image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm"}:
+                _apply_provider_failure(job, shot, "PROVIDER_RESULT_UNSUPPORTED", 0)
+                db.commit()
+                return None
+            existing = db.execute(
+                select(ShotCandidate.id).where(
+                    ShotCandidate.generation_job_id == job_id,
+                    ShotCandidate.shot_id == shot_id,
+                )
+            ).first()
+            if existing is not None:
+                return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
+            asset_type = WeddingAssetType.VIDEO_CANDIDATE if output.mime.startswith("video/") else WeddingAssetType.GENERATED_FRAME
+            suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm"}[output.mime]
+            # Attach staged private bytes only after all fences; failed commits remove the orphan object.
+            try:
+                from app.wedding_creation import check_storage_capacity
+                check_storage_capacity(db, project.id, len(output.data))
+                object_key = staged_key
+                asset = WeddingAsset(
+                    project_id=project.id,
+                    asset_type=asset_type,
+                    object_key=object_key,
+                    sha256=hashlib.sha256(output.data).hexdigest(),
+                    mime=output.mime,
+                    size_bytes=len(output.data),
+                    generated=True,
+                    provider=output.provider,
+                )
+                db.add(asset)
+                db.flush()
+                candidate = ShotCandidate(
+                    project_id=project.id,
+                    shot_id=shot.id,
+                    generation_job_id=job.id,
+                    asset_id=asset.id,
+                    provider=output.provider,
+                    model_version=output.model_version,
+                    review_result=CandidateReviewStatus.PENDING,
+                    actual_cost_fen=output.actual_cost_fen,
+                )
+                db.add(candidate)
+                set_shot_status(shot, StoryboardShotStatus.CANDIDATE_REVIEW)
+                job.completed_shots += 1
+                job.progress_stage = "candidate_review"
+                db.commit()
+                persisted_key = staged_key
+            except Exception:
+                db.rollback()
+                _record_provider_failure(
+                    session_factory, job_id, shot_id, "OUTPUT_PERSISTENCE_FAILED", 0, lease_token
+                )
+                return None
+        return None
+    finally:
+        if staged_key and staged_key != persisted_key:
+            storage.delete(staged_key)
 
 
 def process_claimed_render_version(
@@ -1117,6 +1147,10 @@ def process_next_render_version(
 
 def run_worker_once() -> list[WorkerResult]:
     results: list[WorkerResult] = []
+    from app.wedding_creation import process_next_creation_job
+    creation = process_next_creation_job()
+    if creation is not None:
+        results.append(creation)
     generation = process_next_generation_job()
     if generation is not None:
         results.append(generation)
@@ -1138,10 +1172,20 @@ def main() -> None:
         except Exception as exc:
             if args.once:
                 raise
-            print(f"wedding worker database initialization failed: {exc}; retrying")
+            print(f"wedding worker DB_RETRY initialization ({type(exc).__name__})")
             time.sleep(max(0.1, args.poll_seconds))
+    failures = 0
     while True:
-        results = run_worker_once()
+        try:
+            results = run_worker_once()
+            failures = 0
+        except (OperationalError, DBAPIError):
+            if args.once:
+                raise
+            failures = min(failures + 1, 6)
+            print("wedding worker database temporarily unavailable; retrying")
+            time.sleep(min(30.0, max(0.1, args.poll_seconds) * 2 ** failures))
+            continue
         for result in results:
             print(f"wedding worker {result.work_id}: {result.status} ({result.error_code or 'ok'})")
         if args.once:

@@ -719,7 +719,7 @@ def test_worker_finalization_locks_project_before_job_and_releases_budget(client
         event.remove(engine, "before_cursor_execute", capture_lock_order)
 
     assert result.status == "failed"
-    assert locked_entities == [WeddingProject, GenerationJob]
+    assert locked_entities == [WeddingProject, GenerationJob, User]
     with factory() as db:
         project = db.get(WeddingProject, work.project_id)
         ledger = db.execute(

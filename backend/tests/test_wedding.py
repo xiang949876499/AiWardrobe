@@ -654,7 +654,7 @@ def test_wedding_capabilities_report_demo_and_unavailable_without_credentials(cl
     data = response.json()
     assert data["demo_only"] is False
     assert data["providers"]["story"]["available"] is False
-    assert data["providers"]["story"]["reason"] == "LIVE_ADAPTER_UNAVAILABLE"
+    assert data["providers"]["story"]["reason"] == "disabled"
     assert "credentials_present" not in data["providers"]["story"]
     assert "must-not-be-returned" not in response.text
 

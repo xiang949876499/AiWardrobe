@@ -161,12 +161,16 @@ class _DemoProvider:
         return output.read()
 
     def structure(self, request: StoryStructureRequest) -> StructuredOutput:
-        # The demo intentionally returns no invented facts or story copy.
-        data = json.dumps(
-            {"demo": True, "label": "DEMO ONLY", "confirmed_fact_count": len(request.confirmed_facts), "shots": []},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        from app.wedding_providers import SHOT_TYPES
+        facts = [{"text": text, "source_quote": "" if request.confirmed_facts else text,
+                  "source": "confirmed_input" if request.confirmed_facts else "story_quote", "confirmed": False}
+                 for text in (request.confirmed_facts or (request.story_text[:1000],))]
+        shots = [{"shot_index": i, "shot_type": kind, "duration_ms": 5000,
+                  "person_keys": (["A"] if i == 5 else ["B"] if i == 6 else ["A", "B"]) if kind == "person_ai" else [],
+                  "fact_indexes": [0], "description": "DEMO ONLY: editable visual placeholder",
+                  "subtitle": "", "creative_scene": kind == "scene_ai"}
+                 for i, kind in enumerate(SHOT_TYPES, 1)]
+        data = json.dumps({"story_text": request.story_text, "facts": facts, "shots": shots}).encode("utf-8")
         return StructuredOutput(data, self.provider, self.model_version, 0, demo=True)
 
     def generate(self, request: FrameGenerationRequest | VideoGenerationRequest) -> MediaOutput:

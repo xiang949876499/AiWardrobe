@@ -498,22 +498,19 @@ def get_wedding_capabilities(
         and settings.wedding_music_license_id
         and Path(settings.wedding_music_file).is_file()
     )
-    providers = {
-        "story": _capability(settings.wedding_story_provider, demo=demo),
-        "frame": _capability(settings.wedding_frame_provider, demo=demo),
-        "character_video": _capability(
-            settings.wedding_character_video_provider,
-            demo=demo,
-        ),
-        "scene_video": _capability(settings.wedding_scene_video_provider, demo=demo),
-    }
+    from app.wedding_providers import provider_capabilities
+    capabilities = provider_capabilities(settings)
+    providers = {key: (_capability(row['provider'], demo=True) if demo else
+                 {'provider': row['provider'], 'configured': row['provider'] != 'disabled',
+                  'available': row['available'], 'reason': row['reason'] or 'AVAILABLE'})
+                 for key, row in capabilities.items()}
     return WeddingCapabilitiesResponse(
-        mode="demo" if demo else "disabled",
+        mode="demo" if demo else "live" if settings.wedding_media_mode == "live" else "disabled",
         demo_only=demo,
         providers=providers,
         ffmpeg_available=ffmpeg_available,
         licensed_music_available=licensed_music_available,
-        real_export_available=ffmpeg_available and licensed_music_available and not demo,
+        real_export_available=ffmpeg_available and licensed_music_available and not demo and all(p['available'] for p in providers.values()),
     )
 
 
@@ -707,6 +704,8 @@ def update_wedding_project(
             elif job.status == WeddingJobStatus.PROCESSING:
                 set_job_status(job, WeddingJobStatus.CANCEL_REQUESTED)
                 job.cancel_requested_at = utc_now()
+        from app.wedding_creation import cancel_project_creation
+        cancel_project_creation(db, project, 'PROJECT_VERSION_STALE')
         _record_audit(db, project, actor, "project.updated", "project", project.id, {"version": project.current_version})
     db.commit()
     db.refresh(project)
@@ -721,6 +720,10 @@ def delete_wedding_project(
     storage: WeddingPrivateStorage = Depends(private_storage),
 ) -> Response:
     project = require_project_owner(db, actor, project_id)
+    from app.wedding_accounting import lock_account
+    lock_account(db, project.owner_id)
+    from app.wedding_creation import cancel_project_creation
+    cancel_project_creation(db, project, 'PROJECT_DELETED')
     # Remove private bytes before deleting metadata. No public URL exists to invalidate.
     for asset in list(project.assets):
         storage.delete(asset.object_key)
@@ -1056,6 +1059,8 @@ def revoke_consent(
         render.preview_asset_id = None
         render.export_asset_id = None
         _record_audit(db, project, actor, "render.cancelled_consent", "render_version", render.id)
+    from app.wedding_creation import cancel_project_creation
+    cancel_project_creation(db, project, 'CONSENT_REVOKED')
     _record_audit(db, project, actor, "consent.revoked", "participant", participant.id)
     db.commit()
     return {"revoked": True, "person_key": participant.person_key, "revoked_at": now}
@@ -2037,6 +2042,8 @@ def cancel_wedding_project(
         else:
             set_job_status(job, WeddingJobStatus.CANCEL_REQUESTED)
             job.cancel_requested_at = now
+    from app.wedding_creation import cancel_project_creation
+    cancel_project_creation(db, project, 'PROJECT_CANCELLED')
     _set_project_status(project, WeddingProjectStatus.CANCELLED)
     _record_audit(db, project, actor, "project.cancelled", "project", project.id)
     db.commit()
