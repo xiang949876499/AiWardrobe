@@ -57,9 +57,9 @@ def evidence():
 
 def final_render(snap):
     return dict(id="render1", project_version=1, status="approved", invalidated_at=None,
-                output_duration_ms=90000, export_asset_id="final", music=snap["music"],
+                output_duration_ms=90000, preview_asset_id="preview", export_asset_id="final", music=snap["music"],
                 timeline=[dict(shot_id=s["id"], asset_id=s["selected_asset_id"], shot_type=s["shot_type"], duration_ms=s["duration_ms"]) for s in snap["story"]["shots"]],
-                identity_reviews=[dict(person_key=p, asset_id="final", result="approved") for p in "AB"])
+                identity_reviews=[dict(person_key=p, asset_id="preview", result="approved") for p in "AB"])
 
 
 def test_manifest_requires_exact_distinct_ten_and_safe_only_fields():
@@ -173,7 +173,7 @@ def test_metrics_require_real_media_humans_and_official_total_bill():
 
 def test_summary_fixed_denominators_thresholds_and_goals():
     row = dict(complete=True, qualified=True, standard=True, cost_pass=True, happy=True,
-               facts=True, rights=True, motion_passes=4, minutes=30)
+               facts=True, rights=True, motion_passes=2, stress_passes=2, minutes=30)
     rows = [dict(row) for _ in range(10)]
     rows[0].update(qualified=False, standard=False, cost_pass=False, happy=False, motion_passes=0)
     rows[1].update(qualified=False, standard=False, cost_pass=False, happy=False)
@@ -182,6 +182,36 @@ def test_summary_fixed_denominators_thresholds_and_goals():
     assert runner.summarize(rows)["status"] == "FAIL"
     rows[2]["complete"] = False
     assert runner.summarize(rows)["status"] == "INCOMPLETE"
-    assert runner.summarize(rows)["motion_denominator"] == 40
+    assert runner.summarize(rows)["motion_denominator"] == 20
+    assert runner.summarize(rows)["stress_denominator"] == 20
     with pytest.raises(runner.Rejected):
         runner.summarize(rows[:9])
+
+
+def test_public_fallback_keeps_ai_type_and_requires_exact_photo_approval():
+    snap = snapshot()
+    for shot in snap["story"]["shots"][6:8]:
+        shot.update(status="fallback", selected_candidate_id=None)
+        next(a for a in snap["assets"] if a["id"] == shot["selected_asset_id"])["mime"] = "image/jpeg"
+    snap["assets"].append(dict(id="final", mime="video/mp4", expires_at="2099-01-01T00:00:00Z"))
+    row = runner.assess(manifest()["samples"][0], snap, final_render(snap), evidence())
+    assert row["qualified"] and not row["standard"] and row["photo"] == 8 and row["person_ai"] == 6
+    snap["story"]["shots"][7]["identity_reviews"] = []
+    assert not runner.assess(manifest()["samples"][0], snap, final_render(snap), evidence())["qualified"]
+
+
+def test_batch_targets_exclude_pending_unselected_valid_candidates(tmp_path):
+    snap = snapshot()
+    for shot in snap["story"]["shots"][:12]:
+        shot["selected_candidate_id"] = None
+    api = FakeAPI(snap); api.checkpoint = tmp_path / "cp.json"
+    with pytest.raises(runner.Rejected, match="NO_PENDING_SHOTS"):
+        runner.dispatch(api, manifest()["samples"][0], snap, api.checkpoint, "generate", None, True)
+
+
+def test_stress_failures_do_not_change_default_motion_denominator():
+    rows = [dict(complete=True, qualified=True, standard=True, cost_pass=True, happy=True,
+                 facts=True, rights=True, motion_passes=2, stress_passes=0, minutes=90) for _ in range(10)]
+    summary = runner.summarize(rows)
+    assert summary["status"] == "PASS" and summary["stress_passes"] == 0
+    assert summary["latency_goal_met"] is False
