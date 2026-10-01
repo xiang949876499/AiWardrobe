@@ -60,19 +60,20 @@ class Settings(BaseSettings):
     wedding_read_timeout_seconds: float = Field(default=60, gt=0)
     wedding_poll_interval_seconds: float = Field(default=3, gt=0)
     wedding_total_timeout_seconds: float = Field(default=600, gt=0)
+    wedding_io_heartbeat_seconds: float = Field(default=0.25, gt=0, le=1)
     wedding_max_json_bytes: int = Field(default=32_000_000, gt=0)
     wedding_max_request_bytes: int = Field(default=60_000_000, gt=0)
     wedding_max_image_bytes: int = Field(default=20_000_000, gt=0)
     wedding_max_video_bytes: int = Field(default=100_000_000, gt=0)
-    wedding_download_allowed_domains: str = "oss-cn-beijing.aliyuncs.com,oss-cn-shanghai.aliyuncs.com,volces.com"
+    wedding_download_allowed_domains: str = "oss-cn-beijing.aliyuncs.com,oss-cn-shanghai.aliyuncs.com,oss-accelerate.aliyuncs.com,volces.com"
     wedding_price_version: str = "cn-baseline-2026-10-01"
-    wedding_story_input_fen_per_million_tokens: Decimal | None = Field(default=None, gt=0)
-    wedding_story_output_fen_per_million_tokens: Decimal | None = Field(default=None, gt=0)
+    wedding_story_input_fen_per_million_tokens: Decimal | None = Field(default=None, gt=0, le=100_000_000)
+    wedding_story_output_fen_per_million_tokens: Decimal | None = Field(default=None, gt=0, le=100_000_000)
     wedding_story_max_cost_fen: int = Field(default=100, gt=0)
     wedding_story_max_tokens: int = Field(default=8192, gt=0, le=16384)
-    wedding_frame_fen_per_image: Decimal = Field(default=Decimal("25"), gt=0)
-    wedding_r2v_fen_per_second: Decimal = Field(default=Decimal("100"), gt=0)
-    wedding_i2v_flash_fen_per_second: Decimal = Field(default=Decimal("25"), gt=0)
+    wedding_frame_fen_per_image: Decimal = Field(default=Decimal("25"), gt=0, le=1_000_000)
+    wedding_r2v_fen_per_second: Decimal = Field(default=Decimal("100"), gt=0, le=1_000_000)
+    wedding_i2v_flash_fen_per_second: Decimal = Field(default=Decimal("25"), gt=0, le=1_000_000)
     wedding_account_budget_limit_fen: int = Field(default=15_000, gt=0)
     wedding_worker_stale_seconds: int = Field(default=1_800, gt=0)
     wedding_ffmpeg_path: str | None = None

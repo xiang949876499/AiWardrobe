@@ -15,6 +15,12 @@ from app.wedding_media import (
 from app.wedding_providers import ArkStoryProvider, SeedreamFrameProvider, WanVideoProvider, provider_capabilities
 
 
+@pytest.fixture(autouse=True)
+def mock_provider_dns(monkeypatch):
+    # All provider HTTP and DNS are synthetic in this module.
+    monkeypatch.setattr("app.wedding_providers.socket.getaddrinfo", lambda *args, **kwargs: [(2, 1, 6, "", ("8.8.8.8", 443))])
+
+
 def png():
     out = BytesIO()
     Image.new("RGB", (2, 2)).save(out, format="PNG")
@@ -409,7 +415,8 @@ def test_crc_corrupt_png_paid_output_retains_cost():
 
 
 @pytest.mark.parametrize("level", ["INFO", "DEBUG"])
-def test_dependency_logs_and_exception_format_do_not_reveal_private_data(caplog, level):
+@pytest.mark.parametrize("failure", ["status", "transport"])
+def test_dependency_logs_and_exception_format_do_not_reveal_private_data(caplog, level, failure):
     import logging
     import traceback
     secret_path, secret_query, secret_key = "private-wedding-unique-path", "private-signed-query", "private-api-unique-key"
@@ -418,6 +425,8 @@ def test_dependency_logs_and_exception_format_do_not_reveal_private_data(caplog,
         if req.url.host == "dashscope.aliyuncs.com":
             return httpx.Response(200, json={"output": {"task_status": "SUCCEEDED", "video_url": signed}, "usage": {"duration": 5}})
         logging.getLogger("httpcore.connection").debug("transport args=%r key=%s", req.url, secret_key)
+        if failure == "transport":
+            raise httpx.ReadTimeout(signed, request=req)
         return httpx.Response(403, json={"message": signed})
     with caplog.at_level(getattr(logging, level)):
         with pytest.raises(ProviderUnavailable) as err:
@@ -481,7 +490,8 @@ def test_small_raw_chunks_enforce_actual_deadline_and_stop_io_callbacks():
     assert counts == (len(pulses), len(requests), len(chunks))
 
 
-def test_delayed_resolver_expires_without_late_http_or_callbacks():
+@pytest.mark.parametrize("resume", [False, True])
+def test_delayed_resolver_expires_without_late_http_or_callbacks(resume):
     import time
     calls, pulses = [], []
     def resolver(_):
@@ -490,9 +500,10 @@ def test_delayed_resolver_expires_without_late_http_or_callbacks():
     provider = WanVideoProvider(settings(wedding_total_timeout_seconds=0.08, wedding_io_heartbeat_seconds=0.02), "wan_r2v", transport=httpx.MockTransport(lambda req: calls.append(req) or httpx.Response(200, json={})), resolver=resolver)
     started = time.monotonic()
     with pytest.raises(ProviderUnavailable) as err:
-        provider.generate(video(heartbeat=lambda: pulses.append(1)))
+        provider.generate(video(heartbeat=lambda: pulses.append(1), existing_task_id="known" if resume else None))
     assert time.monotonic() - started < 0.25 and err.value.code == "PROVIDER_TIMEOUT"
-    assert err.value.submission_state == "not_submitted" and err.value.actual_cost_fen == 0
+    assert err.value.submission_state == ("running" if resume else "not_submitted")
+    assert err.value.actual_cost_fen == (500 if resume else 0)
     count = len(pulses)
     time.sleep(0.5)
     assert not calls and len(pulses) == count
@@ -505,3 +516,77 @@ def test_pre_submit_heartbeat_failure_is_not_submitted_and_zero_cost():
         adapter(lambda _: pytest.fail("unexpected HTTP")).generate(video(heartbeat=fail))
     assert err.value.submission_state == "not_submitted" and err.value.actual_cost_fen == 0
     assert err.value.task_id is None
+
+def test_submit_timeout_cancels_request_before_late_acceptance_or_checkpoint():
+    import asyncio
+    import time
+    requests, accepted, checkpoints, pulses = [], [], [], []
+    async def handler(req):
+        requests.append(req)
+        await asyncio.sleep(0.4)
+        accepted.append(1)
+        return httpx.Response(200, json={"output": {"task_id": "late-task"}})
+    provider = adapter(handler, config=settings(wedding_total_timeout_seconds=0.08, wedding_io_heartbeat_seconds=0.02))
+    started = time.monotonic()
+    with pytest.raises(ProviderUnavailable) as err:
+        provider.generate(video(checkpoint=checkpoints.append, heartbeat=lambda: pulses.append(1)))
+    assert time.monotonic() - started < 0.25
+    assert err.value.code == "PROVIDER_TIMEOUT" and err.value.submission_state == "unknown"
+    assert err.value.actual_cost_fen == 500 and err.value.task_id is None
+    count = len(pulses)
+    time.sleep(0.5)
+    assert len(requests) == 1 and not accepted and not checkpoints and len(pulses) == count
+
+
+def test_resolver_outstanding_capacity_is_global_bounded_and_late_results_discarded(monkeypatch):
+    import concurrent.futures
+    import threading
+    import time
+    import app.wedding_providers as module
+    slots = threading.BoundedSemaphore(2)
+    monkeypatch.setattr(module, "_DNS_SLOTS", slots)
+    started, release = [], threading.Event()
+    def resolver(_):
+        started.append(1)
+        release.wait(2)
+        return ["8.8.8.8"]
+    calls = []
+    def run():
+        provider = WanVideoProvider(settings(wedding_total_timeout_seconds=0.1), "wan_r2v", transport=httpx.MockTransport(lambda req: calls.append(req) or httpx.Response(200, json={})), resolver=resolver)
+        with pytest.raises(ProviderUnavailable) as err:
+            provider.generate(video())
+        return err.value
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run) for _ in range(2)]
+            until = time.monotonic() + 1
+            while len(started) < 2 and time.monotonic() < until:
+                time.sleep(0.005)
+            assert len(started) == 2
+            errors = [run() for _ in range(5)]
+            assert all(e.code == "PROVIDER_DNS_BUSY" and e.actual_cost_fen == 0 for e in errors)
+            assert all(f.result().code == "PROVIDER_TIMEOUT" for f in futures)
+            assert len(started) == 2 and not calls
+    finally:
+        release.set()
+    time.sleep(0.05)
+    assert not calls
+    assert slots.acquire(False) and slots.acquire(False)
+    slots.release(); slots.release()
+
+
+@pytest.mark.parametrize("usage,expected", [({}, 0), ({"duration": 0}, 0), ({"duration": 2}, 200)])
+def test_failed_task_valid_usage_keeps_definite_state_and_metered_charge(usage, expected):
+    with pytest.raises(ProviderUnavailable) as err:
+        adapter(lambda _: httpx.Response(200, json={"output": {"task_status": "FAILED"}, "usage": usage})).generate(video(existing_task_id="t"))
+    assert err.value.submission_state == "failed" and err.value.actual_cost_fen == expected
+
+
+def test_documented_oss_accelerate_result_domain_is_allowed_without_credentials():
+    def handler(req):
+        if req.url.host == "dashscope.aliyuncs.com":
+            return httpx.Response(200, json={"output": {"task_status": "SUCCEEDED", "video_url": "https://dashscope-a717.oss-accelerate.aliyuncs.com/synthetic.mp4?Expires=synthetic"}, "usage": {"duration": 5}})
+        assert req.url.host == "dashscope-a717.oss-accelerate.aliyuncs.com"
+        assert "authorization" not in req.headers
+        return httpx.Response(200, content=MP4, headers={"content-type": "video/mp4"})
+    assert adapter(handler).generate(video(existing_task_id="t")).actual_cost_fen == 500
