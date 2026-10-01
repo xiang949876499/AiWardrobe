@@ -139,6 +139,8 @@ def confirm_quality(project_id:str,asset_id:str,body:QualityConfirmation,actor=D
         raise HTTPException(404,'PHOTO_NOT_FOUND')
     if not asset.quality.get('usable'):
         raise HTTPException(409,'PHOTO_UNUSABLE')
+    from app.wedding_retention import touch_activity
+    touch_activity(db,project)
     asset.quality_confirmed_at=utc_now() if body.confirmed else None
     db.commit()
     return dict(asset_id=asset.id,confirmed_at=asset.quality_confirmed_at)
@@ -208,6 +210,8 @@ def primary_photo(project_id:str,person_key:str,body:PrimaryRequest,actor=Depend
                 if render.status in ('queued','processing'):
                     render.status='cancelled'
         person.primary_photo_asset_id=asset.id
+        from app.wedding_retention import touch_activity
+        touch_activity(db,project)
     db.commit()
     return dict(person_key=person_key,primary_photo_asset_id=asset.id,version=project.current_version,
         affected_shot_ids=affected,regeneration_required=bool(affected),
@@ -230,6 +234,8 @@ def project_music(project_id:str,body:MusicRequest,actor=Depends(get_wedding_act
     require_project_owner(db,actor,project_id)
     project,_=scoped_project(db,actor,project_id)
     project.selected_music=select_music(body.track_id)
+    from app.wedding_retention import touch_activity
+    touch_activity(db,project)
     db.commit()
     return safe_music(project.selected_music)
 
@@ -317,6 +323,8 @@ def historical_music(snapshot):
 
 
 def new_render(db,project,items,music,restored_from=None):
+    from app.wedding_retention import touch_activity
+    touch_activity(db,project)
     prior=db.scalar(select(RenderVersion).where(RenderVersion.project_id==project.id).order_by(RenderVersion.version.desc()))
     render=RenderVersion(project_id=project.id,project_version=project.current_version,version=prior.version+1 if prior else 1,
         timeline_snapshot=deepcopy(items),music_snapshot=deepcopy(music),restored_from_id=restored_from,

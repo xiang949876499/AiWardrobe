@@ -67,7 +67,12 @@ def test_frame_upload_db_failure_leaves_recoverable_ownership(client,monkeypatch
             raised[0]=True;raise OperationalError('synthetic checkout',{},Exception('DB unavailable'))
     event.listen(engine,'before_cursor_execute',fail_sql);event.listen(engine,'commit',fail_commit);event.listen(engine,'checkout',fail_checkout)
     try:
-        with pytest.raises(OperationalError):process_next_creation_job(storage=Storage())
+        if failure=='connection':
+            # Writer-finished checkpoint is now the first post-upload DB access.
+            # Creation preserves the stage and reports needs_action when that fails.
+            assert process_next_creation_job(storage=Storage()).status=='needs_action'
+        else:
+            with pytest.raises(OperationalError):process_next_creation_job(storage=Storage())
     finally:
         event.remove(engine,'before_cursor_execute',fail_sql);event.remove(engine,'commit',fail_commit);event.remove(engine,'checkout',fail_checkout)
     assert uploaded and raised[0]
@@ -109,6 +114,10 @@ def test_delete_during_upload_fences_attach_and_late_write_is_recoverable(client
     future=utc_now()+timedelta(minutes=20)
     assert cleanup_objects(factory,real,now=future)>=1
     with pytest.raises(FileNotFoundError):real.read(key)
+    # A separate unknown writer (no acknowledged completion) must retain its tombstone.
+    with factory() as db:
+        db.add(WeddingObjectCleanup(object_key=key,project_id=work.project_id,state='deleted',size_bytes=15,cleanup_after=future))
+        db.commit()
     # A writer that outlives even the upload lease remains tracked by tombstone.
     real.put_at(key,b'extremely delayed','image/png')
     cleanup_objects(factory,real,now=future+timedelta(hours=2))

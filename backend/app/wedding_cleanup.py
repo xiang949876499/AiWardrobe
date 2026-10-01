@@ -21,9 +21,11 @@ DELETE_LEASE = timedelta(minutes=2)
 def stage_output(factory, storage, project_id, operation_id, data, suffix, mime):
     key = f'private-wedding/{project_id}/{uuid4().hex}{suffix}'
     with factory() as db:
-        project = db.scalar(select(WeddingProject).where(WeddingProject.id == project_id).with_for_update())
+        from app.wedding_retention import lock_project, check_storage_capacity
+        project = lock_project(db, project_id)
         if project is None or project.status in ('cancelled', 'blocked'):
             raise HTTPException(409, 'OUTPUT_PROJECT_UNAVAILABLE')
+        check_storage_capacity(db, project_id, len(data))
         db.add(WeddingObjectCleanup(object_key=key, project_id=project_id,
             operation_id=operation_id, state='uploading', size_bytes=len(data), cleanup_after=utc_now()+UPLOAD_LEASE))
         db.commit()
@@ -32,7 +34,19 @@ def stage_output(factory, storage, project_id, operation_id, data, suffix, mime)
     except BaseException:
         abandon_stage(factory, key)
         raise
+    finish_writer(factory, key)
     return key
+
+
+def finish_writer(factory, key):
+    # Durable completion is the only proof a remote writer cannot resume later.
+    # If the DB is unavailable, preserve the unknown writer tombstone indefinitely.
+    with factory() as db:
+        row=db.scalar(select(WeddingObjectCleanup).where(WeddingObjectCleanup.object_key==key).with_for_update())
+        if row:
+            row.writer_finished_at=utc_now()
+            if row.state=='deleted': row.state='pending'; row.cleanup_after=utc_now()
+            db.commit()
 
 
 def attach_stage(db, key):
@@ -70,7 +84,7 @@ def queue_project_objects(db, project):
         row = db.get(WeddingObjectCleanup, asset.object_key)
         if row is None:
             db.add(WeddingObjectCleanup(object_key=asset.object_key, project_id=project.id,
-                size_bytes=asset.size_bytes, state='pending', discard_requested=True))
+                size_bytes=asset.size_bytes, state='pending', discard_requested=True, writer_finished_at=utc_now()))
 
 
 def cleanup_objects(factory, storage, *, now=None, limit=20, keys=None):
@@ -89,6 +103,7 @@ def cleanup_objects(factory, storage, *, now=None, limit=20, keys=None):
             if db.scalar(select(WeddingAsset.id).where(WeddingAsset.object_key == key)):
                 db.delete(row); db.commit()
                 continue
+            finished_before_delete = row.writer_finished_at is not None
             token = str(uuid4())
             row.state, row.lease_token, row.cleanup_after = 'cleaning', token, current+DELETE_LEASE
             db.commit()
@@ -103,9 +118,11 @@ def cleanup_objects(factory, storage, *, now=None, limit=20, keys=None):
                 continue
             row.attempts += 1
             row.error_code = error
-            row.state = 'pending' if error else 'deleted'
-            # Retained tombstones retry late writes; Task4 can apply retention
-            # policy once all writer leases and its delivery retention have elapsed.
+            row.state = 'pending' if error or not finished_before_delete else 'deleted'
+            if not error and finished_before_delete:
+                db.delete(row)
+            # Unknown writers retain ownership/capacity and are deleted again;
+            # a confirmed writer is pruned only after a later successful delete.
             row.cleanup_after = current + (timedelta(seconds=30) if error else timedelta(hours=1))
             db.commit()
             completed += not bool(error)

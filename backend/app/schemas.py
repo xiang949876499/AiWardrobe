@@ -573,6 +573,11 @@ class WeddingProjectPatch(BaseModel):
 
 
 class WeddingProjectResponse(BaseModel):
+    final_download_count: int = 0
+    final_download_limit: int = 10
+    preview_bytes_served: int = 0
+    preview_bandwidth_limit_bytes: int = 20 * 1024 ** 3
+    retention_expires_at: datetime | None = None
     id: str
     title: str
     status: str
@@ -634,6 +639,7 @@ class ParticipantSessionResponse(BaseModel):
 
 
 class WeddingAssetResponse(BaseModel):
+    expires_at: datetime | None = None
     id: str
     asset_type: str
     person_key: WeddingPersonKey | None = None
@@ -832,6 +838,10 @@ class WeddingRenderReviewSummary(BaseModel):
 
 
 class RenderVersionResponse(BaseModel):
+    attempts: int = 0
+    error_code: str | None = None
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
     timeline: list[dict] = Field(default_factory=list)
     music: dict = Field(default_factory=dict)
     restored_from_id: str | None = None

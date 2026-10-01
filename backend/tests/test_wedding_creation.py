@@ -185,7 +185,7 @@ def prepare_frames(client, monkeypatch):
         ids = {}
         for key in ('A','B'):
             asset = WeddingAsset(project_id=project, person_key=key, asset_type=WeddingAssetType.PHOTO,
-                object_key=storage.put(project, _png(), '.png', 'image/png'), sha256=key*64,
+                object_key=storage.put(project, _png(), '.png', 'image/png'), sha256=__import__('hashlib').sha256(_png()).hexdigest(),
                 mime='image/png', size_bytes=len(_png()), generated=False)
             db.add(asset); db.flush()
             ids[key] = asset.id
@@ -198,6 +198,12 @@ def prepare_frames(client, monkeypatch):
 
 def test_frames_generate_twelve_scoped_outputs_with_original_photos(client, monkeypatch):
     project, headers, story, photos, ids = prepare_frames(client, monkeypatch)
+    from datetime import timedelta
+    from app.models import utc_now
+    from app.wedding_service import _as_utc
+    delivered=utc_now()-timedelta(days=29)
+    with get_session_factory()() as db:
+        db.get(WeddingProject,project).delivered_at=delivered;db.commit()
     from app.wedding_creation import process_next_creation_job
     demo = build_provider_bundle()
     calls = []
@@ -212,6 +218,9 @@ def test_frames_generate_twelve_scoped_outputs_with_original_photos(client, monk
     result = process_next_creation_job(providers=replace(demo, frame=Frames()))
     assert result.status == 'completed', result
     assert len(calls)==12
+    with get_session_factory()() as db:
+        assets=list(db.scalars(select(WeddingAsset).where(WeddingAsset.project_id==project,WeddingAsset.generated.is_(True))))
+        assert len(assets)==12 and all(_as_utc(a.expires_at)==delivered+timedelta(days=30) for a in assets)
     current = client.get(f'/wedding-projects/{project}/storyboard',headers=headers).json()
     assert all(s['frame_asset_id'] for s in current['shots'])
     assert all(s['frame_asset_id']==ids['A'] for s in current['shots'] if s['shot_type']=='photo')
@@ -477,9 +486,9 @@ def test_video_storage_io_does_not_hold_database_transaction(client):
         def read(self,*args):
             counts.append(factory.kw['bind'].pool.checkedout())
             return real.read(*args)
-        def put(self,*args):
+        def put_at(self,*args):
             counts.append(factory.kw['bind'].pool.checkedout())
-            return real.put(*args)
+            return real.put_at(*args)
         def delete(self,*args):
             return real.delete(*args)
     result=process_claimed_generation_job(factory,claim_next_generation_job(factory),ProviderBundle(character_video=_DemoProvider()),Storage())

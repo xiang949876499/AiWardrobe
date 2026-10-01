@@ -987,13 +987,14 @@ def test_portrait_upload_requires_both_participants_before_storage(client: TestC
     image.save(data, format="PNG")
 
     stored_payloads: list[bytes] = []
-    original_put = WeddingPrivateStorage.put
+    original_put = WeddingPrivateStorage.put_at
 
-    def tracked_put(storage, project_id, payload, suffix, mime):
+    def tracked_put(storage, object_key, payload, mime):
         stored_payloads.append(payload)
-        return original_put(storage, project_id, payload, suffix, mime)
+        assert get_session_factory().kw['bind'].pool.checkedout() == 0
+        return original_put(storage, object_key, payload, mime)
 
-    monkeypatch.setattr(WeddingPrivateStorage, "put", tracked_put)
+    monkeypatch.setattr(WeddingPrivateStorage, "put_at", tracked_put)
 
     def upload(token: str, project_id: str, key: str):
         return client.post(

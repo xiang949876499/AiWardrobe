@@ -61,6 +61,13 @@ from app.wedding_media import (
 from tests.conftest import login
 
 
+@pytest.fixture(autouse=True)
+def unit_candidate_validator(monkeypatch):
+    # These orchestration tests intentionally use opaque fake provider bytes.
+    # Actual validator/FFmpeg acceptance lives in test_wedding_render_media.
+    monkeypatch.setattr(wedding_worker,'validate_candidate_media',lambda output,duration:None)
+
+
 @dataclass(frozen=True)
 class ProjectWork:
     project_id: str
@@ -365,6 +372,10 @@ def test_configured_production_provider_without_credentials_is_explicitly_unavai
 
 def test_success_settles_actual_cost_and_stores_provider_bytes_privately(client, tmp_path, monkeypatch):
     work = _project_with_job(client)
+    from app.wedding_service import _as_utc
+    delivered=utc_now()-timedelta(days=29)
+    with get_session_factory()() as db:
+        db.get(WeddingProject,work.project_id).delivered_at=delivered;db.commit()
     provider = SuccessfulVideoProvider(cost_fen=37)
     settings = Settings(_env_file=None, local_upload_dir=str(tmp_path / "uploads"))
     storage = WeddingPrivateStorage(settings)
@@ -384,6 +395,7 @@ def test_success_settles_actual_cost_and_stores_provider_bytes_privately(client,
         assert ledger.actual_fen == 37 and ledger.released_fen == 963
         assert candidate.actual_cost_fen == 37
         assert asset is not None and asset.generated is True and asset.provider == "test-provider"
+        assert _as_utc(asset.expires_at)==delivered+timedelta(days=30)
         assert project is not None and project.budget_spent_fen == 37 and project.budget_reserved_fen == 0
         assert project.status == WeddingProjectStatus.PREVIEW_REVIEW
         key = asset.object_key
@@ -899,15 +911,16 @@ def test_provider_result_after_project_version_changes_is_discarded_but_cost_is_
         assert ledger.status == BudgetLedgerStatus.SETTLED and ledger.actual_fen == 21
 
 
-def test_render_worker_reports_missing_ffmpeg_without_ready_asset(client, monkeypatch):
+def test_legacy_render_rejects_missing_snapshot_before_missing_ffmpeg(client, monkeypatch):
     work = _project_with_job(client, with_render=True)
     factory = get_session_factory()
-    assert claim_next_render_version(factory) == work.render_id
+    claim = claim_next_render_version(factory)
+    assert claim == work.render_id
     monkeypatch.setattr("app.wedding_media.shutil.which", lambda _: None)
     renderer = FFmpegRenderer(Settings(_env_file=None, wedding_music_file="", wedding_music_license_id=""), ffmpeg_path=None)
-    result = process_claimed_render_version(factory, work.render_id, WeddingPrivateStorage(Settings(_env_file=None)), renderer)
+    result = process_claimed_render_version(factory, claim, WeddingPrivateStorage(Settings(_env_file=None)), renderer)
     assert result.status == "failed"
-    assert result.error_code == "FFMPEG_UNAVAILABLE"
+    assert result.error_code == "RENDER_HISTORY_INVALID"
     with factory() as db:
         render = db.get(RenderVersion, work.render_id)
         audit = db.execute(
@@ -918,21 +931,22 @@ def test_render_worker_reports_missing_ffmpeg_without_ready_asset(client, monkey
         ).scalar_one()
         assert render is not None and render.status == RenderVersionStatus.FAILED
         assert render.preview_asset_id is None and render.export_asset_id is None
-        assert audit.metadata_json == {"error_code": "FFMPEG_UNAVAILABLE"}
+        assert audit.metadata_json == {"error_code": "RENDER_HISTORY_INVALID"}
 
 
-def test_render_worker_persists_missing_music_license_blocker(client):
+def test_legacy_render_cannot_reconstruct_mutable_inputs_with_ffmpeg_present(client):
     work = _project_with_job(client, with_render=True)
     factory = get_session_factory()
-    assert claim_next_render_version(factory) == work.render_id
+    claim = claim_next_render_version(factory)
+    assert claim == work.render_id
     renderer = FFmpegRenderer(
         Settings(_env_file=None, wedding_music_file="", wedding_music_license_id=""),
         ffmpeg_path="ffmpeg",
     )
     result = process_claimed_render_version(
-        factory, work.render_id, WeddingPrivateStorage(get_settings()), renderer
+        factory, claim, WeddingPrivateStorage(get_settings()), renderer
     )
-    assert result.error_code == "MUSIC_LICENSE_REQUIRED"
+    assert result.error_code == "RENDER_HISTORY_INVALID"
     with factory() as db:
         render = db.get(RenderVersion, work.render_id)
         assert render is not None and render.status == RenderVersionStatus.FAILED
@@ -943,7 +957,7 @@ def test_render_worker_persists_missing_music_license_blocker(client):
                 WeddingAuditEvent.action == "render.failed",
             )
         ).scalar_one()
-        assert audit.metadata_json == {"error_code": "MUSIC_LICENSE_REQUIRED"}
+        assert audit.metadata_json == {"error_code": "RENDER_HISTORY_INVALID"}
 
 
 def test_renderer_blocks_when_music_license_is_missing_even_if_ffmpeg_exists(tmp_path):

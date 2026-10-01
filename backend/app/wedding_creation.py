@@ -16,6 +16,7 @@ from app.database import get_db, get_session_factory
 from app.models import (WeddingProject, WeddingCreationJob, WeddingBillingReceipt, StoryVersion,
     StoryFact, StoryboardShot, WeddingAsset, WeddingAssetType, utc_now)
 from app.wedding_accounting import reserve, settle, lock_account
+from app.wedding_retention import retention_deadline
 from app.wedding_media import build_provider_bundle, StoryStructureRequest, FrameGenerationRequest, ProviderUnavailable
 from app.wedding_references import selected_references, consent_provenance
 from app.wedding_service import (get_wedding_actor, require_project_owner, WeddingPrivateStorage,
@@ -102,10 +103,7 @@ def locked_owner(db, actor, project_id):
     return db.scalar(select(WeddingProject).where(WeddingProject.id == project_id).with_for_update().execution_options(populate_existing=True))
 
 
-def check_storage_capacity(db, project_id, additional_bytes):
-    used = db.scalar(select(func.coalesce(func.sum(WeddingAsset.size_bytes), 0)).where(WeddingAsset.project_id == project_id))
-    if used + additional_bytes > 2 * 1024 ** 3:
-        raise HTTPException(409, 'PROJECT_STORAGE_LIMIT')
+from app.wedding_retention import check_storage_capacity
 
 
 def enqueue(db, actor, project_id, body, key, kind):
@@ -421,6 +419,8 @@ def process_next_creation_job(session_factory=None, providers=None, storage=None
                     mime, suffix, width, height = _validate_image(output.data, output.mime, 'storyboard_frame')
                     from app.wedding_cleanup import stage_output
                     object_key = stage_output(factory, storage, receipt_project_id, operation_key, output.data, suffix, mime)
+            except HTTPException as exc:
+                error = str(exc.detail)
             except Exception:
                 error = 'PROVIDER_RESULT_INVALID'
         try:
@@ -434,7 +434,7 @@ def process_next_creation_job(session_factory=None, providers=None, storage=None
                 try:
                     fence(db, project, job)
                     if kind == 'frame' and not error:
-                        check_storage_capacity(db, project.id, len(output.data))
+                        check_storage_capacity(db, project.id, 0)
                 except HTTPException as exc:
                     error = str(exc.detail)
                 if output.actual_cost_fen > receipt.reserved_fen:
@@ -456,7 +456,7 @@ def process_next_creation_job(session_factory=None, providers=None, storage=None
                     asset = WeddingAsset(project_id=project.id, asset_type=WeddingAssetType.GENERATED_FRAME,
                         object_key=object_key, sha256=hashlib.sha256(output.data).hexdigest(), mime=mime,
                         size_bytes=len(output.data), width=width, height=height, generated=True,
-                        provider=output.provider, expires_at=utc_now()+timedelta(days=30))
+                        provider=output.provider, expires_at=retention_deadline(project))
                     db.add(asset)
                     db.flush()
                     db.get(StoryboardShot, operation).frame_asset_id = asset.id

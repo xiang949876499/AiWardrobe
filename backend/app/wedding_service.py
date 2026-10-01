@@ -431,12 +431,26 @@ class WeddingPrivateStorage:
         path.write_bytes(data)
 
     def read(self, key: str) -> bytes:
+        self._local_path(key)
+        limit = 512 * 1024 ** 2
         if self.settings.storage_driver == "s3":
             response = self._s3_client().get_object(Bucket=self.settings.wedding_s3_bucket, Key=key)
-            return response["Body"].read()
-        return self._local_path(key).read_bytes()
+            try:
+                if response.get("ContentLength", 0) > limit:
+                    raise OSError("PRIVATE_OBJECT_SIZE_LIMIT")
+                data = response["Body"].read(limit + 1)
+                if len(data) > limit:
+                    raise OSError("PRIVATE_OBJECT_SIZE_LIMIT")
+                return data
+            finally:
+                response["Body"].close()
+        path = self._local_path(key)
+        if path.stat().st_size > limit:
+            raise OSError("PRIVATE_OBJECT_SIZE_LIMIT")
+        return path.read_bytes()
 
     def delete(self, key: str) -> None:
+        self._local_path(key)
         if self.settings.storage_driver == "s3":
             self._s3_client().delete_object(Bucket=self.settings.wedding_s3_bucket, Key=key)
             return
@@ -456,9 +470,11 @@ class WeddingPrivateStorage:
 
     def _s3_client(self):
         import boto3
+        from botocore.config import Config
 
         return boto3.client(
             "s3",
+            config=Config(connect_timeout=self.settings.wedding_s3_connect_timeout_seconds, read_timeout=self.settings.wedding_s3_read_timeout_seconds, retries={"total_max_attempts": 2, "mode": "standard"}),
             endpoint_url=self.settings.s3_endpoint_url,
             region_name=self.settings.s3_region,
             aws_access_key_id=self.settings.s3_access_key_id,

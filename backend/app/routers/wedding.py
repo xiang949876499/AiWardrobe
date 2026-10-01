@@ -12,7 +12,7 @@ import jwt
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import Response
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -112,8 +112,13 @@ ALLOWED_ASSET_TYPES = {item.value for item in WeddingAssetType}
 
 
 def _project_response(project: WeddingProject) -> WeddingProjectResponse:
+    from app.wedding_retention import retention_deadline
     return WeddingProjectResponse(
         id=project.id,
+        final_download_count=project.final_download_count,
+        preview_bytes_served=project.preview_bytes_served,
+        preview_bandwidth_limit_bytes=get_settings().wedding_preview_bandwidth_bytes,
+        retention_expires_at=retention_deadline(project),
         title=project.title,
         status=str(project.status),
         version=project.current_version,
@@ -131,6 +136,7 @@ def _project_response(project: WeddingProject) -> WeddingProjectResponse:
 def _asset_response(asset: WeddingAsset) -> WeddingAssetResponse:
     return WeddingAssetResponse(
         id=asset.id,
+        expires_at=asset.expires_at,
         asset_type=str(asset.asset_type),
         person_key=asset.person_key,
         mime=asset.mime,
@@ -203,6 +209,7 @@ def _render_response(
         music={k:v for k,v in render.music_snapshot.items() if k != "path"},
         restored_from_id=render.restored_from_id,
         invalidated_at=render.invalidated_at,
+        attempts=render.attempts, error_code=render.error_code, started_at=render.started_at, updated_at=render.updated_at,
         project_version=render.project_version,
         version=render.version,
         status=render.status,
@@ -252,7 +259,9 @@ def _record_audit(
     metadata: dict[str, object] | None = None,
 ) -> None:
     from app.models import WeddingAuditEvent
-
+    if project.status not in ('cancelled','blocked') and not any(word in action for word in ('deleted','revoked','cancelled')):
+        from app.wedding_retention import touch_activity
+        touch_activity(db,project)
     db.add(
         WeddingAuditEvent(
             project_id=project.id,
@@ -318,6 +327,8 @@ def _validate_image(data: bytes, declared_mime: str | None, asset_type: str) -> 
         with Image.open(io.BytesIO(data)) as image:
             image_format = image.format
             width, height = image.size
+            if width * height > 24_000_000 or max(width,height)>10000:
+                raise HTTPException(413,"IMAGE_PIXELS_LIMIT")
             image.verify()
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise HTTPException(status_code=415, detail="INVALID_IMAGE") from exc
@@ -336,7 +347,10 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
     project = db.get(WeddingProject, asset.project_id)
     if asset.invalidated_at or (asset.expires_at and _as_utc(asset.expires_at) <= utc_now()):
         return False
-    if project is None:
+    if project is None or project.status in ("cancelled","blocked"):
+        return False
+    from app.wedding_retention import asset_expired
+    if asset_expired(project,asset):
         return False
     if actor.kind == "owner":
         if actor.owner_id != project.owner_id:
@@ -744,6 +758,11 @@ def delete_wedding_project(
     from app.wedding_cleanup import queue_project_objects, cleanup_objects
     from app.database import get_session_factory
     queue_project_objects(db, project)
+    # Reviews are not a participant relationship; remove these cross-tree FKs
+    # explicitly before ORM cascades delete participants/shots/renders.
+    review_ids=select(ParticipantReview.id).where(ParticipantReview.project_id==project.id)
+    db.execute(update(ParticipantReview).where(ParticipantReview.carried_from_review_id.in_(review_ids)).values(carried_from_review_id=None))
+    db.execute(delete(ParticipantReview).where(ParticipantReview.project_id==project.id))
     db.delete(project)
     db.commit()  # Access and late-output fences take effect even if S3 is down.
     db.close()
@@ -1141,7 +1160,9 @@ async def upload_wedding_asset(
         or "portrait_processing" not in (subject.consent_scope or [])
     ):
         raise HTTPException(status_code=409, detail="SUBJECT_CONSENT_REQUIRED")
-    validate_active_consents(db, project)
+    def consent_snapshot(people):
+        return [(p.id,_as_utc(p.confirmed_at).isoformat(),p.terms_version,tuple(p.consent_scope or []),tuple(p.provider_list or [])) for p in people]
+    consent_before=consent_snapshot(validate_active_consents(db, project))
     if asset_type == WeddingAssetType.PHOTO.value:
         photo_count = db.execute(
             select(WeddingAsset).where(
@@ -1155,31 +1176,36 @@ async def upload_wedding_asset(
     mime, suffix, width, height = _validate_image(data, file.content_type, asset_type)
     from app.wedding_photo_quality import analyze_photo
     quality = analyze_photo(data, demo=get_settings().wedding_media_mode == "demo") if asset_type == "photo" else {}
-    object_key = storage.put(project.id, data, suffix, mime)
-    asset = WeddingAsset(
-        project_id=project.id,
-        uploaded_by_user_id=actor.owner_id,
-        person_key=person_key,
-        asset_type=WeddingAssetType(asset_type),
-        object_key=object_key,
-        sha256=hashlib.sha256(data).hexdigest(),
-        mime=mime,
-        size_bytes=len(data),
-        width=width,
-        height=height,
-        quality=quality,
-        expires_at=utc_now() + timedelta(days=30),
-    )
-    db.add(asset)
-    _record_audit(db, project, actor, "asset.uploaded", "asset", asset.id, {"asset_type": asset_type})
+    from app.database import get_session_factory
+    from app.wedding_cleanup import stage_output, attach_stage, abandon_stage, cleanup_objects
+    from app.wedding_retention import lock_project, touch_activity
+    pid=project.id
+    db.commit()  # Release request connection before private object I/O.
+    factory=get_session_factory()
+    object_key=stage_output(factory,storage,pid,'upload',data,suffix,mime)
     try:
+        project=lock_project(db,pid)
+        if project is None:
+            raise HTTPException(409,'OUTPUT_PROJECT_UNAVAILABLE')
+        if consent_snapshot(validate_active_consents(db,project)) != consent_before:
+            raise HTTPException(409,'CONSENT_CHANGED')
+        if asset_type=='photo' and db.scalar(select(func.count()).select_from(WeddingAsset).where(
+            WeddingAsset.project_id==pid,WeddingAsset.asset_type==WeddingAssetType.PHOTO))>=MAX_PROJECT_PHOTOS:
+            raise HTTPException(413,'PROJECT_PHOTO_LIMIT_EXCEEDED')
+        attach_stage(db,object_key)
+        deadline=touch_activity(db,project)
+        asset=WeddingAsset(project_id=pid,uploaded_by_user_id=actor.owner_id,person_key=person_key,
+            asset_type=WeddingAssetType(asset_type),object_key=object_key,sha256=hashlib.sha256(data).hexdigest(),
+            mime=mime,size_bytes=len(data),width=width,height=height,quality=quality,expires_at=deadline)
+        db.add(asset);db.flush()
+        _record_audit(db,project,actor,'asset.uploaded','asset',asset.id,{'asset_type':asset_type})
         db.commit()
-    except Exception:
-        db.rollback()
-        storage.delete(object_key)
-        raise
-    db.refresh(asset)
-    return _asset_response(asset)
+        return _asset_response(asset)
+    finally:
+        db.close()
+        abandon_stage(factory,object_key)
+        cleanup_objects(factory,storage,keys=[object_key])
+
 
 
 @router.get("/wedding-assets/{asset_id}")
@@ -1189,15 +1215,33 @@ def read_wedding_asset(
     db: Session = Depends(get_db),
     storage: WeddingPrivateStorage = Depends(private_storage),
 ) -> Response:
-    asset = db.get(WeddingAsset, asset_id)
-    if asset is None or not _can_read_asset(db, asset, actor):
-        raise HTTPException(status_code=404, detail="Wedding asset not found")
-    data = storage.read(asset.object_key)
-    return Response(
-        content=data,
-        media_type=asset.mime,
-        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
-    )
+    return _private_asset_response(db,storage,actor,asset_id)
+
+
+def _private_asset_response(db,storage,actor,asset_id):
+    from app.wedding_retention import lock_project, reserve_egress
+    pid=db.scalar(select(WeddingAsset.project_id).where(WeddingAsset.id==asset_id))
+    project=lock_project(db,pid) if pid else None
+    asset=db.scalar(select(WeddingAsset).where(WeddingAsset.id==asset_id).execution_options(populate_existing=True))
+    if project is None or asset is None or not _can_read_asset(db,asset,actor):
+        raise HTTPException(404,'Wedding asset not found')
+    reserve_egress(db,project,asset)
+    key,mime=asset.object_key,asset.mime
+    db.commit()
+    data=storage.read(key)
+    # Revocation/deletion while a slow object read was running must still deny bytes.
+    db.expire_all()
+    project=lock_project(db,pid)
+    asset=db.get(WeddingAsset,asset_id)
+    if project is None or asset is None or not _can_read_asset(db,asset,actor):
+        raise HTTPException(404,'Wedding asset not found')
+    if asset.asset_type in (WeddingAssetType.PREVIEW_VIDEO,WeddingAssetType.FINAL_VIDEO):
+        from app.wedding_retention import touch_activity
+        touch_activity(db,project)
+    db.commit()
+    return Response(content=data,media_type=mime,
+        headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+
 
 
 @router.delete("/wedding-projects/{project_id}/assets/{asset_id}", status_code=204)
@@ -1217,7 +1261,8 @@ def delete_wedding_asset(
             raise HTTPException(status_code=404, detail="Wedding asset not found")
     elif actor.project_id != project.id or actor.person_key != asset.person_key:
         raise HTTPException(status_code=404, detail="Wedding asset not found")
-    storage.delete(asset.object_key)
+    from app.wedding_retention import lock_project, remove_asset
+    project=lock_project(db,project_id)
     for shot in db.execute(
         select(StoryboardShot).where(
             StoryboardShot.project_id == project.id,
@@ -1230,9 +1275,13 @@ def delete_wedding_asset(
         set_shot_status(shot, StoryboardShotStatus.FRAME_PENDING)
         project.frame_approved_version = None
         _set_project_status(project, WeddingProjectStatus.FRAME_REVIEW)
-    db.delete(asset)
+    remove_asset(db,project,asset)
     _record_audit(db, project, actor, "asset.deleted", "asset", asset_id)
     db.commit()
+    db.close()
+    from app.wedding_cleanup import cleanup_objects
+    from app.database import get_session_factory
+    cleanup_objects(get_session_factory(),storage)
     return Response(status_code=204)
 
 
@@ -1943,11 +1992,7 @@ def get_wedding_preview(
     asset = db.get(WeddingAsset, render.preview_asset_id)
     if asset is None or not _can_read_asset(db, asset, actor):
         raise HTTPException(status_code=404, detail="Wedding preview not found")
-    return Response(
-        content=storage.read(asset.object_key),
-        media_type=asset.mime,
-        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
-    )
+    return _private_asset_response(db,storage,actor,asset.id)
 
 
 @router.post("/wedding-projects/{project_id}/render-reviews", response_model=ParticipantReviewResponse)
@@ -2024,6 +2069,9 @@ def approve_wedding_render(
         raise HTTPException(status_code=404, detail="Render version not found")
     if render.invalidated_at or render.status != "ready" or render.preview_asset_id is None:
         raise HTTPException(status_code=409, detail="RENDER_NOT_READY")
+    preview = db.get(WeddingAsset, render.preview_asset_id)
+    if preview is None or not _can_read_asset(db, preview, actor):
+        raise HTTPException(status_code=409, detail="RENDER_NOT_READY")
     for participant in validate_active_consents(db, project):
         review = db.execute(
             select(ParticipantReview).where(
@@ -2036,6 +2084,8 @@ def approve_wedding_render(
         ).scalar_one_or_none()
         if review is None:
             raise HTTPException(status_code=409, detail="FINAL_IDENTITY_REVIEW_REQUIRED")
+    from app.wedding_retention import touch_activity
+    touch_activity(db,project,delivered=True)
     render.owner_approved_at = utc_now()
     set_render_status(render, RenderVersionStatus.APPROVED)
     _set_project_status(project, WeddingProjectStatus.READY_TO_EXPORT)
@@ -2048,6 +2098,7 @@ def approve_wedding_render(
         music={k:v for k,v in render.music_snapshot.items() if k != "path"},
         restored_from_id=render.restored_from_id,
         invalidated_at=render.invalidated_at,
+        attempts=render.attempts, error_code=render.error_code, started_at=render.started_at, updated_at=render.updated_at,
         project_version=render.project_version,
         version=render.version,
         status=render.status,

@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     wedding_account_budget_limit_fen: int = Field(default=15_000, gt=0)
     wedding_worker_stale_seconds: int = Field(default=1_800, gt=0)
     wedding_ffmpeg_path: str | None = None
+    wedding_ffprobe_path: str | None = None
+    wedding_render_timeout_seconds: int = Field(default=900, ge=30, le=1800)
+    wedding_render_threads: int = Field(default=2, ge=1, le=4)
+    wedding_render_lease_seconds: int = Field(default=120, ge=10, le=3600)
+    wedding_render_max_attempts: int = Field(default=3, ge=1, le=5)
+    wedding_preview_bandwidth_bytes: int = Field(default=20 * 1024 ** 3, ge=0)
+    wedding_subtitle_font: str = "Microsoft YaHei"
+    wedding_s3_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    wedding_s3_read_timeout_seconds: int = Field(default=30, ge=1, le=60)
     wedding_music_catalog_file: str | None = None
     wedding_music_file: str | None = None
     wedding_music_license_id: str | None = None

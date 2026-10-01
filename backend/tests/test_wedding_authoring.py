@@ -186,8 +186,9 @@ def test_worker_uses_immutable_subtitle_after_story_edit(client,monkeypatch):
         def render(self,inputs,**kwargs):
             calls.append([i.subtitle for i in inputs])
             return RenderedVideo(b'fake',90000,True)
-    assert claim_next_render_version()==row['id']
-    process_claimed_render_version(get_session_factory(),row['id'],WeddingPrivateStorage(get_settings()),Renderer())
+    claim=claim_next_render_version()
+    assert claim==row['id']
+    process_claimed_render_version(get_session_factory(),claim,WeddingPrivateStorage(get_settings()),Renderer())
     assert calls[0][0]==row['timeline'][0]['subtitle']
 
 def test_video_batch_reuses_unaffected_candidates(client,monkeypatch):
@@ -564,8 +565,9 @@ def test_worker_rejects_preexisting_render_stamped_with_new_version(client,monke
         db.commit()
     class Renderer:
         def render(self,*args,**kwargs):raise AssertionError('Superseded timeline reached renderer')
-    assert claim_next_render_version()==row['id']
-    result=process_claimed_render_version(get_session_factory(),row['id'],WeddingPrivateStorage(get_settings()),Renderer())
+    claim=claim_next_render_version()
+    assert claim==row['id']
+    result=process_claimed_render_version(get_session_factory(),claim,WeddingPrivateStorage(get_settings()),Renderer())
     assert result.error_code=='TIMELINE_SHOT_VERSION_STALE'
     with get_session_factory()() as db:
         render=db.get(RenderVersion,row['id'])

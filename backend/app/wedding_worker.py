@@ -256,35 +256,7 @@ def _recover_stale_generation_jobs(
     return recovered_ids
 
 
-def claim_next_render_version(session_factory: SessionFactory | None = None) -> str | None:
-    factory = session_factory or get_session_factory()
-    with factory() as db:
-        candidate = db.execute(
-            select(RenderVersion)
-            .where(RenderVersion.status == RenderVersionStatus.QUEUED)
-            .order_by(RenderVersion.created_at, RenderVersion.id)
-            .with_for_update(skip_locked=True)
-            .limit(1)
-        ).scalars().first()
-        if candidate is None:
-            return None
-        set_render_status(candidate, RenderVersionStatus.PROCESSING)
-        result = db.execute(
-            update(RenderVersion)
-            .where(
-                RenderVersion.id == candidate.id,
-                RenderVersion.status == RenderVersionStatus.QUEUED,
-            )
-            .values(status=RenderVersionStatus.PROCESSING)
-            .execution_options(synchronize_session=False)
-        )
-        if result.rowcount != 1:
-            db.rollback()
-            return None
-        db.expire(candidate)
-        db.refresh(candidate)
-        db.commit()
-        return candidate.id
+from app.wedding_render_worker import claim_next_render_version
 
 
 def _status_result(job_id: str, factory: SessionFactory, *, error_code: str | None = None) -> WorkerResult:
@@ -771,6 +743,17 @@ def _record_provider_failure(
     return None
 
 
+def validate_candidate_media(output, duration_ms):
+    if not output.mime.startswith('video/'):
+        return
+    import tempfile
+    from pathlib import Path
+    from app.wedding_render_media import validate_video
+    with tempfile.TemporaryDirectory(prefix='wedding-candidate-') as folder:
+        path=Path(folder)/'candidate.mp4';path.write_bytes(output.data)
+        validate_video(path,get_settings(),duration_ms=duration_ms)
+
+
 def _record_provider_output(
     session_factory: SessionFactory,
     job_id: str,
@@ -812,6 +795,13 @@ def _record_provider_output(
         job.progress_stage = "provider_result_received"
         db.commit()
 
+    try:
+        with session_factory() as db:
+            duration = db.scalar(select(StoryboardShot.duration_ms).where(StoryboardShot.id==shot_id))
+        if duration: validate_candidate_media(output,duration)
+    except ProviderUnavailable as exc:
+        _record_provider_failure(session_factory,job_id,shot_id,exc.code,0,lease_token)
+        return None
     staged_key = None
     persisted_key = None
     suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm"}.get(output.mime)
@@ -822,7 +812,8 @@ def _record_provider_output(
             with session_factory() as db:
                 staged_project_id = db.scalar(select(GenerationJob.project_id).where(GenerationJob.id == job_id))
             if staged_project_id:
-                staged_key = storage.put(staged_project_id, output.data, suffix, output.mime)
+                from app.wedding_cleanup import stage_output
+                staged_key = stage_output(session_factory, storage, staged_project_id, 'video:'+job_id+':'+shot_id, output.data, suffix, output.mime)
         except Exception:
             _record_provider_failure(session_factory, job_id, shot_id, "OUTPUT_PERSISTENCE_FAILED", 0, lease_token)
             return None
@@ -917,8 +908,11 @@ def _record_provider_output(
             # Attach staged private bytes only after all fences; failed commits remove the orphan object.
             try:
                 from app.wedding_creation import check_storage_capacity
-                check_storage_capacity(db, project.id, len(output.data))
+                check_storage_capacity(db, project.id, 0)
+                from app.wedding_cleanup import attach_stage
+                attach_stage(db, staged_key)
                 object_key = staged_key
+                from app.wedding_retention import retention_deadline
                 asset = WeddingAsset(
                     project_id=project.id,
                     asset_type=asset_type,
@@ -928,6 +922,7 @@ def _record_provider_output(
                     size_bytes=len(output.data),
                     generated=True,
                     provider=output.provider,
+                    expires_at=retention_deadline(project),
                 )
                 db.add(asset)
                 db.flush()
@@ -956,183 +951,12 @@ def _record_provider_output(
         return None
     finally:
         if staged_key and staged_key != persisted_key:
-            storage.delete(staged_key)
+            from app.wedding_cleanup import abandon_stage, cleanup_objects
+            abandon_stage(session_factory, staged_key)
+            cleanup_objects(session_factory, storage, keys=[staged_key])
 
 
-def process_claimed_render_version(
-    session_factory: SessionFactory,
-    render_id: str,
-    storage: WeddingPrivateStorage,
-    renderer: FFmpegRenderer,
-) -> WorkerResult:
-    with session_factory() as db:
-        render = db.get(RenderVersion, render_id)
-        if render is None:
-            return WorkerResult(render_id, "missing", "RENDER_NOT_FOUND")
-        if render.status != RenderVersionStatus.PROCESSING:
-            return WorkerResult(render.id, str(render.status), "RENDER_NOT_CLAIMED")
-        project = db.get(WeddingProject, render.project_id)
-        if project is None:
-            return _fail_render(session_factory, render_id, "PROJECT_NOT_FOUND")
-        if project.current_version != render.project_version:
-            return _fail_render(session_factory, render_id, "PROJECT_VERSION_STALE")
-        try:
-            validate_active_consents(db, project)
-        except HTTPException:
-            return _fail_render(session_factory, render_id, "CONSENT_REQUIRED")
-        from app.wedding_authoring import validate_timeline, historical_music
-        if render.invalidated_at:
-            return _fail_render(session_factory, render_id, "RENDER_HISTORY_INVALID")
-        music_snapshot = render.music_snapshot
-        if render.timeline_snapshot:
-            try:
-                validate_timeline(db, project, render.timeline_snapshot)
-                historical_music(music_snapshot)
-            except HTTPException as exc:
-                return _fail_render(session_factory, render_id, str(exc.detail))
-            assets = [db.get(WeddingAsset, item['asset_id']) for item in render.timeline_snapshot]
-            input_specs = [(asset.object_key, asset.mime, item['subtitle'], item['duration_ms'])
-                           for asset,item in zip(assets,render.timeline_snapshot,strict=True)]
-            render_version = render.project_version
-            render_duration = sum(item['duration_ms'] for item in render.timeline_snapshot)
-            has_demo_asset = any(asset.provider == 'local_demo' for asset in assets)
-        else:
-            story = db.execute(
-                select(StoryVersion).where(
-                    StoryVersion.project_id == project.id,
-                    StoryVersion.version == render.project_version,
-                )
-            ).scalars().first()
-            shots = list(
-                db.execute(
-                    select(StoryboardShot)
-                    .where(StoryboardShot.story_version_id == story.id if story else False)
-                    .order_by(StoryboardShot.shot_index)
-                ).scalars()
-            )
-            if not story or len(shots) != len(render.input_asset_ids) or not shots:
-                return _fail_render(session_factory, render_id, "RENDER_INPUTS_STALE")
-            render_inputs: list[RenderInput] = []
-            assets: list[WeddingAsset] = []
-            for shot, asset_id in zip(shots, render.input_asset_ids, strict=True):
-                selected_asset_id = shot.selected_asset_id
-                if shot.selected_candidate_id:
-                    candidate = db.get(ShotCandidate, shot.selected_candidate_id)
-                    if candidate is None or candidate.shot_id != shot.id:
-                        return _fail_render(session_factory, render_id, "SELECTED_CANDIDATE_MISSING")
-                    selected_asset_id = candidate.asset_id
-                if selected_asset_id != asset_id:
-                    return _fail_render(session_factory, render_id, "RENDER_INPUTS_STALE")
-                asset = db.get(WeddingAsset, asset_id)
-                if asset is None or asset.project_id != project.id:
-                    return _fail_render(session_factory, render_id, "RENDER_ASSET_MISSING")
-                assets.append(asset)
-                render_inputs.append(RenderInput(storage.read(asset.object_key), asset.mime, shot.subtitle, shot.duration_ms))
-            render_version = render.project_version
-            render_duration = sum(shot.duration_ms for shot in shots)
-            has_demo_asset = any(asset.provider == "local_demo" for asset in assets)
-            input_specs = None
-        db.commit()
-
-    if input_specs is not None:
-        render_inputs = [RenderInput(storage.read(key), mime, subtitle, duration) for key,mime,subtitle,duration in input_specs]
-    demo = get_settings().wedding_media_mode.strip().lower() == "demo" or has_demo_asset
-    try:
-        # Preview is always watermarked and silent for local demo assets; export retains that label too.
-        music_args = {"music_snapshot": music_snapshot} if not demo else {}
-        preview = renderer.render(render_inputs, demo=demo, resolution=(1280, 720), **music_args)
-        export = renderer.render(render_inputs, demo=demo, resolution=(1920, 1080), **music_args)
-    except ProviderUnavailable as exc:
-        return _fail_render(session_factory, render_id, exc.code)
-
-    stored_keys: list[str] = []
-    try:
-        with session_factory() as db:
-            render = db.get(RenderVersion, render_id)
-            project = (
-                db.execute(
-                    select(WeddingProject)
-                    .where(WeddingProject.id == render.project_id)
-                    .with_for_update()
-                ).scalar_one_or_none()
-                if render is not None
-                else None
-            )
-            if render is None or project is None:
-                return _fail_render(session_factory, render_id, "RENDER_NOT_FOUND")
-            db.refresh(render)
-            if render.invalidated_at or render.status != RenderVersionStatus.PROCESSING:
-                return WorkerResult(render.id, str(render.status), "RENDER_CANCELLED")
-            if project.current_version != render_version or render.project_version != render_version:
-                db.rollback()
-                return _fail_render(session_factory, render_id, "PROJECT_VERSION_STALE")
-            validate_active_consents(db, project)
-            if render.timeline_snapshot:
-                validate_timeline(db, project, render.timeline_snapshot)
-            preview_key = storage.put(project.id, preview.data, ".mp4", "video/mp4")
-            stored_keys.append(preview_key)
-            export_key = storage.put(project.id, export.data, ".mp4", "video/mp4")
-            stored_keys.append(export_key)
-            preview_asset = WeddingAsset(
-                project_id=project.id,
-                asset_type=WeddingAssetType.PREVIEW_VIDEO,
-                object_key=preview_key,
-                sha256=hashlib.sha256(preview.data).hexdigest(),
-                mime="video/mp4",
-                size_bytes=len(preview.data),
-                generated=True,
-                provider="local_demo" if demo else "ffmpeg",
-            )
-            export_asset = WeddingAsset(
-                project_id=project.id,
-                asset_type=WeddingAssetType.FINAL_VIDEO,
-                object_key=export_key,
-                sha256=hashlib.sha256(export.data).hexdigest(),
-                mime="video/mp4",
-                size_bytes=len(export.data),
-                generated=True,
-                provider="local_demo" if demo else "ffmpeg",
-            )
-            db.add_all([preview_asset, export_asset])
-            db.flush()
-            render.preview_asset_id = preview_asset.id
-            render.export_asset_id = export_asset.id
-            render.output_duration_ms = render_duration
-            set_render_status(render, RenderVersionStatus.READY)
-            db.commit()
-            return WorkerResult(render.id, str(render.status))
-    except HTTPException:
-        with session_factory() as db:
-            project = db.get(WeddingProject, db.get(RenderVersion, render_id).project_id)
-            version_changed = project is None or project.current_version != render_version
-        return _fail_render(session_factory, render_id, "PROJECT_VERSION_STALE" if version_changed else "CONSENT_REQUIRED")
-    except Exception:
-        for key in stored_keys:
-            storage.delete(key)
-        return _fail_render(session_factory, render_id, "OUTPUT_PERSISTENCE_FAILED")
-
-
-def _fail_render(session_factory: SessionFactory, render_id: str, error_code: str) -> WorkerResult:
-    with session_factory() as db:
-        render = db.get(RenderVersion, render_id)
-        if render is None:
-            return WorkerResult(render_id, "missing", "RENDER_NOT_FOUND")
-        if render.status in {RenderVersionStatus.QUEUED, RenderVersionStatus.PROCESSING}:
-            set_render_status(render, RenderVersionStatus.FAILED)
-        db.add(
-            WeddingAuditEvent(
-                project_id=render.project_id,
-                actor_kind="worker",
-                actor_id=None,
-                action="render.failed",
-                target_type="render_version",
-                target_id=render.id,
-                project_version=render.project_version,
-                metadata_json={"error_code": error_code},
-            )
-        )
-        db.commit()
-        return WorkerResult(render.id, str(render.status), error_code)
+from app.wedding_render_worker import process_claimed_render_version
 
 
 def process_next_generation_job(
@@ -1176,7 +1000,8 @@ def process_next_render_version(
 def run_worker_once() -> list[WorkerResult]:
     results: list[WorkerResult] = []
     from app.wedding_cleanup import cleanup_objects
-    cleanup_objects(get_session_factory(), WeddingPrivateStorage(get_settings()))
+    from app.wedding_retention import expire_assets
+    expire_assets(get_session_factory(), WeddingPrivateStorage(get_settings()))
     from app.wedding_creation import process_next_creation_job
     creation = process_next_creation_job()
     if creation is not None:
