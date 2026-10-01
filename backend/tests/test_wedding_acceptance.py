@@ -447,3 +447,17 @@ def test_placeholder_offline_manifest_is_incomplete_without_attesting_consent(tm
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "INCOMPLETE" and output["prepared"] is False
     assert runner.main(["--manifest", str(path), "--stage", "preflight"]) == 2
+
+
+def test_failed_unscoped_jobs_cannot_disappear_from_motion_attempts():
+    snap = snapshot()
+    snap["jobs"] = [dict(id=f"lost{i}", project_version=1, status="failed", total_shots=1) for i in range(3)]
+    row = runner.assess(manifest()["samples"][0], snap, final_render(snap), evidence())
+    assert row["motion_passes"] == 0
+    assert row["selected_evidence"][0]["attempts"] == 4
+
+
+def test_story_must_start_with_exact_standard_composition():
+    snap = snapshot(); snap["story"]["shots"][7].update(shot_type="scene_ai", person_keys=[])
+    with pytest.raises(runner.Rejected, match="STANDARD_STORY_COMPOSITION_REQUIRED"):
+        runner.check_preflight(manifest()["samples"][0], snap)
