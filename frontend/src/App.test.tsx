@@ -347,7 +347,8 @@ describe("AiWardrobe app", () => {
     window.history.replaceState({}, "", "/");
   });
 
-  test("restores the participant project from session storage without replacing the wardrobe JWT", async () => {
+  test("restores the participant project through explicit role selection without replacing the wardrobe JWT", async () => {
+    const user = userEvent.setup();
     const projectId = "project-session-1";
     const participantToken = "wedding-session-token";
     localStorage.setItem("aiwardrobe_token", "wardrobe-jwt-stays");
@@ -372,6 +373,7 @@ describe("AiWardrobe app", () => {
     render(<App />);
 
     expect(await screen.findByText("夏日婚礼")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", {name:"切换 B 方本人"}));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([, init]) => new Headers(init?.headers).get("Authorization") === `Bearer ${participantToken}`)).toBe(true));
     expect(localStorage.getItem("aiwardrobe_token")).toBe("wardrobe-jwt-stays");
     expect(sessionStorage.getItem(`wedding_participant:${projectId}`)).toBe(participantToken);

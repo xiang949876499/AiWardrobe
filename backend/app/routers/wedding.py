@@ -148,8 +148,9 @@ def _asset_response(asset: WeddingAsset) -> WeddingAssetResponse:
     )
 
 
-def _story_response(story: StoryVersion) -> StoryVersionResponse:
+def _story_response(story: StoryVersion, fingerprint: str | None = None) -> StoryVersionResponse:
     return StoryVersionResponse(
+        draft_fingerprint=fingerprint,
         id=story.id,
         version=story.version,
         story_text=story.story_text,
@@ -585,6 +586,8 @@ def get_current_wedding_storyboard(
     story = _current_story(db, project)
     response = _story_response(story)
     if actor.kind == "owner":
+        from app.wedding_creation import draft_fingerprint
+        response.draft_fingerprint = draft_fingerprint(db, project)
         return response
     if story.status != StoryVersionStatus.APPROVED:
         raise HTTPException(status_code=409, detail="STORYBOARD_NOT_APPROVED")
@@ -1285,14 +1288,25 @@ def delete_wedding_asset(
     return Response(status_code=204)
 
 
+def _locked_draft_project(db, actor, project_id, expected):
+    require_project_owner(db, actor, project_id)
+    from app.wedding_retention import lock_project
+    from app.wedding_creation import draft_fingerprint
+    project = lock_project(db, project_id)
+    if expected is not None and expected != draft_fingerprint(db, project):
+        raise HTTPException(409, "DRAFT_CONFLICT")
+    return project
+
+
 @router.post("/wedding-projects/{project_id}/storyboard", response_model=StoryVersionResponse, status_code=201)
 def submit_storyboard(
     project_id: str,
     body: StoryboardSubmitRequest,
+    if_match: str | None = Header(default=None),
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> StoryVersionResponse:
-    project = require_project_owner(db, actor, project_id)
+    project = _locked_draft_project(db, actor, project_id, if_match)
     _check_version(project, body.version)
     existing = db.execute(
         select(StoryVersion).where(StoryVersion.project_id == project.id, StoryVersion.version == body.version)
@@ -1343,17 +1357,19 @@ def submit_storyboard(
     _record_audit(db, project, actor, "storyboard.submitted", "story_version", story.id)
     db.commit()
     db.refresh(story)
-    return _story_response(story)
+    from app.wedding_creation import draft_fingerprint
+    return _story_response(story, draft_fingerprint(db, project))
 
 
 @router.put("/wedding-projects/{project_id}/storyboard", response_model=StoryVersionResponse)
 def update_storyboard_draft(
     project_id: str,
     body: StoryboardSubmitRequest,
+    if_match: str | None = Header(default=None),
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> StoryVersionResponse:
-    project = require_project_owner(db, actor, project_id)
+    project = _locked_draft_project(db, actor, project_id, if_match)
     _check_version(project, body.version)
     story = _current_story(db, project)
     if story.status != StoryVersionStatus.DRAFT or story.owner_approved_at is not None:
@@ -1398,17 +1414,19 @@ def update_storyboard_draft(
     _record_audit(db, project, actor, "storyboard.draft_updated", "story_version", story.id)
     db.commit()
     db.refresh(story)
-    return _story_response(story)
+    from app.wedding_creation import draft_fingerprint
+    return _story_response(story, draft_fingerprint(db, project))
 
 
 @router.post("/wedding-projects/{project_id}/storyboard/approve", response_model=StoryVersionResponse)
 def approve_storyboard(
     project_id: str,
     body: VersionRequest,
+    if_match: str | None = Header(default=None),
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> StoryVersionResponse:
-    project = require_project_owner(db, actor, project_id)
+    project = _locked_draft_project(db, actor, project_id, if_match)
     _check_version(project, body.version)
     story = _current_story(db, project)
     if story.owner_approved_at is not None or not story.facts or not story.shots:
@@ -1435,8 +1453,11 @@ def approve_storyboard_frames(
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> StoryVersionResponse:
-    project = require_project_owner(db, actor, project_id)
+    require_project_owner(db, actor, project_id)
+    from app.wedding_retention import lock_project
+    project = lock_project(db, project_id)
     _check_version(project, body.version)
+    validate_active_consents(db, project)
     story = _current_story(db, project)
     if story.owner_approved_at is None or story.status != "approved":
         raise HTTPException(status_code=409, detail="STORYBOARD_APPROVAL_REQUIRED")
@@ -1471,8 +1492,15 @@ def approve_storyboard_frames(
         }:
             raise HTTPException(status_code=422, detail="FRAME_ASSET_INVALID")
         shot = shots[shot_id]
+        if shot.shot_type == "photo" and (
+            asset.asset_type != WeddingAssetType.PHOTO
+            or asset.generated
+            or asset.person_key not in {"A", "B"}
+        ):
+            raise HTTPException(422, "PHOTO_FRAME_ASSET_INVALID")
         if (
-            asset.asset_type == WeddingAssetType.PHOTO
+            shot.shot_type != "photo"
+            and asset.asset_type == WeddingAssetType.PHOTO
             and shot.person_keys
             and asset.person_key not in shot.person_keys
         ):
@@ -1480,11 +1508,29 @@ def approve_storyboard_frames(
         from app.wedding_authoring import valid_asset
         if not valid_asset(asset, project.id):
             raise HTTPException(422, "FRAME_ASSET_INVALID")
+        if shot.shot_type == "photo":
+            # Explicit original-photo assignment is also the render selection.
+            # Derive identity scope from the uploaded subject, never from an AI
+            # story's empty photo scope. Unchanged approvals retain reviews.
+            if (shot.frame_asset_id != asset_id or shot.selected_asset_id != asset_id
+                    or shot.selected_candidate_id is not None
+                    or shot.person_keys != [asset.person_key]):
+                for review in list(shot.reviews):
+                    db.delete(review)
+                for render in db.scalars(select(RenderVersion).where(RenderVersion.project_id == project.id)):
+                    if any(item.get("shot_id") == shot.id for item in render.timeline_snapshot):
+                        render.invalidated_at = utc_now()
+                        if render.status in ("queued", "processing"):
+                            render.status = RenderVersionStatus.CANCELLED
+                shot.person_keys = [asset.person_key]
+                shot.selected_asset_id = asset_id
+                shot.selected_candidate_id = None
         if shot.frame_asset_id != asset_id or shot.status in ("frame_pending", "draft"):
             shot.frame_asset_id = asset_id
             shot.status = StoryboardShotStatus.FRAME_APPROVED
     project.frame_approved_version = project.current_version
-    _set_project_status(project, WeddingProjectStatus.READY_TO_GENERATE)
+    if project.status == WeddingProjectStatus.FRAME_REVIEW:
+        _set_project_status(project, WeddingProjectStatus.READY_TO_GENERATE)
     _record_audit(db, project, actor, "frames.approved", "story_version", story.id)
     db.commit()
     db.refresh(story)

@@ -21,6 +21,7 @@ import type {
   WeddingStoryboard,
   WeddingStoryDraft,
   WeddingStyle,
+  WeddingCreationJob, WeddingPhotoReadiness, WeddingMusicTrack,
 } from "./types";
 
 const TOKEN_KEY = "aiwardrobe_token";
@@ -307,16 +308,17 @@ export function fetchWeddingStoryboard(token: string, projectId: string) {
   return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard`, {}, token);
 }
 
-export function saveWeddingStoryboard(token: string, projectId: string, body: WeddingStoryDraft, update: boolean) {
+export function saveWeddingStoryboard(token: string, projectId: string, body: WeddingStoryDraft, update: boolean, fingerprint?: string) {
   return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard`, {
     method: update ? "PUT" : "POST",
+    headers: fingerprint ? {"If-Match": fingerprint} : {},
     body: JSON.stringify(body)
   }, token);
 }
 
-export function approveWeddingStoryboard(token: string, projectId: string, version: number) {
+export function approveWeddingStoryboard(token: string, projectId: string, version: number, fingerprint?: string) {
   return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard/approve`, {
-    method: "POST", body: JSON.stringify({ version })
+    method: "POST", headers: fingerprint ? {"If-Match": fingerprint} : {}, body: JSON.stringify({ version })
   }, token);
 }
 
@@ -356,9 +358,9 @@ export function acceptWeddingPhotoFallback(token: string, projectId: string, sho
   }, token);
 }
 
-export function createWeddingQuote(token: string, projectId: string) {
+export function createWeddingQuote(token: string, projectId: string, shotId?: string) {
   return request<{ id: string; project_version: number; max_budget_fen: number; currency: "CNY"; price_version: string; issued_at: string; expires_at: string }>(
-    `/wedding-projects/${encodeURIComponent(projectId)}/quote`, {}, token
+    `/wedding-projects/${encodeURIComponent(projectId)}/quote${shotId ? `?${new URLSearchParams({shot_id: shotId})}` : ""}`, {}, token
   );
 }
 
@@ -379,9 +381,9 @@ export function regenerateWeddingShot(token: string, projectId: string, shotId: 
   }, token);
 }
 
-export function createWeddingRender(token: string, projectId: string, version: number) {
+export function createWeddingRender(token: string, projectId: string, version: number, edits: {subtitles?: Record<string,string>; music_track_id?: string; source_render_id?: string} = {}) {
   return request<WeddingRender>(`/wedding-projects/${encodeURIComponent(projectId)}/render`, {
-    method: "POST", body: JSON.stringify({ version })
+    method: "POST", body: JSON.stringify({ version, ...edits })
   }, token);
 }
 
@@ -397,8 +399,43 @@ export function approveWeddingRender(token: string, projectId: string, renderId:
   return request<WeddingRender>(`/wedding-projects/${encodeURIComponent(projectId)}/approve?${params}`, { method: "POST" }, token);
 }
 
-export function exportWeddingRender(token: string, projectId: string) {
+export function exportWeddingRender(token: string, projectId: string, renderId: string) {
   return request<{ render_version_id: string; asset_id: string; mime: string; size_bytes: number }>(
-    `/wedding-projects/${encodeURIComponent(projectId)}/export`, { method: "POST" }, token
+    `/wedding-projects/${encodeURIComponent(projectId)}/export?${new URLSearchParams({render_version_id: renderId})}`, { method: "POST" }, token
   );
+}
+
+const weddingPath = (id: string) => `/wedding-projects/${encodeURIComponent(id)}`;
+export function fetchWeddingCreationJobs(token: string, id: string) {
+  return request<WeddingCreationJob[]>(`${weddingPath(id)}/creation-jobs`, {}, token);
+}
+export function createWeddingStoryJob(token: string, id: string, version: number, story_text: string) {
+  return request<WeddingCreationJob>(`${weddingPath(id)}/story-jobs`, {method:"POST", headers:{"Idempotency-Key": crypto.randomUUID()}, body:JSON.stringify({version,story_text})}, token);
+}
+export function createWeddingFrameJob(token: string, id: string, version: number, photos: Array<{shot_id:string;asset_id:string}>) {
+  return request<WeddingCreationJob>(`${weddingPath(id)}/frame-jobs`, {method:"POST", headers:{"Idempotency-Key":crypto.randomUUID()}, body:JSON.stringify({version,photos})}, token);
+}
+export function cancelWeddingCreationJob(token:string,id:string,jobId:string) {
+  return request<WeddingCreationJob>(`${weddingPath(id)}/creation-jobs/${encodeURIComponent(jobId)}/cancel`, {method:"POST"}, token);
+}
+export function fetchWeddingPhotoReadiness(token: string,id: string) {
+  return request<WeddingPhotoReadiness>(`${weddingPath(id)}/photo-readiness`, {}, token);
+}
+export function analyzeWeddingPhoto(token:string,id:string,assetId:string) {
+  return request(`${weddingPath(id)}/photos/${encodeURIComponent(assetId)}/analyze-quality`, {method:"POST"}, token);
+}
+export function confirmWeddingPhotoQuality(token:string,id:string,assetId:string,confirmed:boolean) {
+  return request(`${weddingPath(id)}/photos/${encodeURIComponent(assetId)}/confirm-quality`, {method:"POST",body:JSON.stringify({confirmed})}, token);
+}
+export function selectWeddingPrimaryPhoto(token:string,id:string,person:"A"|"B",version:number,asset_id:string) {
+  return request<{cost_notice:string; affected_shot_ids:string[]; regeneration_required:boolean}>(`${weddingPath(id)}/participants/${person}/primary-photo`, {method:"PUT",body:JSON.stringify({version,asset_id})}, token);
+}
+export function fetchWeddingMusic(token:string) {
+  return request<{available:boolean; tracks:WeddingMusicTrack[]}>("/wedding-music",{},token);
+}
+export function selectWeddingMusic(token:string,id:string,track_id:string) {
+  return request<WeddingMusicTrack>(`${weddingPath(id)}/music`, {method:"PUT",body:JSON.stringify({track_id})},token);
+}
+export function restoreWeddingRender(token:string,id:string,renderId:string,version:number) {
+  return request<WeddingRender>(`${weddingPath(id)}/renders/${encodeURIComponent(renderId)}/restore`, {method:"POST",body:JSON.stringify({version})}, token);
 }

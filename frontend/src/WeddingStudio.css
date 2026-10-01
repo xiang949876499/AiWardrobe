@@ -10,6 +10,14 @@
   font-family: "Plus Jakarta Sans", "Montserrat", sans-serif;
   font-size: 14px;
 }
+.ws-shell :focus-visible { outline: 3px solid #db2777; outline-offset: 3px; }
+.ws-subtitles { margin: 18px 0; display: grid; gap: 12px; }
+.ws-serverDraft { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ws-subtitles label, .ws-music label { display: grid; gap: 6px; }
+.ws-quality { margin-top: 18px; border-top: 1px solid var(--ws-line); padding-top: 14px; }
+.ws-job code { overflow-wrap: anywhere; }
+.ws-creationJobs progress { max-width: 100%; display: block; accent-color: #db2777; }
+@media (max-width: 800px) { .ws-topActions, .ws-job, .ws-actions { flex-wrap: wrap; } .ws-topbar { height: auto; min-height: 76px; padding: 14px; gap: 12px; flex-wrap: wrap; } .ws-subtitles textarea { width: 100%; } }
 .ws-shell *, .ws-shell *::before, .ws-shell *::after { box-sizing: border-box; }
 .ws-topbar { height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; background: #fff; border-bottom: 1px solid var(--ws-line); }
 .ws-brand { display: flex; align-items: center; gap: 12px; }

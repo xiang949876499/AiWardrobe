@@ -238,11 +238,17 @@ export type WeddingProject = {
   budget_limit_fen: number;
   budget_reserved_fen: number;
   budget_spent_fen: number;
+  final_download_count?: number;
+  final_download_limit?: number;
+  preview_bytes_served?: number;
+  preview_bandwidth_limit_bytes?: number;
+  retention_expires_at?: string;
   created_at: string;
   updated_at: string;
 };
 
 export type WeddingParticipant = {
+  primary_photo_asset_id?: string | null;
   person_key: WeddingPersonKey;
   display_name: string;
   consent_status: "pending" | "active" | "revoked" | "declined";
@@ -255,6 +261,9 @@ export type WeddingProjectDetail = WeddingProject & {
 };
 
 export type WeddingAsset = {
+  expires_at?: string;
+  quality?: WeddingPhotoQuality;
+  quality_confirmed_at?: string | null;
   id: string;
   asset_type: string;
   person_key: WeddingPersonKey | null;
@@ -299,6 +308,7 @@ export type WeddingShot = {
 };
 
 export type WeddingStoryboard = {
+  draft_fingerprint?: string | null;
   id: string;
   version: number;
   story_text: string;
@@ -339,6 +349,14 @@ export type WeddingCandidate = {
 };
 
 export type WeddingRender = {
+  timeline?: Array<{shot_id: string; shot_index: number; subtitle: string; duration_ms: number; asset_id: string}>;
+  music?: WeddingMusicTrack | null;
+  restored_from_id?: string | null;
+  invalidated_at?: string | null;
+  attempts?: number;
+  started_at?: string | null;
+  updated_at?: string;
+  error_code?: string | null;
   id: string;
   project_version: number;
   version: number;
@@ -352,13 +370,18 @@ export type WeddingRender = {
 };
 
 export type WeddingCapabilities = {
-  mode: "disabled" | "demo";
+  mode: "disabled" | "demo" | "live";
   demo_only: boolean;
   providers: Record<string, { provider: string; configured: boolean; available: boolean; reason: string }>;
   ffmpeg_available: boolean;
   licensed_music_available: boolean;
   real_export_available: boolean;
 };
+
+export type WeddingCreationJob = {id: string; project_id: string; kind: "story" | "frame"; version: number; status: "queued" | "processing" | "completed" | "needs_action" | "cancelled"; error_code: string | null; completed_operations: number; total_operations: number; demo: boolean; result_story_id: string | null; created_at: string; updated_at: string};
+export type WeddingPhotoQuality = {usable?: boolean; warnings?: string[]; demo_bypass?: boolean; face_count?: number; limitation?: string};
+export type WeddingPhotoReadiness = {ready: boolean; demo_bypass: boolean; people: Array<{person_key: WeddingPersonKey; usable_count: number; required_count: number; primary_photo_asset_id: string | null; ready: boolean; warnings_unconfirmed: string[]; photos: Array<{asset_id: string; quality: WeddingPhotoQuality; confirmed_at: string | null}>}>};
+export type WeddingMusicTrack = {track_id: string; title: string; license_id: string; license_version: string; valid_from: string; valid_until: string; perpetual_embedded_delivery: boolean; allowed_uses: string[]};
 
 export type WeddingStoryDraft = {
   version: number;

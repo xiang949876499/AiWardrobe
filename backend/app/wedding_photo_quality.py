@@ -17,6 +17,10 @@ def detect_faces(image):
 
 
 def analyze_photo(data, *, demo=False, detector=None):
+    # This detector is CPU-only. OpenCL context initialization from an API
+    # thread can hang native Windows shutdown after Python has already exited.
+    # Set this on each calling thread; OpenCV's OpenCL preference is thread-local.
+    cv2.ocl.setUseOpenCL(False)
     image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     if image is None:
         return dict(usable=False, warnings=['decode_failed'], demo_bypass=False, detector='opencv-haar-v1')

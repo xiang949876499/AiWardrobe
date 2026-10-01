@@ -707,6 +707,7 @@ class StoryboardSubmitRequest(BaseModel):
 
 
 class StoryVersionResponse(BaseModel):
+    draft_fingerprint: str | None = None
     id: str
     version: int
     story_text: str

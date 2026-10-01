@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     wedding_s3_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
     wedding_s3_read_timeout_seconds: int = Field(default=30, ge=1, le=60)
     wedding_music_catalog_file: str | None = None
+    # Set to the original writer/session timezone when upgrading legacy naive PG columns.
+    wedding_legacy_timestamp_timezone: str | None = None
     wedding_music_file: str | None = None
     wedding_music_license_id: str | None = None
 

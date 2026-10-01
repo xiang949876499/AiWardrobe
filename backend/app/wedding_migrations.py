@@ -1,9 +1,20 @@
 """Additive SQLite/PostgreSQL creation migration and once-only account backfill."""
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, literal
 
 
 def migrate_creation(engine):
     with engine.begin() as conn:
+        postgres = conn.dialect.name == 'postgresql'
+        if postgres:
+            from app.config import get_settings
+            # Naive legacy values contain wall time from the writing DB session. Use
+            # its zone explicitly, or an operator-supplied original zone if changed.
+            legacy_zone = get_settings().wedding_legacy_timestamp_timezone or conn.scalar(text("SELECT current_setting('TimeZone')"))
+            if not conn.scalar(text('SELECT 1 FROM pg_timezone_names WHERE name=:zone'), {'zone':legacy_zone}):
+                raise ValueError('WEDDING_LEGACY_TIMESTAMP_TIMEZONE_INVALID')
+            # PostgreSQL utility DDL cannot infer a bind parameter in USING. Compile
+            # the validated zone as a SQLAlchemy-escaped literal, never raw input.
+            zone_literal = str(literal(legacy_zone).compile(dialect=conn.dialect, compile_kwargs={'literal_binds':True}))
         columns = {c['name'] for c in inspect(conn).get_columns('wedding_participants')}
         if 'primary_photo_asset_id' not in columns:
             conn.execute(text('ALTER TABLE wedding_participants ADD COLUMN primary_photo_asset_id VARCHAR(36) REFERENCES wedding_assets(id) ON DELETE SET NULL'))
@@ -14,10 +25,15 @@ def migrate_creation(engine):
             'wedding_render_versions': {'lease_token':'VARCHAR(36)', 'started_at':'TIMESTAMP', 'updated_at':'TIMESTAMP', 'attempts':'INTEGER NOT NULL DEFAULT 0', 'error_code':'VARCHAR(80)', 'timeline_snapshot': "JSON NOT NULL DEFAULT '[]'", 'music_snapshot': "JSON NOT NULL DEFAULT '{}'", 'restored_from_id': 'VARCHAR(36)', 'invalidated_at': 'TIMESTAMP'},
         }
         for table, fields in additions.items():
-            existing = {c['name'] for c in inspect(conn).get_columns(table)}
+            existing = {c['name']: c for c in inspect(conn).get_columns(table)}
             for field, sql_type in fields.items():
                 if field not in existing:
+                    if postgres and sql_type == 'TIMESTAMP':
+                        sql_type = 'TIMESTAMP WITH TIME ZONE'
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {field} {sql_type}'))
+                elif postgres and sql_type == 'TIMESTAMP' and not existing[field]['type'].timezone:
+                    conn.execute(text(f'ALTER TABLE {table} ALTER COLUMN {field} TYPE TIMESTAMP WITH TIME ZONE '
+                        f'USING {field} AT TIME ZONE {zone_literal}'))
         conn.execute(text('UPDATE wedding_projects SET last_activity_at = updated_at WHERE last_activity_at IS NULL'))
         # Legacy NULL asset deadlines get one bounded retention window; existing deadlines stay intact.
         from datetime import datetime, timedelta, timezone

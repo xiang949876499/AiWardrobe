@@ -1,5 +1,5 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 const backendTarget = process.env.VITE_BACKEND_TARGET ?? "http://127.0.0.1:8031";
 
@@ -10,6 +10,8 @@ export default defineConfig({
     port: 5174,
     strictPort: true,
     proxy: {
+      "^/v2(?:/|$)": { target: backendTarget, changeOrigin: true },
+      "^/(?:wedding-capabilities|wedding-projects|wedding-assets|wedding-generation-jobs|wedding-music|participant-reviews|consent-invites)(?:/|$)": { target: backendTarget, changeOrigin: true },
       "/auth": { target: backendTarget, changeOrigin: true },
       "/garments": { target: backendTarget, changeOrigin: true },
       "^/uploads(?:/|$)": { target: backendTarget, changeOrigin: true },
