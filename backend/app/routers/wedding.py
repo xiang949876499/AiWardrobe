@@ -331,6 +331,14 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
     project = db.get(WeddingProject, asset.project_id)
     if project is None:
         return False
+    if actor.kind == "owner":
+        if actor.owner_id != project.owner_id:
+            return False
+    elif actor.kind == "participant":
+        if actor.project_id != project.id or actor.person_key not in {"A", "B"}:
+            return False
+    else:
+        return False
     try:
         validate_active_consents(db, project)
     except HTTPException:
@@ -360,14 +368,8 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
             )
         return db.execute(render_query).scalars().first() is not None
     if actor.kind == "owner":
-        return actor.owner_id == project.owner_id
-    if actor.project_id != project.id or not actor.person_key:
-        return False
-    if asset.asset_type == WeddingAssetType.FINAL_VIDEO:
-        return False
-    if asset.person_key == actor.person_key:
         return True
-    if asset.asset_type == WeddingAssetType.PREVIEW_VIDEO:
+    if asset.person_key == actor.person_key:
         return True
     if asset.asset_type not in {
         WeddingAssetType.PHOTO,
