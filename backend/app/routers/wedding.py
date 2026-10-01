@@ -10,7 +10,7 @@ import jwt
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import Response
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -584,17 +584,47 @@ def confirm_consent_invite(
     ):
         raise HTTPException(status_code=409, detail="CONSENT_INVITE_ALREADY_USED")
     if expires_at <= now:
-        set_invite_status(invite, WeddingInviteStatus.EXPIRED)
-        db.commit()
-        raise HTTPException(status_code=410, detail="CONSENT_INVITE_EXPIRED")
+        expired = db.execute(
+            update(ConsentInvite)
+            .where(
+                ConsentInvite.token_hash == hash_code(token),
+                ConsentInvite.status == WeddingInviteStatus.ACTIVE,
+                ConsentInvite.consumed_at.is_(None),
+                ConsentInvite.revoked_at.is_(None),
+                ConsentInvite.expires_at <= now,
+            )
+            .values(status=WeddingInviteStatus.EXPIRED)
+            .execution_options(synchronize_session=False)
+        )
+        if expired.rowcount == 1:
+            db.commit()
+            raise HTTPException(status_code=410, detail="CONSENT_INVITE_EXPIRED")
+        db.rollback()
+        raise HTTPException(status_code=409, detail="CONSENT_INVITE_ALREADY_USED")
     if body.terms_version != invite.terms_version:
         raise HTTPException(status_code=409, detail="CONSENT_TERMS_VERSION_MISMATCH")
     participant = db.get(WeddingParticipant, invite.participant_id)
     project = db.get(WeddingProject, invite.project_id)
     if participant is None or project is None:
         raise HTTPException(status_code=404, detail="Consent invite not found")
-    invite.consumed_at = now
-    set_invite_status(invite, WeddingInviteStatus.CONSUMED)
+    if body.accepted and not body.display_name:
+        raise HTTPException(status_code=422, detail="DISPLAY_NAME_REQUIRED")
+    claimed = db.execute(
+        update(ConsentInvite)
+        .where(
+            ConsentInvite.token_hash == hash_code(token),
+            ConsentInvite.status == WeddingInviteStatus.ACTIVE,
+            ConsentInvite.consumed_at.is_(None),
+            ConsentInvite.revoked_at.is_(None),
+            ConsentInvite.expires_at > now,
+        )
+        .values(status=WeddingInviteStatus.CONSUMED, consumed_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="CONSENT_INVITE_ALREADY_USED")
+    db.refresh(invite, attribute_names=["status", "consumed_at"])
     if not body.accepted:
         set_consent_status(participant, WeddingConsentStatus.DECLINED)
         participant.session_token_hash = None
@@ -616,8 +646,6 @@ def confirm_consent_invite(
                 "confirmed_at": participant.confirmed_at,
             },
         )
-    if not body.display_name:
-        raise HTTPException(status_code=422, detail="DISPLAY_NAME_REQUIRED")
     participant.display_name = body.display_name
     set_consent_status(participant, WeddingConsentStatus.ACTIVE)
     participant.consent_scope = invite.scope
@@ -780,8 +808,7 @@ async def upload_wedding_asset(
         or "portrait_processing" not in (subject.consent_scope or [])
     ):
         raise HTTPException(status_code=409, detail="SUBJECT_CONSENT_REQUIRED")
-    if asset_type == WeddingAssetType.STORYBOARD_FRAME.value:
-        validate_active_consents(db, project)
+    validate_active_consents(db, project)
     if asset_type == WeddingAssetType.PHOTO.value:
         photo_count = db.execute(
             select(WeddingAsset).where(
