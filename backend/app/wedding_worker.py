@@ -89,6 +89,21 @@ def _locked_generation_job(db: Session, job_id: str) -> GenerationJob | None:
     ).scalars().first()
 
 
+def _lock_project_then_generation_job(
+    db: Session,
+    job_id: str,
+) -> tuple[str | None, WeddingProject | None, GenerationJob | None]:
+    """Lock shared project state before the job row, matching API mutation order."""
+    project_id = db.scalar(select(GenerationJob.project_id).where(GenerationJob.id == job_id))
+    if project_id is None:
+        return None, None, None
+    project = db.execute(
+        select(WeddingProject).where(WeddingProject.id == project_id).with_for_update()
+    ).scalars().first()
+    job = _locked_generation_job(db, job_id)
+    return project_id, project, job
+
+
 def _job_shots(db: Session, job: GenerationJob) -> list[StoryboardShot]:
     statement = select(StoryboardShot).where(StoryboardShot.story_version_id == job.story_version_id)
     if job.target_shot_id is not None:
@@ -153,26 +168,41 @@ def _recover_stale_generation_jobs(
     current_time = now or utc_now()
     stale_before = current_time - timedelta(seconds=get_settings().wedding_worker_stale_seconds)
     with session_factory() as db:
-        stale_ids = list(
+        stale_jobs = list(
             db.execute(
-                select(GenerationJob.id)
+                select(GenerationJob.id, GenerationJob.project_id, GenerationJob.started_at)
                 .where(
                     GenerationJob.status == WeddingJobStatus.PROCESSING,
                     GenerationJob.updated_at < stale_before,
                 )
                 .order_by(GenerationJob.updated_at, GenerationJob.id)
-            ).scalars()
+            ).all()
         )
 
     recovered_ids: list[str] = []
-    for job_id in stale_ids:
+    for job_id, project_id, stale_lease in stale_jobs:
         with session_factory() as db:
+            if project_id is None:
+                continue
+            project = db.execute(
+                select(WeddingProject)
+                .where(WeddingProject.id == project_id)
+                .with_for_update(skip_locked=True)
+            ).scalars().first()
+            if project is None:
+                continue
             job = db.execute(
                 select(GenerationJob)
                 .where(
                     GenerationJob.id == job_id,
+                    GenerationJob.project_id == project_id,
                     GenerationJob.status == WeddingJobStatus.PROCESSING,
                     GenerationJob.updated_at < stale_before,
+                    (
+                        GenerationJob.started_at.is_(None)
+                        if stale_lease is None
+                        else GenerationJob.started_at == stale_lease
+                    ),
                 )
                 .with_for_update(skip_locked=True)
             ).scalars().first()
@@ -212,9 +242,7 @@ def _recover_stale_generation_jobs(
             db.expire(job)
             db.refresh(job)
             if in_flight:
-                project = db.get(WeddingProject, job.project_id)
-                if project is not None:
-                    _restore_project_workflow_state(db, project)
+                _restore_project_workflow_state(db, project)
             db.commit()
             recovered_ids.append(job.id)
     return recovered_ids
@@ -320,14 +348,17 @@ def _finalize_job(
     lease_token: str | None = None,
 ) -> WorkerResult:
     with session_factory() as db:
-        job = _locked_generation_job(db, job_id)
+        project_id, project, job = _lock_project_then_generation_job(db, job_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+        if job.project_id != project_id:
+            return WorkerResult(job.id, str(job.status), "WORKER_PROJECT_CHANGED")
         if lease_token is not None and not _lease_matches(job, lease_token):
             return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
         return _finalize_job_in_session(
             db,
             job,
+            project=project,
             status=status,
             error_code=error_code,
             error_category=error_category,
@@ -339,6 +370,7 @@ def _finalize_job_in_session(
     db: Session,
     job: GenerationJob,
     *,
+    project: WeddingProject | None,
     status: WeddingJobStatus,
     error_code: str | None,
     error_category: str | None = None,
@@ -355,7 +387,6 @@ def _finalize_job_in_session(
     if job.status != status:
         set_job_status(job, status)
     job.finished_at = utc_now()
-    project = db.get(WeddingProject, job.project_id)
     if project is not None:
         _restore_project_workflow_state(db, project)
     db.commit()
@@ -372,16 +403,17 @@ def _dispatch_preflight(
 ) -> tuple[VideoGenerationRequest | None, str | None]:
     """Commit a truthful stage and re-check all gates at the provider dispatch boundary."""
     with session_factory() as db:
-        job = _locked_generation_job(db, job_id)
+        project_id, project, job = _lock_project_then_generation_job(db, job_id)
         if job is None:
             return None, "JOB_NOT_FOUND"
+        if job.project_id != project_id:
+            return None, "WORKER_PROJECT_CHANGED"
         if not _lease_matches(job, lease_token):
             return None, "WORKER_LEASE_STALE"
         if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
             return None, "CANCEL_REQUESTED"
         if job.status != WeddingJobStatus.PROCESSING:
             return None, "JOB_NOT_PROCESSING"
-        project = db.get(WeddingProject, job.project_id)
         if project is None:
             return None, "PROJECT_NOT_FOUND"
         if project.current_version != job.project_version:
@@ -770,15 +802,19 @@ def _record_provider_output(
     # Provider cost is durable before late cancellation/version checks. The
     # result stage is also a recovery marker so a crash here is never retried.
     with session_factory() as db:
-        job = _locked_generation_job(db, job_id)
+        project_id, project, job = _lock_project_then_generation_job(db, job_id)
         shot = db.get(StoryboardShot, shot_id)
-        project = db.get(WeddingProject, job.project_id) if job is not None else None
-        if job is None or shot is None or project is None:
-            if job is None:
-                return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+        if job is None:
+            return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+        if job.project_id != project_id:
+            return WorkerResult(job.id, str(job.status), "WORKER_PROJECT_CHANGED")
+        if project is None:
+            return WorkerResult(job.id, str(job.status), "PROJECT_NOT_FOUND")
+        if shot is None:
             return _finalize_job_in_session(
                 db,
                 job,
+                project=project,
                 status=WeddingJobStatus.FAILED,
                 error_code="SHOT_NOT_FOUND",
             )
@@ -790,6 +826,7 @@ def _record_provider_output(
             return _finalize_job_in_session(
                 db,
                 job,
+                project=project,
                 status=WeddingJobStatus.CANCELLED,
                 error_code=None,
             )
@@ -801,6 +838,7 @@ def _record_provider_output(
             return _finalize_job_in_session(
                 db,
                 job,
+                project=project,
                 status=WeddingJobStatus.FAILED,
                 error_code="PROJECT_VERSION_STALE",
                 error_category="version",
@@ -811,6 +849,7 @@ def _record_provider_output(
             return _finalize_job_in_session(
                 db,
                 job,
+                project=project,
                 status=WeddingJobStatus.CANCELLED,
                 error_code="CONSENT_REQUIRED",
                 error_category="consent",
@@ -823,6 +862,7 @@ def _record_provider_output(
             return _finalize_job_in_session(
                 db,
                 job,
+                project=project,
                 status=WeddingJobStatus.NEEDS_ACTION,
                 error_code="ACTUAL_COST_EXCEEDS_RESERVATION",
                 error_category="budget",

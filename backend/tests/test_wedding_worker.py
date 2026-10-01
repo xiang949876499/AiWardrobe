@@ -10,7 +10,7 @@ from threading import Barrier, Event, Thread
 from PIL import Image
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
 from app.config import Settings, get_settings
@@ -43,7 +43,9 @@ from app.wedding_worker import (
     ClaimedGenerationJob,
     MediaOutput,
     ProviderBundle,
+    _finalize_job,
     _record_provider_output,
+    _recover_stale_generation_jobs,
     claim_next_generation_job,
     claim_next_render_version,
     process_claimed_generation_job,
@@ -684,6 +686,88 @@ def test_old_predispatch_lease_is_rejected_after_stale_reclaim(client, monkeypat
         job = db.get(GenerationJob, work.job_id)
         assert job is not None and job.status == WeddingJobStatus.PROCESSING
         assert job.reserved_amount_fen == 1_000 and job.actual_cost_fen == 0
+
+
+def test_worker_finalization_locks_project_before_job_and_releases_budget(client):
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    engine = factory.kw["bind"]
+    claim = _claim(factory, work.job_id)
+    locked_entities = []
+
+    def capture_lock_order(conn, cursor, statement, parameters, context, executemany):
+        compiled = getattr(context, "compiled", None)
+        compiled_statement = getattr(compiled, "statement", None)
+        if compiled_statement is None or getattr(compiled_statement, "_for_update_arg", None) is None:
+            return
+        entities = getattr(compiled_statement, "column_descriptions", ())
+        if entities:
+            locked_entities.append(entities[0].get("entity"))
+
+    event.listen(engine, "before_cursor_execute", capture_lock_order)
+    try:
+        result = _finalize_job(
+            factory,
+            work.job_id,
+            status=WeddingJobStatus.FAILED,
+            error_code="TEST_FINALIZATION",
+            lease_token=claim.lease_token,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_lock_order)
+
+    assert result.status == "failed"
+    assert locked_entities == [WeddingProject, GenerationJob]
+    with factory() as db:
+        project = db.get(WeddingProject, work.project_id)
+        ledger = db.execute(
+            select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)
+        ).scalar_one()
+        job = db.get(GenerationJob, work.job_id)
+        assert project is not None and project.status == WeddingProjectStatus.READY_TO_GENERATE
+        assert project.budget_reserved_fen == 0
+        assert ledger.status == BudgetLedgerStatus.RELEASED
+        assert job is not None and job.status == WeddingJobStatus.FAILED
+
+
+def test_stale_recovery_locks_project_before_job_and_rotates_lease(client, monkeypatch):
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    monkeypatch.setenv("WEDDING_WORKER_STALE_SECONDS", "120")
+    get_settings.cache_clear()
+    old_claim = _claim(factory, work.job_id)
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None
+        job.updated_at = utc_now() - timedelta(hours=1)
+        job.progress_stage = "claimed"
+        db.commit()
+
+    engine = factory.kw["bind"]
+    locked_entities = []
+
+    def capture_lock_order(conn, cursor, statement, parameters, context, executemany):
+        compiled = getattr(context, "compiled", None)
+        compiled_statement = getattr(compiled, "statement", None)
+        if compiled_statement is None or getattr(compiled_statement, "_for_update_arg", None) is None:
+            return
+        entities = getattr(compiled_statement, "column_descriptions", ())
+        if entities:
+            locked_entities.append(entities[0].get("entity"))
+
+    event.listen(engine, "before_cursor_execute", capture_lock_order)
+    try:
+        recovered = _recover_stale_generation_jobs(factory)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_lock_order)
+
+    assert recovered == [work.job_id]
+    assert locked_entities == [WeddingProject, GenerationJob]
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None and job.status == WeddingJobStatus.QUEUED
+        assert job.started_at is not None
+        assert job.started_at.isoformat() != old_claim.lease_token
 
 
 def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client, monkeypatch):
