@@ -38,6 +38,23 @@ class Settings(BaseSettings):
     ai_model: str = "gpt-4o-mini"
     ai_demo_mode: bool = Field(default=True)
 
+    wedding_media_mode: str = "disabled"
+    wedding_story_provider: str = "disabled"
+    wedding_story_api_key: str | None = None
+    wedding_story_model: str = ""
+    wedding_frame_provider: str = "disabled"
+    wedding_frame_api_key: str | None = None
+    wedding_frame_model: str = ""
+    wedding_character_video_provider: str = "disabled"
+    wedding_character_video_api_key: str | None = None
+    wedding_character_video_model: str = ""
+    wedding_scene_video_provider: str = "disabled"
+    wedding_scene_video_api_key: str | None = None
+    wedding_scene_video_model: str = ""
+    wedding_ffmpeg_path: str | None = None
+    wedding_music_file: str | None = None
+    wedding_music_license_id: str | None = None
+
     outfit_ai_provider: str = "deepseek"
     outfit_ai_base_url: str | None = None
     outfit_ai_api_key: str | None = None

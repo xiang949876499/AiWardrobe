@@ -1,0 +1,553 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+from io import BytesIO
+from pathlib import Path
+
+from PIL import Image
+import pytest
+from sqlalchemy import select
+
+from app.config import Settings, get_settings
+from app.database import get_session_factory
+from app.models import (
+    BudgetLedger,
+    BudgetLedgerStatus,
+    GenerationJob,
+    RenderVersion,
+    RenderVersionStatus,
+    ShotCandidate,
+    StoryVersion,
+    StoryVersionStatus,
+    StoryboardShot,
+    StoryboardShotStatus,
+    WeddingAsset,
+    WeddingAssetType,
+    WeddingJobStatus,
+    WeddingParticipant,
+    WeddingProject,
+    WeddingProjectStatus,
+    WeddingQuote,
+    WeddingAuditEvent,
+    utc_now,
+)
+from app.wedding_service import WeddingPrivateStorage, reserve_generation_budget
+from app.wedding_worker import (
+    MediaOutput,
+    ProviderBundle,
+    claim_next_generation_job,
+    claim_next_render_version,
+    process_claimed_generation_job,
+    process_claimed_render_version,
+)
+from app.wedding_media import (
+    FFmpegRenderer,
+    ProviderUnavailable,
+    build_provider_bundle,
+)
+from tests.conftest import login
+
+
+@dataclass(frozen=True)
+class ProjectWork:
+    project_id: str
+    story_id: str
+    shot_id: str
+    frame_asset_id: str
+    job_id: str
+    render_id: str | None = None
+
+
+def _png() -> bytes:
+    image = Image.new("RGB", (32, 32), color=(180, 80, 120))
+    data = BytesIO()
+    image.save(data, format="PNG")
+    return data.getvalue()
+
+
+def _project_with_job(client, *, with_render: bool = False) -> ProjectWork:
+    token = login(client, "worker-owner@example.com")
+    created = client.post(
+        "/wedding-projects",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"title": "Worker test", "owner_name": "A"},
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    headers = {"Authorization": f"Bearer {token}"}
+    owner_consent = client.post(
+        f"/wedding-projects/{project_id}/self-consent",
+        headers=headers,
+        json={
+            "terms_version": "worker-v1",
+            "scope": ["portrait_processing"],
+            "provider_list": ["local_demo"],
+        },
+    )
+    assert owner_consent.status_code == 200, owner_consent.text
+    invite = client.post(
+        f"/wedding-projects/{project_id}/consent-invites",
+        headers=headers,
+        json={
+            "person_key": "B",
+            "display_name": "B",
+            "provider_list": ["local_demo"],
+            "terms_version": "worker-v1",
+        },
+    )
+    assert invite.status_code == 201, invite.text
+    partner = client.post(
+        f"/consent-invites/{invite.json()['invite_token']}/confirm",
+        json={"accepted": True, "display_name": "B", "terms_version": "worker-v1"},
+    )
+    assert partner.status_code == 200, partner.text
+
+    storage = WeddingPrivateStorage(get_settings())
+    with get_session_factory()() as db:
+        project = db.get(WeddingProject, project_id)
+        assert project is not None
+        project.frame_approved_version = 1
+        project.status = WeddingProjectStatus.GENERATING
+        story = StoryVersion(
+            project_id=project_id,
+            version=1,
+            story_text="User-authored story",
+            style="warm_documentary",
+            status=StoryVersionStatus.APPROVED,
+            owner_approved_at=utc_now(),
+        )
+        db.add(story)
+        db.flush()
+        frame_key = storage.put(project_id, _png(), ".png", "image/png")
+        frame = WeddingAsset(
+            project_id=project_id,
+            asset_type=WeddingAssetType.STORYBOARD_FRAME,
+            object_key=frame_key,
+            sha256="a" * 64,
+            mime="image/png",
+            size_bytes=len(_png()),
+            generated=False,
+        )
+        db.add(frame)
+        db.flush()
+        shot = StoryboardShot(
+            project_id=project_id,
+            story_version_id=story.id,
+            project_version=1,
+            shot_index=0,
+            shot_type="person_ai",
+            duration_ms=5_000,
+            person_keys=["A"],
+            fact_ids=[],
+            description="An approved shot description",
+            subtitle="Confirmed subtitle",
+            frame_asset_id=frame.id,
+            status=StoryboardShotStatus.FRAME_APPROVED,
+        )
+        db.add(shot)
+        quote = WeddingQuote(
+            project_id=project_id,
+            project_version=1,
+            max_budget_fen=1_000,
+            expires_at=utc_now() + timedelta(minutes=30),
+        )
+        db.add(quote)
+        db.flush()
+        job = GenerationJob(
+            project_id=project_id,
+            story_version_id=story.id,
+            quote_id=quote.id,
+            target_shot_id=shot.id,
+            project_version=1,
+            idempotency_key="worker-test-key",
+            request_fingerprint="f" * 64,
+            status=WeddingJobStatus.QUEUED,
+            progress_stage="queued",
+            total_shots=1,
+        )
+        db.add(job)
+        db.flush()
+        reserve_generation_budget(db, project, job, "generation:worker-test-key", 1_000)
+        render_id = None
+        if with_render:
+            shot.status = StoryboardShotStatus.FALLBACK
+            shot.selected_asset_id = frame.id
+            render = RenderVersion(
+                project_id=project_id,
+                project_version=1,
+                version=1,
+                timeline_hash="b" * 64,
+                input_asset_ids=[frame.id],
+                status=RenderVersionStatus.QUEUED,
+            )
+            db.add(render)
+            db.flush()
+            render_id = render.id
+        db.commit()
+        return ProjectWork(project_id, story.id, shot.id, frame.id, job.id, render_id)
+
+
+class FailingVideoProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, request):
+        self.calls += 1
+        raise ProviderUnavailable("PROVIDER_UNAVAILABLE", "No configured provider")
+
+
+class SuccessfulVideoProvider:
+    def __init__(self, *, cost_fen: int = 37, mutate_version: bool = False) -> None:
+        self.calls = 0
+        self.cost_fen = cost_fen
+        self.mutate_version = mutate_version
+
+    def generate(self, request) -> MediaOutput:
+        self.calls += 1
+        if self.mutate_version:
+            with get_session_factory()() as db:
+                project = db.get(WeddingProject, request.project_id)
+                assert project is not None
+                project.current_version += 1
+                db.commit()
+        return MediaOutput(
+            data=b"provider-output-bytes",
+            mime="video/mp4",
+            provider="test-provider",
+            model_version="test-model-v1",
+            actual_cost_fen=self.cost_fen,
+            request_id="test-request-1",
+        )
+
+
+class PartialVideoProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, request) -> MediaOutput:
+        self.calls += 1
+        if self.calls == 2:
+            raise ProviderUnavailable("PROVIDER_TIMEOUT", "Provider did not return a second shot", actual_cost_fen=5)
+        return MediaOutput(
+            data=b"first-shot-bytes",
+            mime="video/mp4",
+            provider="test-provider",
+            model_version="test-model-v1",
+            actual_cost_fen=31,
+        )
+
+
+def test_default_provider_bundle_is_unavailable_and_never_dispatches_network(client, monkeypatch):
+    monkeypatch.setenv("WEDDING_MEDIA_MODE", "disabled")
+    settings = Settings(_env_file=None)
+    bundle = build_provider_bundle(settings)
+    assert bundle.character_video is not None
+    with pytest.raises(ProviderUnavailable, match="PROVIDER_UNAVAILABLE"):
+        bundle.character_video.generate(None)
+
+    work = _project_with_job(client)
+    claim = claim_next_generation_job(get_session_factory())
+    assert claim == work.job_id
+    report = process_claimed_generation_job(
+        get_session_factory(), work.job_id, bundle, WeddingPrivateStorage(settings)
+    )
+    assert report.status == "failed"
+    with get_session_factory()() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert job is not None and job.error_code == "PROVIDER_UNAVAILABLE"
+        assert job.progress_stage == "failed"
+        assert job.provider_request_id is None
+        assert job.completed_shots == 0
+        assert ledger.status == BudgetLedgerStatus.RELEASED
+        shot = db.get(StoryboardShot, work.shot_id)
+        assert shot is not None and shot.status == StoryboardShotStatus.FAILED
+
+
+def test_consent_is_rechecked_immediately_before_provider_dispatch(client, monkeypatch):
+    work = _project_with_job(client)
+    provider = FailingVideoProvider()
+    bundle = ProviderBundle(character_video=provider)
+    assert claim_next_generation_job(get_session_factory()) == work.job_id
+    with get_session_factory()() as db:
+        partner = db.execute(
+            select(WeddingParticipant).where(
+                WeddingParticipant.project_id == work.project_id,
+                WeddingParticipant.person_key == "B",
+            )
+        ).scalar_one()
+        partner.consent_status = "revoked"
+        partner.revoked_at = utc_now()
+        db.commit()
+    result = process_claimed_generation_job(
+        get_session_factory(), work.job_id, bundle, WeddingPrivateStorage(Settings(_env_file=None))
+    )
+    assert result.error_code == "CONSENT_REQUIRED"
+    assert provider.calls == 0
+    with get_session_factory()() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None and job.reserved_amount_fen == 0
+
+
+def test_configured_production_provider_without_credentials_is_explicitly_unavailable():
+    settings = Settings(
+        _env_file=None,
+        wedding_character_video_provider="aliyun_model_studio",
+        wedding_character_video_api_key=None,
+    )
+    provider = build_provider_bundle(settings).character_video
+    assert provider is not None
+    with pytest.raises(ProviderUnavailable, match="PROVIDER_CREDENTIALS_MISSING"):
+        provider.generate(None)
+
+
+def test_success_settles_actual_cost_and_stores_provider_bytes_privately(client, tmp_path, monkeypatch):
+    work = _project_with_job(client)
+    provider = SuccessfulVideoProvider(cost_fen=37)
+    settings = Settings(_env_file=None, local_upload_dir=str(tmp_path / "uploads"))
+    storage = WeddingPrivateStorage(settings)
+    assert claim_next_generation_job(get_session_factory()) == work.job_id
+    result = process_claimed_generation_job(
+        get_session_factory(), work.job_id, ProviderBundle(character_video=provider), storage
+    )
+    assert result.status == "completed"
+    with get_session_factory()() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        candidate = db.execute(select(ShotCandidate).where(ShotCandidate.generation_job_id == work.job_id)).scalar_one()
+        asset = db.get(WeddingAsset, candidate.asset_id)
+        project = db.get(WeddingProject, work.project_id)
+        assert job is not None and job.actual_cost_fen == 37 and job.provider_request_id == "test-request-1"
+        assert ledger.status == BudgetLedgerStatus.SETTLED
+        assert ledger.actual_fen == 37 and ledger.released_fen == 963
+        assert candidate.actual_cost_fen == 37
+        assert asset is not None and asset.generated is True and asset.provider == "test-provider"
+        assert project is not None and project.budget_spent_fen == 37 and project.budget_reserved_fen == 0
+        assert project.status == WeddingProjectStatus.PREVIEW_REVIEW
+        key = asset.object_key
+    assert storage.read(key) == b"provider-output-bytes"
+
+
+def test_partial_shot_failure_preserves_success_and_settles_known_cost_for_recovery(client):
+    work = _project_with_job(client)
+    provider = PartialVideoProvider()
+    factory = get_session_factory()
+    with factory() as db:
+        first = db.get(StoryboardShot, work.shot_id)
+        job = db.get(GenerationJob, work.job_id)
+        assert first is not None and job is not None
+        second = StoryboardShot(
+            project_id=work.project_id,
+            story_version_id=work.story_id,
+            project_version=1,
+            shot_index=1,
+            shot_type="person_ai",
+            duration_ms=5_000,
+            person_keys=["A"],
+            fact_ids=[],
+            description="Second approved shot",
+            subtitle="Second subtitle",
+            frame_asset_id=work.frame_asset_id,
+            status=StoryboardShotStatus.FRAME_APPROVED,
+        )
+        db.add(second)
+        job.target_shot_id = None
+        job.total_shots = 2
+        db.commit()
+    assert claim_next_generation_job(factory) == work.job_id
+    result = process_claimed_generation_job(
+        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+    )
+    assert result.status == "needs_action"
+    assert result.error_code == "PROVIDER_TIMEOUT"
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        candidates = list(db.execute(select(ShotCandidate).where(ShotCandidate.generation_job_id == work.job_id)).scalars())
+        assert job is not None and job.completed_shots == 1 and job.actual_cost_fen == 36
+        assert ledger.status == BudgetLedgerStatus.SETTLED and ledger.actual_fen == 36
+        assert ledger.released_fen == 964
+        assert len(candidates) == 1 and candidates[0].actual_cost_fen == 31
+
+
+def test_duplicate_claim_cannot_process_the_same_queued_job_twice(client):
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    assert claim_next_generation_job(factory) == work.job_id
+    assert claim_next_generation_job(factory) is None
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None and job.status == WeddingJobStatus.PROCESSING
+
+
+def test_cancellation_after_claim_stops_before_provider_dispatch_and_releases_reservation(client):
+    work = _project_with_job(client)
+    provider = SuccessfulVideoProvider()
+    factory = get_session_factory()
+    assert claim_next_generation_job(factory) == work.job_id
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None
+        job.status = WeddingJobStatus.CANCEL_REQUESTED
+        job.cancel_requested_at = utc_now()
+        db.commit()
+    result = process_claimed_generation_job(
+        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(Settings(_env_file=None))
+    )
+    assert result.status == "cancelled"
+    assert provider.calls == 0
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert job is not None and job.reserved_amount_fen == 0
+        assert ledger.status == BudgetLedgerStatus.RELEASED
+
+
+def test_project_hard_cap_is_checked_before_dispatch_and_keeps_delivery_reserve(client):
+    work = _project_with_job(client)
+    provider = SuccessfulVideoProvider()
+    factory = get_session_factory()
+    assert claim_next_generation_job(factory) == work.job_id
+    with factory() as db:
+        project = db.get(WeddingProject, work.project_id)
+        assert project is not None
+        project.budget_spent_fen = 13_001
+        db.commit()
+    result = process_claimed_generation_job(
+        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+    )
+    assert result.error_code == "BUDGET_LIMIT_EXCEEDED"
+    assert provider.calls == 0
+    with factory() as db:
+        project = db.get(WeddingProject, work.project_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert project is not None and project.budget_delivery_reserve_fen == 2_000
+        assert project.budget_reserved_fen == 0
+        assert ledger.status == BudgetLedgerStatus.RELEASED
+
+
+def test_provider_result_after_project_version_changes_is_discarded_but_cost_is_settled(client, tmp_path):
+    work = _project_with_job(client)
+    provider = SuccessfulVideoProvider(cost_fen=21, mutate_version=True)
+    factory = get_session_factory()
+    settings = Settings(_env_file=None, local_upload_dir=str(tmp_path / "uploads"))
+    assert claim_next_generation_job(factory) == work.job_id
+    result = process_claimed_generation_job(
+        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(settings)
+    )
+    assert result.status == "failed"
+    assert result.error_code == "PROJECT_VERSION_STALE"
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert db.execute(select(ShotCandidate).where(ShotCandidate.generation_job_id == work.job_id)).first() is None
+        assert db.execute(select(WeddingAsset).where(WeddingAsset.project_id == work.project_id, WeddingAsset.generated.is_(True))).first() is None
+        assert job is not None and job.actual_cost_fen == 21
+        assert ledger.status == BudgetLedgerStatus.SETTLED and ledger.actual_fen == 21
+
+
+def test_render_worker_reports_missing_ffmpeg_without_ready_asset(client, monkeypatch):
+    work = _project_with_job(client, with_render=True)
+    factory = get_session_factory()
+    assert claim_next_render_version(factory) == work.render_id
+    monkeypatch.setattr("app.wedding_media.shutil.which", lambda _: None)
+    renderer = FFmpegRenderer(Settings(_env_file=None, wedding_music_file="", wedding_music_license_id=""), ffmpeg_path=None)
+    result = process_claimed_render_version(factory, work.render_id, WeddingPrivateStorage(Settings(_env_file=None)), renderer)
+    assert result.status == "failed"
+    assert result.error_code == "FFMPEG_UNAVAILABLE"
+    with factory() as db:
+        render = db.get(RenderVersion, work.render_id)
+        audit = db.execute(
+            select(WeddingAuditEvent).where(
+                WeddingAuditEvent.target_id == work.render_id,
+                WeddingAuditEvent.action == "render.failed",
+            )
+        ).scalar_one()
+        assert render is not None and render.status == RenderVersionStatus.FAILED
+        assert render.preview_asset_id is None and render.export_asset_id is None
+        assert audit.metadata_json == {"error_code": "FFMPEG_UNAVAILABLE"}
+
+
+def test_render_worker_persists_missing_music_license_blocker(client):
+    work = _project_with_job(client, with_render=True)
+    factory = get_session_factory()
+    assert claim_next_render_version(factory) == work.render_id
+    renderer = FFmpegRenderer(
+        Settings(_env_file=None, wedding_music_file="", wedding_music_license_id=""),
+        ffmpeg_path="ffmpeg",
+    )
+    result = process_claimed_render_version(
+        factory, work.render_id, WeddingPrivateStorage(get_settings()), renderer
+    )
+    assert result.error_code == "MUSIC_LICENSE_REQUIRED"
+    with factory() as db:
+        render = db.get(RenderVersion, work.render_id)
+        assert render is not None and render.status == RenderVersionStatus.FAILED
+        assert render.preview_asset_id is None and render.export_asset_id is None
+        audit = db.execute(
+            select(WeddingAuditEvent).where(
+                WeddingAuditEvent.target_id == work.render_id,
+                WeddingAuditEvent.action == "render.failed",
+            )
+        ).scalar_one()
+        assert audit.metadata_json == {"error_code": "MUSIC_LICENSE_REQUIRED"}
+
+
+def test_renderer_blocks_when_music_license_is_missing_even_if_ffmpeg_exists(tmp_path):
+    renderer = FFmpegRenderer(
+        Settings(_env_file=None, wedding_music_file="", wedding_music_license_id=""),
+        ffmpeg_path="ffmpeg",
+    )
+    with pytest.raises(ProviderUnavailable, match="MUSIC_LICENSE_REQUIRED"):
+        renderer.validate_music_license(demo=False)
+
+
+def test_local_demo_output_is_repeatable_and_visibly_labels_static_demo(client, tmp_path):
+    settings = get_settings().model_copy(update={"wedding_media_mode": "demo"})
+    bundle = build_provider_bundle(settings)
+    work = _project_with_job(client)
+    storage = WeddingPrivateStorage(settings)
+    with get_session_factory()() as db:
+        shot = db.get(StoryboardShot, work.shot_id)
+        frame = db.get(WeddingAsset, work.frame_asset_id)
+        assert shot is not None and frame is not None
+        from app.wedding_worker import VideoGenerationRequest
+        request = VideoGenerationRequest(
+            project_id=work.project_id,
+            job_id=work.job_id,
+            shot_id=work.shot_id,
+            shot_type=shot.shot_type,
+            description=shot.description,
+            subtitle=shot.subtitle,
+            reference_image=storage.read(frame.object_key),
+            reference_mime=frame.mime,
+            idempotency_key=work.job_id + ":" + work.shot_id,
+        )
+    first = bundle.character_video.generate(request)
+    second = bundle.character_video.generate(request)
+    assert first.data == second.data
+    assert first.provider == "local_demo" and first.actual_cost_fen == 0
+    assert b"DEMO ONLY" in first.data and b"NO AI MOTION" in first.data
+
+
+def test_local_demo_persists_provider_label_and_zero_cost_candidate(client):
+    settings = get_settings().model_copy(update={"wedding_media_mode": "demo"})
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    assert claim_next_generation_job(factory) == work.job_id
+    result = process_claimed_generation_job(
+        factory,
+        work.job_id,
+        build_provider_bundle(settings),
+        WeddingPrivateStorage(settings),
+    )
+    assert result.status == "completed"
+    with factory() as db:
+        candidate = db.execute(select(ShotCandidate).where(ShotCandidate.generation_job_id == work.job_id)).scalar_one()
+        asset = db.get(WeddingAsset, candidate.asset_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert asset is not None and asset.provider == "local_demo" and asset.mime == "image/png"
+        assert WeddingPrivateStorage(settings).read(asset.object_key).find(b"DEMO ONLY") >= 0
+        assert candidate.provider == "local_demo" and candidate.actual_cost_fen == 0
+        assert ledger.status == BudgetLedgerStatus.SETTLED and ledger.actual_fen == 0
