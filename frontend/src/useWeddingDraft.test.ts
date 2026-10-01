@@ -87,6 +87,128 @@ test("flush drains edits made while the first network save is in flight", async 
   );
   expect(result.current.dirty).toBe(false);
 });
+
+test.each([false, true])(
+  "preparation joins an active save and its newer valid edit (concurrent flush=%s)",
+  async (concurrent) => {
+    vi.useFakeTimers();
+    const finish: Array<(value: WeddingStoryboard) => void> = [];
+    save.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish.push(resolve);
+        }),
+    );
+    const { result } = renderHook(() =>
+      useWeddingDraft("owner", "project", true, storyToDraft(story)),
+    );
+    act(() => result.current.receive(story));
+    act(() =>
+      result.current.setDraft({
+        ...result.current.draft,
+        story_text: "edit A",
+      }),
+    );
+    let first!: Promise<WeddingStoryboard | null>;
+    act(() => {
+      first = result.current.flush();
+    });
+    act(() =>
+      result.current.setDraft({
+        ...result.current.draft,
+        story_text: "edit B",
+      }),
+    );
+    let prepared!: Promise<string>;
+    let other!: Promise<WeddingStoryboard | null>;
+    act(() => {
+      prepared = result.current.prepareStorySubmission();
+      if (concurrent) other = result.current.flush();
+    });
+    if (concurrent) await act(() => vi.advanceTimersByTimeAsync(1000));
+    await act(async () => {
+      finish[0]({ ...story, story_text: "edit A", draft_fingerprint: "fA" });
+    });
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(
+      save.mock.calls.map((call) => [call[2].story_text, call[4]]),
+    ).toEqual([
+      ["edit A", "original"],
+      ["edit B", "fA"],
+    ]);
+    let ready = false;
+    void prepared.then(() => {
+      ready = true;
+    });
+    await act(async () => {});
+    expect(ready).toBe(false);
+    await act(async () => {
+      finish[1]({ ...story, story_text: "edit B", draft_fingerprint: "fB" });
+      expect(await prepared).toBe("edit B");
+      expect((await first)?.draft_fingerprint).toBe("fB");
+      if (concurrent) expect((await other)?.draft_fingerprint).toBe("fB");
+    });
+    expect(result.current.dirty).toBe(false);
+    expect(result.current.status).toBe("已保存");
+    expect(result.current.getFingerprint()).toBe("fB");
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    expect(save).toHaveBeenCalledTimes(2);
+  },
+);
+
+test("all drain waiters receive a genuine CAS failure on the newer write", async () => {
+  const finish: Array<(value: WeddingStoryboard) => void> = [];
+  const fail: Array<(error: Error) => void> = [];
+  save.mockImplementation(
+    () =>
+      new Promise((resolve, reject) => {
+        finish.push(resolve);
+        fail.push(reject);
+      }),
+  );
+  const { result } = renderHook(() =>
+    useWeddingDraft("owner", "project", true, storyToDraft(story)),
+  );
+  act(() => result.current.receive(story));
+  act(() =>
+    result.current.setDraft({ ...result.current.draft, story_text: "edit A" }),
+  );
+  let first!: Promise<WeddingStoryboard | null>;
+  act(() => {
+    first = result.current.flush();
+  });
+  act(() =>
+    result.current.setDraft({ ...result.current.draft, story_text: "edit B" }),
+  );
+  let settled!: Promise<PromiseSettledResult<unknown>[]>;
+  act(() => {
+    settled = Promise.allSettled([
+      first,
+      result.current.flush(),
+      result.current.prepareStorySubmission(),
+    ]);
+  });
+  await act(async () => {
+    finish[0]({ ...story, story_text: "edit A", draft_fingerprint: "fA" });
+  });
+  expect(save).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    fail[1](new Error("DRAFT_CONFLICT"));
+    for (const outcome of await settled) {
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "rejected")
+        expect(outcome.reason.message).toBe("DRAFT_CONFLICT");
+    }
+  });
+  expect(result.current.draft.story_text).toBe("edit B");
+  expect(result.current.dirty).toBe(true);
+  expect(result.current.getFingerprint()).toBe("fA");
+  expect(result.current.status).toContain("草稿冲突");
+  await expect(result.current.prepareStorySubmission()).rejects.toThrow(
+    "DRAFT_CONFLICT",
+  );
+  expect(save).toHaveBeenCalledTimes(2);
+});
 test("incomplete facts survive re-entry at their own actor project and version without network saves", async () => {
   vi.useFakeTimers();
   const initial = {

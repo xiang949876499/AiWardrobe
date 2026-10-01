@@ -241,6 +241,69 @@ afterEach(() => {
 });
 
 describe("Wedding draft safety", () => {
+  test("story enqueue waits for an existing A autosave and exactly one newer B save", async () => {
+    let persisted = {
+      ...storyboard(["A"]),
+      status: "draft",
+      owner_approved_at: null,
+      draft_fingerprint: "f0",
+    };
+    const finish: Array<() => void> = [];
+    api.fetchWeddingStoryboard.mockImplementation(async () => persisted);
+    api.saveWeddingStoryboard.mockImplementation(
+      (_token, _project, draft) =>
+        new Promise((resolve) => {
+          finish.push(() => {
+            persisted = {
+              ...persisted,
+              story_text: draft.story_text,
+              draft_fingerprint: draft.story_text === "edit A" ? "fA" : "fB",
+            };
+            resolve(persisted);
+          });
+        }),
+    );
+    render(
+      <WeddingStudio ownerToken="owner-token" initialProjectId={project.id} />,
+    );
+    const editor = await screen.findByLabelText("你们的爱情故事");
+    await waitFor(() => expect(editor).toHaveValue(persisted.story_text));
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: "edit A" } });
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    expect(api.saveWeddingStoryboard).toHaveBeenCalledTimes(1);
+    fireEvent.change(editor, { target: { value: "edit B" } });
+    fireEvent.click(screen.getByRole("button", { name: "AI 编排故事" }));
+    expect(api.createWeddingStoryJob).not.toHaveBeenCalled();
+    await act(async () => {
+      finish[0]();
+    });
+    expect(api.saveWeddingStoryboard).toHaveBeenCalledTimes(2);
+    expect(
+      api.saveWeddingStoryboard.mock.calls.map((call) => [
+        call[2].story_text,
+        call[4],
+      ]),
+    ).toEqual([
+      ["edit A", "f0"],
+      ["edit B", "fA"],
+    ]);
+    expect(api.createWeddingStoryJob).not.toHaveBeenCalled();
+    await act(async () => {
+      finish[1]();
+    });
+    expect(api.createWeddingStoryJob).toHaveBeenCalledTimes(1);
+    expect(api.createWeddingStoryJob).toHaveBeenCalledWith(
+      "owner-token",
+      project.id,
+      1,
+      "edit B",
+    );
+    await act(() => vi.advanceTimersByTimeAsync(1500));
+    expect(api.saveWeddingStoryboard).toHaveBeenCalledTimes(2);
+    expect(api.createWeddingStoryJob).toHaveBeenCalledTimes(1);
+    expect(editor).toHaveValue("edit B");
+  });
   test.each([false, true])(
     "valid dirty story enqueue drains the preexisting timer but fences newer edits (%s)",
     async (newer) => {
@@ -560,6 +623,8 @@ describe("Wedding draft safety", () => {
     const view = render(
       <WeddingStudio ownerToken="owner-token" initialProjectId={project.id} />,
     );
+    // Finish the mocked project-load effects before exercising recovery.
+    await act(async () => {});
     await waitFor(() =>
       expect(screen.getByLabelText("你们的爱情故事")).toHaveValue("一起走过"),
     );
@@ -570,6 +635,7 @@ describe("Wedding draft safety", () => {
     render(
       <WeddingStudio ownerToken="owner-token" initialProjectId={project.id} />,
     );
+    await act(async () => {});
     await waitFor(() =>
       expect(screen.getByLabelText("你们的爱情故事")).toHaveValue(
         "仍未保存的故事",

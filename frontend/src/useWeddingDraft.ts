@@ -166,74 +166,77 @@ export function useWeddingDraft(
     if (!blocked.current)
       setStatus(valid(value) ? "等待保存" : "事实未完整，仅本地恢复");
   };
-  const flush = useCallback(async (): Promise<WeddingStoryboard | null> => {
-    if (!owner || !token || !projectId || !initialized.current)
-      return remote.current;
-    if (blocked.current) throw new Error("DRAFT_CONFLICT");
-    if (pending.current) {
-      await pending.current;
-      if (!alive.current) return null;
-      return flush();
-    }
-    if (!isDirty.current) return remote.current;
-    if (!valid(current.current)) {
-      setStatus("事实未完整，仅本地恢复");
-      throw new Error(INCOMPLETE_DRAFT_MESSAGE);
-    }
-    if (remote.current && remote.current.status !== "draft") {
-      blocked.current = true;
-      setStatus("草稿冲突：服务器已批准，请比较后重新载入");
-      throw new Error("APPROVED_STORYBOARD_IMMUTABLE");
-    }
-    const snapshot = current.current;
-    setStatus("正在保存…");
-    const request = saveWeddingStoryboard(
-      token,
-      projectId,
-      snapshot,
-      !!remote.current,
-      fingerprint.current,
-    );
+  const flush = useCallback((): Promise<WeddingStoryboard | null> => {
+    if (pending.current) return pending.current;
+    const drain = async (): Promise<WeddingStoryboard | null> => {
+      if (!owner || !token || !projectId || !initialized.current)
+        return remote.current;
+      while (true) {
+        if (blocked.current) throw new Error("DRAFT_CONFLICT");
+        if (!isDirty.current) return remote.current;
+        if (!valid(current.current)) {
+          setStatus("事实未完整，仅本地恢复");
+          throw new Error(INCOMPLETE_DRAFT_MESSAGE);
+        }
+        if (remote.current && remote.current.status !== "draft") {
+          blocked.current = true;
+          setStatus("草稿冲突：服务器已批准，请比较后重新载入");
+          throw new Error("APPROVED_STORYBOARD_IMMUTABLE");
+        }
+        const snapshot = current.current;
+        setStatus("正在保存…");
+        try {
+          const story = await saveWeddingStoryboard(
+            token,
+            projectId,
+            snapshot,
+            !!remote.current,
+            fingerprint.current,
+          );
+          if (!alive.current) return null;
+          remote.current = story;
+          revision.current += 1;
+          onSaved?.(story);
+          fingerprint.current = story.draft_fingerprint || fingerprint.current;
+          if (current.current === snapshot) {
+            isDirty.current = false;
+            displayDirty(false);
+            setStatus("已保存");
+            if (key) localStorage.removeItem(key);
+            return story;
+          }
+          persist();
+          setStatus("等待保存");
+        } catch (error) {
+          if (alive.current) {
+            const reason =
+              error instanceof Error ? error.message : String(error);
+            blocked.current = /CONFLICT|STALE|ALREADY_EXISTS|IMMUTABLE/.test(
+              reason,
+            );
+            setStatus(
+              blocked.current
+                ? `草稿冲突：${reason}。保留本地编辑，请比较后重新载入`
+                : `保存失败：${reason}。本地草稿已保留，请手动重试`,
+            );
+          }
+          throw error;
+        }
+      }
+    };
+    // All callers join the entire drain, including edits made during a write.
+    // Only that drain may release its marker, after its final write settles.
+    const request = drain();
     pending.current = request;
-    try {
-      const story = await request;
-      if (!alive.current) return null;
-      remote.current = story;
-      revision.current += 1;
-      onSaved?.(story);
-      fingerprint.current = story.draft_fingerprint || fingerprint.current;
-      if (current.current === snapshot) {
-        isDirty.current = false;
-        displayDirty(false);
-        setStatus("已保存");
-        if (key) localStorage.removeItem(key);
-      } else {
-        persist();
-        setStatus("等待保存");
-      }
-      pending.current = null;
-      return current.current !== snapshot ? flush() : story;
-    } catch (error) {
-      if (alive.current) {
-        const reason = error instanceof Error ? error.message : String(error);
-        blocked.current = /CONFLICT|STALE|ALREADY_EXISTS|IMMUTABLE/.test(
-          reason,
-        );
-        setStatus(
-          blocked.current
-            ? `草稿冲突：${reason}。保留本地编辑，请比较后重新载入`
-            : `保存失败：${reason}。本地草稿已保留，请手动重试`,
-        );
-      }
-      throw error;
-    } finally {
-      pending.current = null;
-    }
+    const release = () => {
+      if (pending.current === request) pending.current = null;
+    };
+    void request.then(release, release);
+    return request;
   }, [key, owner, persist, projectId, token, onSaved]);
   const prepareStorySubmission = async () => {
     if (blocked.current) throw new Error("DRAFT_CONFLICT");
-    if (pending.current) await pending.current;
-    if (isDirty.current && valid(current.current)) {
+    if (pending.current || (isDirty.current && valid(current.current))) {
       try {
         await flush();
       } catch (error) {
