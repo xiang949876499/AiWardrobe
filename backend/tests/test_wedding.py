@@ -315,6 +315,63 @@ def test_revoking_consent_invalidates_approved_render_and_blocks_video_assets(cl
     assert blocked_export.json()["detail"] == "CONSENT_REQUIRED"
 
 
+@pytest.mark.parametrize("asset_type", [WeddingAssetType.PREVIEW_VIDEO, WeddingAssetType.FINAL_VIDEO])
+@pytest.mark.parametrize("outsider_kind", ["owner", "participant"])
+def test_rendered_video_assets_are_scoped_to_the_project(
+    client: TestClient, asset_type: WeddingAssetType, outsider_kind: str
+) -> None:
+    owner_token = login(client, "video-scope-owner@example.com")
+    outsider_owner_token = login(client, "video-scope-outsider@example.com")
+    project_id = _create_project(client, owner_token)["id"]
+    outsider_project_id = _create_project(client, outsider_owner_token)["id"]
+    for token, consent_project_id in ((owner_token, project_id), (outsider_owner_token, outsider_project_id)):
+        response = client.post(
+            f"/wedding-projects/{consent_project_id}/self-consent",
+            headers=_headers(token),
+            json={"terms_version": "portrait-v1", "scope": ["portrait_processing"], "provider_list": ["local_demo"]},
+        )
+        assert response.status_code == 200, response.text
+    partner_token = _confirm_partner(client, owner_token, project_id)
+    outsider_participant_token = _confirm_partner(client, outsider_owner_token, outsider_project_id)
+
+    video_bytes = b"private wedding video"
+    storage = WeddingPrivateStorage(get_settings())
+    with get_session_factory()() as db:
+        asset = WeddingAsset(
+            project_id=project_id,
+            asset_type=asset_type,
+            object_key=storage.put(project_id, video_bytes, ".mp4", "video/mp4"),
+            sha256="a" * 64,
+            mime="video/mp4",
+            size_bytes=len(video_bytes),
+            generated=True,
+        )
+        db.add(asset)
+        db.flush()
+        render = RenderVersion(
+            project_id=project_id,
+            project_version=1,
+            version=1,
+            status=RenderVersionStatus.APPROVED,
+            timeline_hash="b" * 64,
+            input_asset_ids=[],
+            preview_asset_id=asset.id if asset_type == WeddingAssetType.PREVIEW_VIDEO else None,
+            export_asset_id=asset.id if asset_type == WeddingAssetType.FINAL_VIDEO else None,
+            owner_approved_at=utc_now(),
+        )
+        db.add(render)
+        db.commit()
+        asset_id = asset.id
+
+    owner_read = client.get(f"/wedding-assets/{asset_id}", headers=_headers(owner_token))
+    assert owner_read.status_code == 200
+    assert owner_read.content == video_bytes
+    partner_read = client.get(f"/wedding-assets/{asset_id}", headers=_headers(partner_token))
+    assert partner_read.status_code == (200 if asset_type == WeddingAssetType.PREVIEW_VIDEO else 404)
+    outsider_token = outsider_owner_token if outsider_kind == "owner" else outsider_participant_token
+    assert client.get(f"/wedding-assets/{asset_id}", headers=_headers(outsider_token)).status_code == 404
+
+
 def test_wedding_read_models_restore_owner_and_participant_scopes(client: TestClient) -> None:
     from datetime import timedelta
 
