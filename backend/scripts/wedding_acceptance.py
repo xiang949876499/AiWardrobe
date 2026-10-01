@@ -10,13 +10,17 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
+from http.client import HTTPException
 import json
 import math
 import os
 from pathlib import Path
 import re
 import secrets
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -29,6 +33,8 @@ MODELS = {"story": "doubao-seed-2-0-pro-260215", "frame": "doubao-seedream-4-5-2
 PROVIDERS = dict(story="ark", frame="seedream", character_video="wan_r2v", scene_video="wan_i2v_flash")
 MAX_BYTES = 2 * 1024 * 1024
 TIMEOUT = 15
+CLEANUP_TIMEOUT = 2
+MAX_IPC_BYTES = 2 * MAX_BYTES + 1024
 ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 ENV = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 ATTESTATIONS = ("adult_authorized", "provider_scope_checked", "materials_checked", "commercial_music_checked")
@@ -111,6 +117,110 @@ class NoRedirect(HTTPRedirectHandler):
         raise Rejected("REDIRECT_REFUSED")
 
 
+def _http_worker_command():
+    return [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--_http-worker"]
+
+
+def run_http_worker(payload):
+    """One disposable network process; never leave a live request after timeout.
+
+    Pipe I/O threads only move bounded bytes. They cannot perform HTTP. In particular,
+    Windows communicate(input=...) writes synchronously, so it is not used here.
+    """
+    deadline = time.monotonic() + TIMEOUT
+    encoded = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+    require(len(encoded) <= MAX_BYTES, "REQUEST_TOO_LARGE")
+    output, pipe_errors = [], []
+    process = subprocess.Popen(_http_worker_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, bufsize=0, close_fds=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+
+    def write_control():
+        try:
+            with process.stdin as stream:
+                remaining = memoryview(encoded)
+                while remaining:
+                    count = stream.write(remaining)
+                    if not count:
+                        raise OSError()
+                    remaining = remaining[count:]
+        except OSError:
+            pipe_errors.append("TRANSPORT_FAILED")
+
+    def read_result():
+        try:
+            with process.stdout as stream:
+                size = 0
+                while size <= MAX_IPC_BYTES:
+                    chunk = stream.read(min(65536, MAX_IPC_BYTES + 1 - size))
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    output.append(chunk)
+                if size > MAX_IPC_BYTES:
+                    pipe_errors.append("RESPONSE_TOO_LARGE")
+        except OSError:
+            pipe_errors.append("TRANSPORT_FAILED")
+
+    threads = [threading.Thread(target=write_control, daemon=True), threading.Thread(target=read_result, daemon=True)]
+    try:
+        require(time.monotonic() < deadline, "RESPONSE_TIMEOUT")
+        for thread in threads:
+            thread.start()
+        process.wait(timeout=max(0, deadline - time.monotonic()))
+        for thread in threads:
+            thread.join(max(0, deadline - time.monotonic()))
+        require(time.monotonic() <= deadline and not any(t.is_alive() for t in threads), "RESPONSE_TIMEOUT")
+        require(not pipe_errors and process.returncode == 0, pipe_errors[0] if pipe_errors else "TRANSPORT_FAILED")
+    except subprocess.TimeoutExpired:
+        raise Rejected("RESPONSE_TIMEOUT") from None
+    finally:
+        # A completed timeout is emitted only after OS termination and confirmed exit.
+        # This also handles Ctrl-C and unexpected parent exceptions after dispatch.
+        cleanup_deadline = time.monotonic() + CLEANUP_TIMEOUT
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(max(0, cleanup_deadline - time.monotonic()))
+            for thread, stream in zip(threads, (process.stdin, process.stdout)):
+                if thread.ident is None:
+                    stream.close()
+            require(process.poll() is not None and not any(t.is_alive() for t in threads), "TRANSPORT_CLEANUP_UNCONFIRMED")
+        except (OSError, subprocess.TimeoutExpired):
+            raise Rejected("TRANSPORT_CLEANUP_UNCONFIRMED") from None
+    try:
+        message = json.loads(b"".join(output))
+        if message.get("ok") is not True:
+            reasons = {"REDIRECT_REFUSED", "ORIGIN_CHANGED", "HTTP_REJECTED", "RESPONSE_TOO_LARGE",
+                       "RESPONSE_NOT_JSON", "RESPONSE_TIMEOUT", "TRANSPORT_FAILED", "REQUEST_TOO_LARGE"}
+            raise Rejected(message["reason"] if message.get("reason") in reasons else "TRANSPORT_FAILED")
+        return message["result"]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise Rejected("TRANSPORT_FAILED") from None
+
+
+def http_worker_main():
+    """Private pipe protocol; no logging, subprocess descendants, or network retries."""
+    try:
+        raw = sys.stdin.buffer.read(MAX_BYTES + 1)
+        require(len(raw) <= MAX_BYTES, "REQUEST_TOO_LARGE")
+        payload = json.loads(raw)
+        os.environ[payload["token_env"]] = payload["token"]
+        api = Transport(payload["base_url"], payload["token_env"], payload["execute_paid"])
+        result = api._request_local(payload["method"], payload["path"], payload["body"], payload["key"])
+        output = json.dumps({"ok": True, "result": result}, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+        require(len(output) <= MAX_IPC_BYTES, "RESPONSE_TOO_LARGE")
+    except Rejected as exc:
+        output = json.dumps({"ok": False, "reason": str(exc)}).encode()
+    except Exception:
+        output = b'{"ok":false,"reason":"TRANSPORT_FAILED"}'
+    sys.stdout.buffer.write(output)
+    sys.stdout.buffer.flush()
+
+
 class Transport:
     """Exact origin, no ambient proxies, no redirects, bounded reads, no retries."""
 
@@ -132,11 +242,23 @@ class Transport:
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
     def request(self, method, path, body=None, key=None):
+        token = self._validate_request(method, path, key)
+        return run_http_worker(dict(base_url=self.base_url, token_env=self.token_env, token=token,
+                                    execute_paid=self.execute_paid, method=method, path=path, body=body, key=key))
+
+    def _validate_request(self, method, path, key):
         require(method == "GET" or (method == "POST" and self.execute_paid), "EXECUTE_PAID_REQUIRED")
         require(re.fullmatch(r"/[A-Za-z0-9_/-]+(?:\?shot_id=[A-Za-z0-9_-]+)?", path), "UNSAFE_REQUEST_PATH")
         require(not path.startswith("//") and "/../" not in path, "UNSAFE_REQUEST_PATH")
         token = os.environ.get(self.token_env, "")
         require(token and token.isascii() and not any(c.isspace() for c in token), "TOKEN_ENV_MISSING_OR_INVALID")
+        if key:
+            identifier(key)
+        return token
+
+    def _request_local(self, method, path, body=None, key=None):
+        """Called only inside the disposable worker (or narrow unit tests)."""
+        token = self._validate_request(method, path, key)
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Accept-Encoding": "identity"}
         if key:
             headers["Idempotency-Key"] = identifier(key)
@@ -164,7 +286,7 @@ class Transport:
                 return json.loads(b"".join(chunks))
         except HTTPError:
             raise Rejected("HTTP_REJECTED") from None
-        except (URLError, OSError, ValueError):
+        except (URLError, OSError, ValueError, HTTPException):
             raise Rejected("TRANSPORT_FAILED") from None
 
 
@@ -576,10 +698,13 @@ def main(argv=None):
     except Rejected as exc:
         print(json.dumps({"status": "STOPPED", "reason": str(exc)}))
         return 2
-    except (KeyError, TypeError, ValueError, OSError):
+    except (KeyError, TypeError, ValueError, OSError, HTTPException):
         print(json.dumps({"status": "STOPPED", "reason": "INVALID_INPUT_OR_API_SHAPE"}))
         return 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if sys.argv[1:] == ["--_http-worker"]:
+        http_worker_main()
+    else:
+        raise SystemExit(main())

@@ -42,8 +42,23 @@ Preflight emits GET requests only and does not create quotes. It performs one bo
 pass over the ten projects, with no polling, media downloads or reviews. HTTPS or
 exact `localhost`, `127.0.0.1`, `::1` HTTP is required. Base URLs cannot include a path,
 credentials, query or fragment. Redirects and proxies are disabled. Each HTTP request
-has a 15-second socket timeout and elapsed-read deadline, with a 2 MiB response cap.
-Errors contain fixed reason codes, never response bodies.
+runs in a disposable, isolated stdlib subprocess (hidden on Windows). A parent-owned
+15-second monotonic deadline covers process-start overhead, control delivery, DNS,
+all address connection attempts, TLS, headers, body and result transfer. Expired startup
+never receives request control. Deadline expiry kills the process and confirms its
+exit before returning `RESPONSE_TIMEOUT`; there is no background HTTP thread that can
+later send a POST. OS cleanup has a separate two-second allowance. Kernel process
+creation and scheduling are OS operations, so this is not a hard real-time guarantee;
+a startup overrun is rejected before dispatch. If OS termination/pipe cleanup cannot
+be confirmed, the distinct `TRANSPORT_CLEANUP_UNCONFIRMED` stop requires operator
+investigation and must never be treated as permission to resubmit.
+
+Private request control travels through stdin, not arguments or temporary files.
+Control input and HTTP response bodies are capped at 2 MiB; result IPC is capped at
+4 MiB + 1 KiB. Bounded pipe-reader/writer threads prevent Windows synchronous stdin
+writes from defeating the deadline; these threads cannot issue HTTP. Workers do not
+spawn descendants, and child stderr is discarded. Errors, including malformed HTTP
+status/header exceptions, use fixed reason codes without server text or tracebacks.
 
 ## Explicit staged dispatch
 

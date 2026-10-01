@@ -1,4 +1,4 @@
-"""Acceptance runner uses mocked application HTTP only; never dispatch providers."""
+"""Acceptance runner uses synthetic application HTTP only; never dispatch providers."""
 import json
 import os
 from pathlib import Path
@@ -492,7 +492,7 @@ scope = runpy.run_path(MODULE)
 entered, late = pathlib.Path(ENTERED), pathlib.Path(LATE)
 def block(*args, **kwargs):
     entered.write_text(PHASE)
-    time.sleep(4)
+    time.sleep(10)
     late.write_text("would continue request")
     raise OSError("synthetic slow phase")
 class File:
@@ -502,7 +502,7 @@ class File:
         if self.lines == 1: return b"HTTP/1.1 200 OK\\r\\n"
         if self.lines == 2 and PHASE == "headers":
             entered.write_text(PHASE)
-            for _ in range(40): time.sleep(.1)
+            for _ in range(40): time.sleep(.25)
             late.write_text("would finish headers")
         return [b"", b"", b"Content-Type: application/json\\r\\n", b"Content-Length: 5\\r\\n", b"\\r\\n"][self.lines]
     def read1(self, size=-1): return block()
@@ -518,7 +518,7 @@ elif PHASE == "connect":
     calls = []
     def connect(*args):
         calls.append(1); entered.write_text(str(len(calls)))
-        time.sleep(.25)
+        time.sleep(.75)
         if len(calls) == 8: late.write_text("would finish addresses")
         raise TimeoutError("synthetic connection delay")
     socket.socket.connect = connect
@@ -539,7 +539,7 @@ scope["http_worker_main"]()
 def test_total_deadline_kills_every_http_phase_and_blocked_ipc(tmp_path, monkeypatch, phase):
     command, entered, late = deadline_worker(tmp_path, phase)
     monkeypatch.setattr(runner, "_http_worker_command", lambda: command, raising=False)
-    monkeypatch.setattr(runner, "TIMEOUT", 1.0)
+    monkeypatch.setattr(runner, "TIMEOUT", 3.0)
     monkeypatch.setenv("TOKEN", "synthetic-only")
     children = []; original_popen = subprocess.Popen
     def capture(*args, **kwargs):
@@ -552,7 +552,7 @@ def test_total_deadline_kills_every_http_phase_and_blocked_ipc(tmp_path, monkeyp
     started = time.monotonic()
     with pytest.raises(runner.Rejected, match="RESPONSE_TIMEOUT"):
         api.request("POST", "/data", {"padding": "x" * 131072}, "synthetic-key")
-    assert time.monotonic() - started < 2.5
+    assert time.monotonic() - started < 5.0
     assert entered.exists(), "regression must reach the selected phase"
     if phase == "connect":
         assert 2 <= int(entered.read_text()) < 8
@@ -599,7 +599,7 @@ def test_all_http_protocol_exceptions_are_sanitized_at_boundary(monkeypatch, err
 def test_timed_out_post_preserves_unknown_before_worker_can_submit_late(tmp_path, monkeypatch):
     command, entered, late = deadline_worker(tmp_path, "dns")
     monkeypatch.setattr(runner, "_http_worker_command", lambda: command)
-    monkeypatch.setattr(runner, "TIMEOUT", 1.0)
+    monkeypatch.setattr(runner, "TIMEOUT", 3.0)
     monkeypatch.setenv("TOKEN", "synthetic-only")
     sample = manifest()["samples"][0]; checkpoint = tmp_path / "cp.json"
     class API:
