@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
+from threading import Barrier, Event, Thread
 
 from PIL import Image
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.config import Settings, get_settings
 from app.database import get_session_factory
@@ -23,6 +27,7 @@ from app.models import (
     StoryVersionStatus,
     StoryboardShot,
     StoryboardShotStatus,
+    User,
     WeddingAsset,
     WeddingAssetType,
     WeddingJobStatus,
@@ -35,8 +40,10 @@ from app.models import (
 )
 from app.wedding_service import WeddingPrivateStorage, reserve_generation_budget, set_job_status
 from app.wedding_worker import (
+    ClaimedGenerationJob,
     MediaOutput,
     ProviderBundle,
+    _record_provider_output,
     claim_next_generation_job,
     claim_next_render_version,
     process_claimed_generation_job,
@@ -58,6 +65,32 @@ class ProjectWork:
     frame_asset_id: str
     job_id: str
     render_id: str | None = None
+
+
+def _claim(factory, expected_job_id: str) -> ClaimedGenerationJob:
+    claim = claim_next_generation_job(factory)
+    assert claim is not None and claim.job_id == expected_job_id
+    return claim
+
+
+def _new_reservation_job(db, work: ProjectWork, key: str) -> GenerationJob:
+    current = db.get(GenerationJob, work.job_id)
+    assert current is not None
+    job = GenerationJob(
+        project_id=work.project_id,
+        story_version_id=work.story_id,
+        quote_id=current.quote_id,
+        target_shot_id=work.shot_id,
+        project_version=1,
+        idempotency_key=key,
+        request_fingerprint=(key + "f" * 64)[:64],
+        status=WeddingJobStatus.QUEUED,
+        progress_stage="queued",
+        total_shots=1,
+    )
+    db.add(job)
+    db.flush()
+    return job
 
 
 def _png() -> bytes:
@@ -224,6 +257,28 @@ class SuccessfulVideoProvider:
         )
 
 
+class BlockingVideoProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.entered = Event()
+        self.release = Event()
+        self.output = MediaOutput(
+            data=b"late-provider-output",
+            mime="video/mp4",
+            provider="test-provider",
+            model_version="test-model-v1",
+            actual_cost_fen=19,
+            request_id="late-request-1",
+        )
+
+    def generate(self, request) -> MediaOutput:
+        self.calls += 1
+        self.entered.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("test did not release the fake provider")
+        return self.output
+
+
 class PartialVideoProvider:
     def __init__(self) -> None:
         self.calls = 0
@@ -250,10 +305,9 @@ def test_default_provider_bundle_is_unavailable_and_never_dispatches_network(cli
         bundle.character_video.generate(None)
 
     work = _project_with_job(client)
-    claim = claim_next_generation_job(get_session_factory())
-    assert claim == work.job_id
+    claim = _claim(get_session_factory(), work.job_id)
     report = process_claimed_generation_job(
-        get_session_factory(), work.job_id, bundle, WeddingPrivateStorage(settings)
+        get_session_factory(), claim, bundle, WeddingPrivateStorage(settings)
     )
     assert report.status == "failed"
     with get_session_factory()() as db:
@@ -272,7 +326,7 @@ def test_consent_is_rechecked_immediately_before_provider_dispatch(client, monke
     work = _project_with_job(client)
     provider = FailingVideoProvider()
     bundle = ProviderBundle(character_video=provider)
-    assert claim_next_generation_job(get_session_factory()) == work.job_id
+    claim = _claim(get_session_factory(), work.job_id)
     with get_session_factory()() as db:
         partner = db.execute(
             select(WeddingParticipant).where(
@@ -284,7 +338,7 @@ def test_consent_is_rechecked_immediately_before_provider_dispatch(client, monke
         partner.revoked_at = utc_now()
         db.commit()
     result = process_claimed_generation_job(
-        get_session_factory(), work.job_id, bundle, WeddingPrivateStorage(Settings(_env_file=None))
+        get_session_factory(), claim, bundle, WeddingPrivateStorage(Settings(_env_file=None))
     )
     assert result.error_code == "CONSENT_REQUIRED"
     assert provider.calls == 0
@@ -310,9 +364,9 @@ def test_success_settles_actual_cost_and_stores_provider_bytes_privately(client,
     provider = SuccessfulVideoProvider(cost_fen=37)
     settings = Settings(_env_file=None, local_upload_dir=str(tmp_path / "uploads"))
     storage = WeddingPrivateStorage(settings)
-    assert claim_next_generation_job(get_session_factory()) == work.job_id
+    claim = _claim(get_session_factory(), work.job_id)
     result = process_claimed_generation_job(
-        get_session_factory(), work.job_id, ProviderBundle(character_video=provider), storage
+        get_session_factory(), claim, ProviderBundle(character_video=provider), storage
     )
     assert result.status == "completed"
     with get_session_factory()() as db:
@@ -358,9 +412,9 @@ def test_partial_shot_failure_preserves_success_and_settles_known_cost_for_recov
         job.target_shot_id = None
         job.total_shots = 2
         db.commit()
-    assert claim_next_generation_job(factory) == work.job_id
+    claim = _claim(factory, work.job_id)
     result = process_claimed_generation_job(
-        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+        factory, claim, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
     )
     assert result.status == "needs_action"
     assert result.error_code == "PROVIDER_TIMEOUT"
@@ -377,7 +431,7 @@ def test_partial_shot_failure_preserves_success_and_settles_known_cost_for_recov
 def test_duplicate_claim_cannot_process_the_same_queued_job_twice(client):
     work = _project_with_job(client)
     factory = get_session_factory()
-    assert claim_next_generation_job(factory) == work.job_id
+    _claim(factory, work.job_id)
     assert claim_next_generation_job(factory) is None
     with factory() as db:
         job = db.get(GenerationJob, work.job_id)
@@ -388,7 +442,7 @@ def test_cancellation_after_claim_stops_before_provider_dispatch_and_releases_re
     work = _project_with_job(client)
     provider = SuccessfulVideoProvider()
     factory = get_session_factory()
-    assert claim_next_generation_job(factory) == work.job_id
+    claim = _claim(factory, work.job_id)
     with factory() as db:
         job = db.get(GenerationJob, work.job_id)
         assert job is not None
@@ -396,7 +450,7 @@ def test_cancellation_after_claim_stops_before_provider_dispatch_and_releases_re
         job.cancel_requested_at = utc_now()
         db.commit()
     result = process_claimed_generation_job(
-        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(Settings(_env_file=None))
+        factory, claim, ProviderBundle(character_video=provider), WeddingPrivateStorage(Settings(_env_file=None))
     )
     assert result.status == "cancelled"
     assert provider.calls == 0
@@ -411,14 +465,14 @@ def test_project_hard_cap_is_checked_before_dispatch_and_keeps_delivery_reserve(
     work = _project_with_job(client)
     provider = SuccessfulVideoProvider()
     factory = get_session_factory()
-    assert claim_next_generation_job(factory) == work.job_id
+    claim = _claim(factory, work.job_id)
     with factory() as db:
         project = db.get(WeddingProject, work.project_id)
         assert project is not None
         project.budget_spent_fen = 13_001
         db.commit()
     result = process_claimed_generation_job(
-        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+        factory, claim, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
     )
     assert result.error_code == "BUDGET_LIMIT_EXCEEDED"
     assert provider.calls == 0
@@ -443,9 +497,9 @@ def test_owner_account_budget_cap_blocks_dispatch_across_two_valid_projects(clie
     monkeypatch.setenv("WEDDING_ACCOUNT_BUDGET_LIMIT_FEN", "1500")
     get_settings.cache_clear()
     provider = SuccessfulVideoProvider()
-    assert claim_next_generation_job(factory) == first.job_id
+    claim = _claim(factory, first.job_id)
     result = process_claimed_generation_job(
-        factory, first.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+        factory, claim, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
     )
     assert result.error_code == "ACCOUNT_BUDGET_LIMIT_EXCEEDED"
     assert provider.calls == 0
@@ -458,6 +512,178 @@ def test_owner_account_budget_cap_blocks_dispatch_across_two_valid_projects(clie
         assert first_ledger.status == BudgetLedgerStatus.RELEASED
         assert first_project is not None and first_project.budget_reserved_fen == 0
         assert second_project is not None and second_project.budget_reserved_fen == 1_000
+
+
+def test_reservation_enforces_owner_account_cap_across_projects_and_idempotent_replay(client, monkeypatch):
+    first = _project_with_job(client)
+    second = _project_with_job(client)
+    monkeypatch.setenv("WEDDING_ACCOUNT_BUDGET_LIMIT_FEN", "2500")
+    get_settings.cache_clear()
+    factory = get_session_factory()
+
+    with factory() as db:
+        first_project = db.get(WeddingProject, first.project_id)
+        assert first_project is not None
+        first_job = _new_reservation_job(db, first, "account-reserve-first")
+        ledger = reserve_generation_budget(db, first_project, first_job, "account-reserve-first", 300)
+        first_job_id = first_job.id
+        db.commit()
+        ledger_id = ledger.id
+
+    # Replaying the same reservation remains idempotent and does not count it twice.
+    with factory() as db:
+        first_project = db.get(WeddingProject, first.project_id)
+        assert first_project is not None
+        first_job = db.get(GenerationJob, first_job_id)
+        assert first_job is not None
+        replay = reserve_generation_budget(db, first_project, first_job, "account-reserve-first", 300)
+        assert replay.id == ledger_id
+        db.commit()
+
+    with factory() as db:
+        second_project = db.get(WeddingProject, second.project_id)
+        assert second_project is not None
+        second_job = _new_reservation_job(db, second, "account-reserve-second")
+        with pytest.raises(HTTPException) as exc:
+            reserve_generation_budget(db, second_project, second_job, "account-reserve-second", 300)
+        assert exc.value.detail == "ACCOUNT_BUDGET_LIMIT_EXCEEDED"
+        db.rollback()
+
+    with factory() as db:
+        owner_id = db.scalar(select(User.id).where(User.email == "worker-owner@example.com"))
+        total = sum(
+            db.execute(
+                select(WeddingProject.budget_spent_fen + WeddingProject.budget_reserved_fen).where(
+                    WeddingProject.owner_id == owner_id
+                )
+            ).scalars()
+        )
+        assert total == 2_300
+
+
+def test_parallel_same_owner_reservations_never_exceed_account_cap(client, monkeypatch):
+    first = _project_with_job(client)
+    second = _project_with_job(client)
+    monkeypatch.setenv("WEDDING_ACCOUNT_BUDGET_LIMIT_FEN", "2500")
+    get_settings.cache_clear()
+    factory = get_session_factory()
+    job_ids = []
+    for work, key in ((first, "parallel-first"), (second, "parallel-second")):
+        with factory() as db:
+            job_ids.append(_new_reservation_job(db, work, key).id)
+            db.commit()
+
+    start_together = Barrier(2)
+
+    def reserve(work: ProjectWork, job_id: str, key: str) -> str:
+        with factory() as db:
+            project = db.get(WeddingProject, work.project_id)
+            job = db.get(GenerationJob, job_id)
+            assert project is not None and job is not None
+            start_together.wait(timeout=5)
+            try:
+                reserve_generation_budget(db, project, job, key, 300)
+                db.commit()
+                return "reserved"
+            except HTTPException as exc:
+                db.rollback()
+                return str(exc.detail)
+            except OperationalError:
+                # SQLite ignores FOR UPDATE and serializes concurrent writes coarsely;
+                # a lock loser cannot create an over-cap reservation.
+                db.rollback()
+                return "database-write-serialized"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(reserve, (first, second), job_ids, ("parallel-first", "parallel-second")))
+    with factory() as db:
+        owner_id = db.scalar(select(User.id).where(User.email == "worker-owner@example.com"))
+        # Sum across all projects (SQLite test DB may surface multiple scalar rows).
+        total = sum(
+            db.execute(
+                select(WeddingProject.budget_spent_fen + WeddingProject.budget_reserved_fen).where(
+                    WeddingProject.owner_id == owner_id
+                )
+            ).scalars()
+        )
+        assert total <= 2_500
+        assert outcomes.count("reserved") <= 1
+        assert any(outcome in {"reserved", "ACCOUNT_BUDGET_LIMIT_EXCEEDED", "database-write-serialized"} for outcome in outcomes)
+
+
+def test_stale_dispatch_is_quarantined_and_late_cost_is_recorded_once_without_candidate(client, monkeypatch):
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    monkeypatch.setenv("WEDDING_WORKER_STALE_SECONDS", "120")
+    get_settings.cache_clear()
+    claim = _claim(factory, work.job_id)
+    provider = BlockingVideoProvider()
+    storage = WeddingPrivateStorage(get_settings())
+    results = []
+    worker = Thread(
+        target=lambda: results.append(
+            process_claimed_generation_job(factory, claim, ProviderBundle(character_video=provider), storage)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert provider.entered.wait(timeout=5)
+
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None and job.progress_stage.startswith("dispatching_")
+        job.updated_at = utc_now() - timedelta(hours=1)
+        db.commit()
+    assert claim_next_generation_job(factory) is None
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert job is not None and job.status == WeddingJobStatus.NEEDS_ACTION
+        assert job.error_code == "PROVIDER_OUTCOME_UNKNOWN"
+        assert job.progress_stage == "provider_outcome_unknown"
+        assert ledger.status == BudgetLedgerStatus.RESERVED and job.reserved_amount_fen == 1_000
+
+    provider.release.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert results and results[0].status == "needs_action"
+    assert results[0].error_code == "PROVIDER_OUTCOME_UNKNOWN"
+    _record_provider_output(factory, work.job_id, work.shot_id, provider.output, storage, claim.lease_token)
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        candidates = list(db.execute(select(ShotCandidate).where(ShotCandidate.generation_job_id == work.job_id)).scalars())
+        ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == work.job_id)).scalar_one()
+        assert job is not None and job.status == WeddingJobStatus.NEEDS_ACTION
+        assert job.error_code == "PROVIDER_OUTCOME_UNKNOWN" and job.actual_cost_fen == 19
+        assert not candidates
+        assert ledger.status == BudgetLedgerStatus.RESERVED and job.reserved_amount_fen == 1_000
+
+
+def test_old_predispatch_lease_is_rejected_after_stale_reclaim(client, monkeypatch):
+    work = _project_with_job(client)
+    factory = get_session_factory()
+    monkeypatch.setenv("WEDDING_WORKER_STALE_SECONDS", "120")
+    get_settings.cache_clear()
+    old_claim = _claim(factory, work.job_id)
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None
+        job.updated_at = utc_now() - timedelta(hours=1)
+        job.progress_stage = "claimed"
+        db.commit()
+    fresh_claim = _claim(factory, work.job_id)
+    assert fresh_claim.lease_token != old_claim.lease_token
+
+    provider = SuccessfulVideoProvider()
+    result = process_claimed_generation_job(
+        factory, old_claim, ProviderBundle(character_video=provider), WeddingPrivateStorage(get_settings())
+    )
+    assert result.error_code == "WORKER_LEASE_STALE"
+    assert provider.calls == 0
+    with factory() as db:
+        job = db.get(GenerationJob, work.job_id)
+        assert job is not None and job.status == WeddingJobStatus.PROCESSING
+        assert job.reserved_amount_fen == 1_000 and job.actual_cost_fen == 0
 
 
 def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client, monkeypatch):
@@ -517,7 +743,7 @@ def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client,
         job.actual_cost_fen = 31
         job.provider_name = "test-provider"
         job.model_version = "test-model-v1"
-        job.progress_stage = "provider_result_received"
+        job.progress_stage = "candidate_review"
         job.started_at = utc_now() - timedelta(hours=1)
         job.updated_at = utc_now() - timedelta(hours=1)
         first_shot.status = StoryboardShotStatus.CANDIDATE_REVIEW
@@ -529,10 +755,9 @@ def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client,
             )
         ).scalars().first() is not None
 
-    monkeypatch.setenv("WEDDING_PROVIDER_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("WEDDING_WORKER_STALE_SECONDS", "120")
     get_settings.cache_clear()
-    assert claim_next_generation_job(factory) == work.job_id
+    claim = _claim(factory, work.job_id)
     with factory() as db:
         recovered = db.get(GenerationJob, work.job_id)
         assert recovered is not None
@@ -550,7 +775,7 @@ def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client,
 
     provider = SuccessfulVideoProvider(cost_fen=19)
     result = process_claimed_generation_job(
-        factory, work.job_id, ProviderBundle(character_video=provider), storage
+        factory, claim, ProviderBundle(character_video=provider), storage
     )
     assert result.status == "completed"
     assert provider.calls == 1
@@ -573,9 +798,9 @@ def test_provider_result_after_project_version_changes_is_discarded_but_cost_is_
     provider = SuccessfulVideoProvider(cost_fen=21, mutate_version=True)
     factory = get_session_factory()
     settings = Settings(_env_file=None, local_upload_dir=str(tmp_path / "uploads"))
-    assert claim_next_generation_job(factory) == work.job_id
+    claim = _claim(factory, work.job_id)
     result = process_claimed_generation_job(
-        factory, work.job_id, ProviderBundle(character_video=provider), WeddingPrivateStorage(settings)
+        factory, claim, ProviderBundle(character_video=provider), WeddingPrivateStorage(settings)
     )
     assert result.status == "failed"
     assert result.error_code == "PROJECT_VERSION_STALE"
@@ -676,10 +901,10 @@ def test_local_demo_persists_provider_label_and_zero_cost_candidate(client):
     settings = get_settings().model_copy(update={"wedding_media_mode": "demo"})
     work = _project_with_job(client)
     factory = get_session_factory()
-    assert claim_next_generation_job(factory) == work.job_id
+    claim = _claim(factory, work.job_id)
     result = process_claimed_generation_job(
         factory,
-        work.job_id,
+        claim,
         build_provider_bundle(settings),
         WeddingPrivateStorage(settings),
     )

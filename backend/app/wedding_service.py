@@ -12,7 +12,7 @@ from uuid import uuid4
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -38,6 +38,7 @@ from app.models import (
     WeddingParticipant,
     WeddingProject,
     WeddingProjectStatus,
+    User,
     utc_now,
 )
 
@@ -340,6 +341,33 @@ def reserve_generation_budget(
         return existing
     if amount_fen <= 0:
         raise HTTPException(status_code=409, detail="BUDGET_RESERVATION_REQUIRED")
+    # Serialize reservations for one owner across all projects. The row lock is
+    # held by the caller's transaction until its commit, so a competing reserve
+    # observes the first reservation before calculating its own headroom.
+    owner_id = db.execute(
+        select(User.id).where(User.id == project.owner_id).with_for_update()
+    ).scalar_one_or_none()
+    if owner_id is None:
+        raise HTTPException(status_code=409, detail="BUDGET_OWNER_NOT_FOUND")
+    if db.get_bind().dialect.name == "sqlite":
+        # SQLite omits FOR UPDATE. A no-op owner-row update acquires its coarse
+        # writer lock before the aggregate read, mirroring the PostgreSQL row lock.
+        db.execute(
+            update(User)
+            .where(User.id == owner_id)
+            .values(updated_at=User.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+    account_reserved_and_spent = db.scalar(
+        select(
+            func.coalesce(
+                func.sum(WeddingProject.budget_spent_fen + WeddingProject.budget_reserved_fen),
+                0,
+            )
+        ).where(WeddingProject.owner_id == owner_id)
+    )
+    if int(account_reserved_and_spent or 0) + amount_fen > get_settings().wedding_account_budget_limit_fen:
+        raise HTTPException(status_code=409, detail="ACCOUNT_BUDGET_LIMIT_EXCEEDED")
     result = db.execute(
         update(WeddingProject)
         .where(

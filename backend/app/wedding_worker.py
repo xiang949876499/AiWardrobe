@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
@@ -63,6 +63,32 @@ class WorkerResult:
     error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class ClaimedGenerationJob:
+    job_id: str
+    lease_token: str
+
+
+def _normalized_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _lease_token(value: datetime | None) -> str | None:
+    return _normalized_utc(value).isoformat(timespec="microseconds") if value is not None else None
+
+
+def _lease_matches(job: GenerationJob, lease_token: str) -> bool:
+    return _lease_token(job.started_at) == lease_token
+
+
+def _locked_generation_job(db: Session, job_id: str) -> GenerationJob | None:
+    return db.execute(
+        select(GenerationJob).where(GenerationJob.id == job_id).with_for_update()
+    ).scalars().first()
+
+
 def _job_shots(db: Session, job: GenerationJob) -> list[StoryboardShot]:
     statement = select(StoryboardShot).where(StoryboardShot.story_version_id == job.story_version_id)
     if job.target_shot_id is not None:
@@ -70,7 +96,7 @@ def _job_shots(db: Session, job: GenerationJob) -> list[StoryboardShot]:
     return list(db.execute(statement.order_by(StoryboardShot.shot_index)).scalars())
 
 
-def claim_next_generation_job(session_factory: SessionFactory | None = None) -> str | None:
+def claim_next_generation_job(session_factory: SessionFactory | None = None) -> ClaimedGenerationJob | None:
     """Atomically claim one queued job; the conditional update is the SQLite-safe CAS."""
     factory = session_factory or get_session_factory()
     _recover_stale_generation_jobs(factory)
@@ -85,6 +111,8 @@ def claim_next_generation_job(session_factory: SessionFactory | None = None) -> 
         if candidate is None:
             return None
         now = utc_now()
+        previous_start = _normalized_utc(candidate.started_at) if candidate.started_at is not None else None
+        lease_started_at = max(now, previous_start + timedelta(microseconds=1)) if previous_start else now
         claim_stage = "recovered" if candidate.progress_stage == "recovered" else "claimed"
         set_job_status(candidate, WeddingJobStatus.PROCESSING)
         result = db.execute(
@@ -96,7 +124,7 @@ def claim_next_generation_job(session_factory: SessionFactory | None = None) -> 
             .values(
                 status=WeddingJobStatus.PROCESSING,
                 progress_stage=claim_stage,
-                started_at=candidate.started_at or now,
+                started_at=lease_started_at,
                 updated_at=now,
                 error_code=None,
                 error_category=None,
@@ -109,9 +137,11 @@ def claim_next_generation_job(session_factory: SessionFactory | None = None) -> 
         db.expire(candidate)
         db.refresh(candidate)
         candidate.progress_stage = claim_stage
-        candidate.started_at = candidate.started_at or now
+        candidate.started_at = lease_started_at
         db.commit()
-        return candidate.id
+        token = _lease_token(candidate.started_at)
+        assert token is not None
+        return ClaimedGenerationJob(candidate.id, token)
 
 
 def _recover_stale_generation_jobs(
@@ -148,19 +178,30 @@ def _recover_stale_generation_jobs(
             ).scalars().first()
             if job is None:
                 continue
-            # Validate both state transitions before the CAS makes recovery visible.
+            previous_stage = job.progress_stage
+            in_flight = previous_stage.startswith("dispatching_") or previous_stage == "provider_result_received"
+            # A provider may already be charging or returning bytes. Quarantine
+            # this attempt for reconciliation instead of risking redispatch.
             set_job_status(job, WeddingJobStatus.NEEDS_ACTION)
-            set_job_status(job, WeddingJobStatus.QUEUED)
+            if not in_flight:
+                set_job_status(job, WeddingJobStatus.QUEUED)
+            next_stage = "provider_outcome_unknown_cost_recorded" if previous_stage == "provider_result_received" else (
+                "provider_outcome_unknown" if in_flight else "recovered"
+            )
             result = db.execute(
                 update(GenerationJob)
                 .where(
                     GenerationJob.id == job_id,
                     GenerationJob.status == WeddingJobStatus.PROCESSING,
                     GenerationJob.updated_at < stale_before,
+                    GenerationJob.progress_stage == previous_stage,
                 )
                 .values(
-                    status=WeddingJobStatus.QUEUED,
-                    progress_stage="recovered",
+                    status=WeddingJobStatus.NEEDS_ACTION if in_flight else WeddingJobStatus.QUEUED,
+                    progress_stage=next_stage,
+                    started_at=job.started_at if in_flight else current_time,
+                    error_code="PROVIDER_OUTCOME_UNKNOWN" if in_flight else None,
+                    error_category="provider" if in_flight else None,
                     updated_at=current_time,
                 )
                 .execution_options(synchronize_session=False)
@@ -170,6 +211,10 @@ def _recover_stale_generation_jobs(
                 continue
             db.expire(job)
             db.refresh(job)
+            if in_flight:
+                project = db.get(WeddingProject, job.project_id)
+                if project is not None:
+                    _restore_project_workflow_state(db, project)
             db.commit()
             recovered_ids.append(job.id)
     return recovered_ids
@@ -206,12 +251,12 @@ def claim_next_render_version(session_factory: SessionFactory | None = None) -> 
         return candidate.id
 
 
-def _status_result(job_id: str, factory: SessionFactory) -> WorkerResult:
+def _status_result(job_id: str, factory: SessionFactory, *, error_code: str | None = None) -> WorkerResult:
     with factory() as db:
         job = db.get(GenerationJob, job_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
-        return WorkerResult(job.id, str(job.status), job.error_code)
+        return WorkerResult(job.id, str(job.status), error_code or job.error_code)
 
 
 def _complete_or_release_reservation(db: Session, job: GenerationJob, *, successful: bool) -> bool:
@@ -272,39 +317,66 @@ def _finalize_job(
     error_code: str | None,
     error_category: str | None = None,
     progress_stage: str | None = None,
+    lease_token: str | None = None,
 ) -> WorkerResult:
     with session_factory() as db:
-        job = db.get(GenerationJob, job_id)
+        job = _locked_generation_job(db, job_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
-        if job.status in {WeddingJobStatus.COMPLETED, WeddingJobStatus.FAILED, WeddingJobStatus.CANCELLED}:
-            return WorkerResult(job.id, str(job.status), job.error_code)
-        job.error_code = error_code
-        job.error_category = error_category
-        job.progress_stage = progress_stage or status.value
-        _complete_or_release_reservation(db, job, successful=status == WeddingJobStatus.COMPLETED)
-        if job.error_code == "ACTUAL_COST_EXCEEDS_RESERVATION":
-            status = WeddingJobStatus.NEEDS_ACTION
-        if job.status != status:
-            set_job_status(job, status)
-        job.finished_at = utc_now()
-        project = db.get(WeddingProject, job.project_id)
-        if project is not None:
-            _restore_project_workflow_state(db, project)
-        db.commit()
+        if lease_token is not None and not _lease_matches(job, lease_token):
+            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+        return _finalize_job_in_session(
+            db,
+            job,
+            status=status,
+            error_code=error_code,
+            error_category=error_category,
+            progress_stage=progress_stage,
+        )
+
+
+def _finalize_job_in_session(
+    db: Session,
+    job: GenerationJob,
+    *,
+    status: WeddingJobStatus,
+    error_code: str | None,
+    error_category: str | None = None,
+    progress_stage: str | None = None,
+) -> WorkerResult:
+    if job.status in {WeddingJobStatus.COMPLETED, WeddingJobStatus.FAILED, WeddingJobStatus.CANCELLED}:
         return WorkerResult(job.id, str(job.status), job.error_code)
+    job.error_code = error_code
+    job.error_category = error_category
+    job.progress_stage = progress_stage or status.value
+    _complete_or_release_reservation(db, job, successful=status == WeddingJobStatus.COMPLETED)
+    if job.error_code == "ACTUAL_COST_EXCEEDS_RESERVATION":
+        status = WeddingJobStatus.NEEDS_ACTION
+    if job.status != status:
+        set_job_status(job, status)
+    job.finished_at = utc_now()
+    project = db.get(WeddingProject, job.project_id)
+    if project is not None:
+        _restore_project_workflow_state(db, project)
+    db.commit()
+    return WorkerResult(job.id, str(job.status), job.error_code)
 
 
 def _dispatch_preflight(
     session_factory: SessionFactory,
     job_id: str,
     shot_id: str,
+    lease_token: str,
+    *,
+    mark_dispatching: bool,
 ) -> tuple[VideoGenerationRequest | None, str | None]:
     """Commit a truthful stage and re-check all gates at the provider dispatch boundary."""
     with session_factory() as db:
-        job = db.get(GenerationJob, job_id)
+        job = _locked_generation_job(db, job_id)
         if job is None:
             return None, "JOB_NOT_FOUND"
+        if not _lease_matches(job, lease_token):
+            return None, "WORKER_LEASE_STALE"
         if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
             return None, "CANCEL_REQUESTED"
         if job.status != WeddingJobStatus.PROCESSING:
@@ -356,7 +428,10 @@ def _dispatch_preflight(
         frame = db.get(WeddingAsset, shot.frame_asset_id)
         if frame is None or frame.project_id != project.id:
             return None, "STATIC_FRAME_MISSING"
-        job.progress_stage = "dispatching_character_video" if shot.shot_type == "person_ai" else "dispatching_scene_video"
+        operation = "character_video" if shot.shot_type == "person_ai" else "scene_video"
+        job.progress_stage = (
+            f"dispatching_{operation}" if mark_dispatching else f"preparing_{operation}"
+        )
         db.commit()
         return (
             VideoGenerationRequest(
@@ -376,21 +451,25 @@ def _dispatch_preflight(
 
 def process_claimed_generation_job(
     session_factory: SessionFactory,
-    job_id: str,
+    claim: ClaimedGenerationJob,
     providers: ProviderBundle,
     storage: WeddingPrivateStorage,
 ) -> WorkerResult:
+    job_id = claim.job_id
+    lease_token = claim.lease_token
     with session_factory() as db:
         job = db.get(GenerationJob, job_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+        if not _lease_matches(job, lease_token):
+            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
         if job.status in {WeddingJobStatus.COMPLETED, WeddingJobStatus.FAILED, WeddingJobStatus.CANCELLED}:
             return WorkerResult(job.id, str(job.status), job.error_code)
         project = db.get(WeddingProject, job.project_id)
         if project is None:
-            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.FAILED, error_code="PROJECT_NOT_FOUND")
+            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.FAILED, error_code="PROJECT_NOT_FOUND", lease_token=lease_token)
         if job.status == WeddingJobStatus.CANCEL_REQUESTED:
-            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None)
+            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None, lease_token=lease_token)
         if job.status != WeddingJobStatus.PROCESSING:
             return WorkerResult(job.id, str(job.status), "JOB_NOT_CLAIMED")
         if project.current_version != job.project_version:
@@ -400,6 +479,7 @@ def process_claimed_generation_job(
                 status=WeddingJobStatus.FAILED,
                 error_code="PROJECT_VERSION_STALE",
                 error_category="version",
+                lease_token=lease_token,
             )
         shots = _job_shots(db, job)
         job.total_shots = len(shots)
@@ -412,13 +492,15 @@ def process_claimed_generation_job(
             job = db.get(GenerationJob, job_id)
             if job is None:
                 return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+            if not _lease_matches(job, lease_token):
+                return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
             shot = db.get(StoryboardShot, shot_id)
             project = db.get(WeddingProject, job.project_id)
             if shot is None or project is None:
                 failure_codes.append("SHOT_NOT_FOUND")
                 continue
             if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
-                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None)
+                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None, lease_token=lease_token)
             if project.current_version != job.project_version or shot.project_version != job.project_version:
                 return _finalize_job(
                     session_factory,
@@ -426,6 +508,7 @@ def process_claimed_generation_job(
                     status=WeddingJobStatus.FAILED,
                     error_code="PROJECT_VERSION_STALE",
                     error_category="version",
+                    lease_token=lease_token,
                 )
             existing = db.execute(
                 select(ShotCandidate).where(
@@ -444,25 +527,34 @@ def process_claimed_generation_job(
                 set_shot_status(shot, StoryboardShotStatus.GENERATING)
             db.commit()
 
-        request, preflight_error = _dispatch_preflight(session_factory, job_id, shot_id)
+        request, preflight_error = _dispatch_preflight(
+            session_factory,
+            job_id,
+            shot_id,
+            lease_token,
+            mark_dispatching=False,
+        )
         if request is None:
             if preflight_error == "PHOTO_SHOT_DOES_NOT_DISPATCH":
                 continue
             if preflight_error == "CANCEL_REQUESTED":
-                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None)
+                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None, lease_token=lease_token)
+            if preflight_error == "WORKER_LEASE_STALE":
+                return _status_result(job_id, session_factory, error_code=preflight_error)
             return _finalize_job(
                 session_factory,
                 job_id,
                 status=WeddingJobStatus.FAILED,
                 error_code=preflight_error or "PROVIDER_PREFLIGHT_FAILED",
                 error_category="preflight",
+                lease_token=lease_token,
             )
 
         # Consent, version, cancellation, and the complete project reservation were checked immediately before dispatch.
         with session_factory() as db:
             frame = db.get(WeddingAsset, db.get(StoryboardShot, shot_id).frame_asset_id)
             if frame is None:
-                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.FAILED, error_code="STATIC_FRAME_MISSING")
+                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.FAILED, error_code="STATIC_FRAME_MISSING", lease_token=lease_token)
             try:
                 reference_bytes = storage.read(frame.object_key)
             except OSError:
@@ -472,7 +564,28 @@ def process_claimed_generation_job(
                     status=WeddingJobStatus.FAILED,
                     error_code="STATIC_FRAME_BYTES_UNAVAILABLE",
                     error_category="storage",
+                    lease_token=lease_token,
                 )
+        request, preflight_error = _dispatch_preflight(
+            session_factory,
+            job_id,
+            shot_id,
+            lease_token,
+            mark_dispatching=True,
+        )
+        if request is None:
+            if preflight_error == "CANCEL_REQUESTED":
+                return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None, lease_token=lease_token)
+            if preflight_error == "WORKER_LEASE_STALE":
+                return _status_result(job_id, session_factory, error_code=preflight_error)
+            return _finalize_job(
+                session_factory,
+                job_id,
+                status=WeddingJobStatus.FAILED,
+                error_code=preflight_error or "PROVIDER_PREFLIGHT_FAILED",
+                error_category="preflight",
+                lease_token=lease_token,
+            )
         request = VideoGenerationRequest(
             project_id=request.project_id,
             job_id=request.job_id,
@@ -492,15 +605,23 @@ def process_claimed_generation_job(
             output = provider.generate(request)
         except ProviderUnavailable as exc:
             failure_codes.append(exc.code)
-            _record_provider_failure(session_factory, job_id, shot_id, exc.code, exc.actual_cost_fen)
+            late_result = _record_provider_failure(
+                session_factory, job_id, shot_id, exc.code, exc.actual_cost_fen, lease_token
+            )
+            if late_result is not None:
+                return late_result
             continue
         except Exception as exc:
             actual = max(0, int(getattr(exc, "actual_cost_fen", 0) or 0))
             failure_codes.append("PROVIDER_ERROR")
-            _record_provider_failure(session_factory, job_id, shot_id, "PROVIDER_ERROR", actual)
+            late_result = _record_provider_failure(
+                session_factory, job_id, shot_id, "PROVIDER_ERROR", actual, lease_token
+            )
+            if late_result is not None:
+                return late_result
             continue
 
-        result = _record_provider_output(session_factory, job_id, shot_id, output, storage)
+        result = _record_provider_output(session_factory, job_id, shot_id, output, storage, lease_token)
         if result is not None:
             return result
         with session_factory() as db:
@@ -519,7 +640,7 @@ def process_claimed_generation_job(
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
         if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
-            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None)
+            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None, lease_token=lease_token)
         if job.project.current_version != job.project_version:
             return _finalize_job(
                 session_factory,
@@ -527,6 +648,7 @@ def process_claimed_generation_job(
                 status=WeddingJobStatus.FAILED,
                 error_code="PROJECT_VERSION_STALE",
                 error_category="version",
+                lease_token=lease_token,
             )
         if failure_codes:
             failed_status = WeddingJobStatus.NEEDS_ACTION if job.completed_shots else WeddingJobStatus.FAILED
@@ -537,6 +659,7 @@ def process_claimed_generation_job(
                 error_code=failure_codes[0],
                 error_category="provider",
                 progress_stage="needs_action" if failed_status == WeddingJobStatus.NEEDS_ACTION else "failed",
+                lease_token=lease_token,
             )
     return _finalize_job(
         session_factory,
@@ -544,7 +667,28 @@ def process_claimed_generation_job(
         status=WeddingJobStatus.COMPLETED,
         error_code=None,
         progress_stage="review",
+        lease_token=lease_token,
     )
+
+
+def _apply_provider_failure(
+    job: GenerationJob,
+    shot: StoryboardShot | None,
+    code: str,
+    actual_cost_fen: int,
+) -> None:
+    if job.progress_stage.startswith("dispatching_"):
+        job.actual_cost_fen += max(0, int(actual_cost_fen))
+    elif job.progress_stage != "provider_result_received":
+        return
+    job.error_code = code
+    job.error_category = "provider"
+    job.progress_stage = "shot_failed"
+    if shot is not None and shot.status != StoryboardShotStatus.FAILED:
+        try:
+            set_shot_status(shot, StoryboardShotStatus.FAILED)
+        except ValueError:
+            pass
 
 
 def _record_provider_failure(
@@ -553,22 +697,33 @@ def _record_provider_failure(
     shot_id: str,
     code: str,
     actual_cost_fen: int,
-) -> None:
+    lease_token: str,
+) -> WorkerResult | None:
     with session_factory() as db:
-        job = db.get(GenerationJob, job_id)
+        job = _locked_generation_job(db, job_id)
         shot = db.get(StoryboardShot, shot_id)
         if job is None:
-            return
-        job.actual_cost_fen += max(0, int(actual_cost_fen))
-        job.error_code = code
-        job.error_category = "provider"
-        job.progress_stage = "shot_failed"
-        if shot is not None and shot.status != StoryboardShotStatus.FAILED:
-            try:
-                set_shot_status(shot, StoryboardShotStatus.FAILED)
-            except ValueError:
-                pass
+            return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+        if job.status == WeddingJobStatus.NEEDS_ACTION and job.error_code == "PROVIDER_OUTCOME_UNKNOWN":
+            if not _lease_matches(job, lease_token):
+                return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+            if job.progress_stage == "provider_outcome_unknown":
+                job.actual_cost_fen += max(0, int(actual_cost_fen))
+                job.progress_stage = "provider_cost_reconciled"
+                db.commit()
+            elif job.progress_stage not in {
+                "provider_outcome_unknown_cost_recorded",
+                "provider_cost_reconciled",
+            }:
+                return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+            return WorkerResult(job.id, str(job.status), "PROVIDER_OUTCOME_UNKNOWN")
+        if job.status not in {WeddingJobStatus.PROCESSING, WeddingJobStatus.CANCEL_REQUESTED} or not _lease_matches(job, lease_token):
+            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+        if not job.progress_stage.startswith("dispatching_") and job.progress_stage != "provider_result_received":
+            return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
+        _apply_provider_failure(job, shot, code, actual_cost_fen)
         db.commit()
+    return None
 
 
 def _record_provider_output(
@@ -577,11 +732,33 @@ def _record_provider_output(
     shot_id: str,
     output: MediaOutput,
     storage: WeddingPrivateStorage,
+    lease_token: str,
 ) -> WorkerResult | None:
     with session_factory() as db:
-        job = db.get(GenerationJob, job_id)
+        job = _locked_generation_job(db, job_id)
         if job is None:
             return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+        if job.status == WeddingJobStatus.NEEDS_ACTION and job.error_code == "PROVIDER_OUTCOME_UNKNOWN":
+            if not _lease_matches(job, lease_token):
+                return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+            if job.progress_stage == "provider_outcome_unknown":
+                job.actual_cost_fen += max(0, int(output.actual_cost_fen))
+                job.provider_name = output.provider
+                job.model_version = output.model_version
+                if output.request_id:
+                    job.provider_request_id = output.request_id
+                job.progress_stage = "provider_cost_reconciled"
+                db.commit()
+            elif job.progress_stage not in {
+                "provider_outcome_unknown_cost_recorded",
+                "provider_cost_reconciled",
+            }:
+                return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
+            return WorkerResult(job.id, str(job.status), "PROVIDER_OUTCOME_UNKNOWN")
+        if job.status not in {WeddingJobStatus.PROCESSING, WeddingJobStatus.CANCEL_REQUESTED} or not _lease_matches(job, lease_token):
+            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+        if not job.progress_stage.startswith("dispatching_"):
+            return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
         job.actual_cost_fen += max(0, int(output.actual_cost_fen))
         job.provider_name = output.provider
         job.model_version = output.model_version
@@ -590,19 +767,40 @@ def _record_provider_output(
         job.progress_stage = "provider_result_received"
         db.commit()
 
-    # Provider cost is durable before we inspect late cancellation or version changes.
+    # Provider cost is durable before late cancellation/version checks. The
+    # result stage is also a recovery marker so a crash here is never retried.
     with session_factory() as db:
-        job = db.get(GenerationJob, job_id)
+        job = _locked_generation_job(db, job_id)
         shot = db.get(StoryboardShot, shot_id)
         project = db.get(WeddingProject, job.project_id) if job is not None else None
         if job is None or shot is None or project is None:
-            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.FAILED, error_code="SHOT_NOT_FOUND")
+            if job is None:
+                return WorkerResult(job_id, "missing", "JOB_NOT_FOUND")
+            return _finalize_job_in_session(
+                db,
+                job,
+                status=WeddingJobStatus.FAILED,
+                error_code="SHOT_NOT_FOUND",
+            )
+        if job.status == WeddingJobStatus.NEEDS_ACTION and job.error_code == "PROVIDER_OUTCOME_UNKNOWN":
+            return WorkerResult(job.id, str(job.status), "PROVIDER_OUTCOME_UNKNOWN")
+        if not _lease_matches(job, lease_token):
+            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
         if job.status == WeddingJobStatus.CANCEL_REQUESTED or job.cancel_requested_at is not None:
-            return _finalize_job(session_factory, job_id, status=WeddingJobStatus.CANCELLED, error_code=None)
+            return _finalize_job_in_session(
+                db,
+                job,
+                status=WeddingJobStatus.CANCELLED,
+                error_code=None,
+            )
+        if job.status != WeddingJobStatus.PROCESSING:
+            return WorkerResult(job.id, str(job.status), "WORKER_LEASE_STALE")
+        if job.progress_stage != "provider_result_received":
+            return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
         if project.current_version != job.project_version or shot.project_version != job.project_version:
-            return _finalize_job(
-                session_factory,
-                job_id,
+            return _finalize_job_in_session(
+                db,
+                job,
                 status=WeddingJobStatus.FAILED,
                 error_code="PROJECT_VERSION_STALE",
                 error_category="version",
@@ -610,28 +808,38 @@ def _record_provider_output(
         try:
             validate_active_consents(db, project)
         except HTTPException:
-            return _finalize_job(
-                session_factory,
-                job_id,
+            return _finalize_job_in_session(
+                db,
+                job,
                 status=WeddingJobStatus.CANCELLED,
                 error_code="CONSENT_REQUIRED",
                 error_category="consent",
             )
         if output.actual_cost_fen < 0 or not output.data or not output.mime or not output.provider or not output.model_version:
-            _record_provider_failure(session_factory, job_id, shot_id, "PROVIDER_RESULT_INVALID", 0)
+            _apply_provider_failure(job, shot, "PROVIDER_RESULT_INVALID", 0)
+            db.commit()
             return None
         if job.actual_cost_fen > job.reserved_amount_fen:
-            return _finalize_job(
-                session_factory,
-                job_id,
+            return _finalize_job_in_session(
+                db,
+                job,
                 status=WeddingJobStatus.NEEDS_ACTION,
                 error_code="ACTUAL_COST_EXCEEDS_RESERVATION",
                 error_category="budget",
                 progress_stage="needs_action",
             )
         if output.mime not in {"image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm"}:
-            _record_provider_failure(session_factory, job_id, shot_id, "PROVIDER_RESULT_UNSUPPORTED", 0)
+            _apply_provider_failure(job, shot, "PROVIDER_RESULT_UNSUPPORTED", 0)
+            db.commit()
             return None
+        existing = db.execute(
+            select(ShotCandidate.id).where(
+                ShotCandidate.generation_job_id == job_id,
+                ShotCandidate.shot_id == shot_id,
+            )
+        ).first()
+        if existing is not None:
+            return WorkerResult(job.id, str(job.status), "PROVIDER_RESULT_ALREADY_HANDLED")
         asset_type = WeddingAssetType.VIDEO_CANDIDATE if output.mime.startswith("video/") else WeddingAssetType.GENERATED_FRAME
         suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm"}[output.mime]
         object_key = None
@@ -669,7 +877,9 @@ def _record_provider_output(
             db.rollback()
             if object_key:
                 storage.delete(object_key)
-            _record_provider_failure(session_factory, job_id, shot_id, "OUTPUT_PERSISTENCE_FAILED", 0)
+            _record_provider_failure(
+                session_factory, job_id, shot_id, "OUTPUT_PERSISTENCE_FAILED", 0, lease_token
+            )
             return None
     return None
 
