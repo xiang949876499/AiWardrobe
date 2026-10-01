@@ -110,6 +110,15 @@ def _ensure_wedding_project_columns(engine: Engine) -> None:
         for name, ddl in missing.items():
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE wedding_projects ADD COLUMN {name} {ddl}"))
+        if "wedding_consent_invites" in set(inspect(connection).get_table_names()):
+            invite_columns = {column["name"] for column in inspect(connection).get_columns("wedding_consent_invites")}
+            if "status" not in invite_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE wedding_consent_invites "
+                        "ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'active'"
+                    )
+                )
 
 
 def get_db() -> Generator[Session, None, None]:

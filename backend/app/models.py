@@ -287,6 +287,63 @@ class WeddingJobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class WeddingConsentStatus(StrEnum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    DECLINED = "declined"
+    REVOKED = "revoked"
+
+
+class WeddingInviteStatus(StrEnum):
+    ACTIVE = "active"
+    CONSUMED = "consumed"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+class StoryVersionStatus(StrEnum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    SUPERSEDED = "superseded"
+
+
+class StoryboardShotStatus(StrEnum):
+    DRAFT = "draft"
+    FRAME_PENDING = "frame_pending"
+    FRAME_APPROVED = "frame_approved"
+    GENERATING = "generating"
+    CANDIDATE_REVIEW = "candidate_review"
+    APPROVED = "approved"
+    FALLBACK = "fallback"
+    FAILED = "failed"
+
+
+class ParticipantReviewStatus(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class CandidateReviewStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class RenderVersionStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    READY = "ready"
+    APPROVED = "approved"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class BudgetLedgerStatus(StrEnum):
+    RESERVED = "reserved"
+    SETTLED = "settled"
+    RELEASED = "released"
+
+
 class WeddingProject(Base):
     __tablename__ = "wedding_projects"
 
@@ -333,7 +390,12 @@ class WeddingParticipant(Base):
     display_name: Mapped[str] = mapped_column(String(60), default="", nullable=False)
     is_owner: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    consent_status: Mapped[str] = mapped_column(String(16), default="pending", index=True, nullable=False)
+    consent_status: Mapped[WeddingConsentStatus] = mapped_column(
+        Enum(WeddingConsentStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        default=WeddingConsentStatus.PENDING,
+        index=True,
+        nullable=False,
+    )
     consent_scope: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     provider_list: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     terms_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -357,6 +419,12 @@ class ConsentInvite(Base):
     scope: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     provider_list: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     terms_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[WeddingInviteStatus] = mapped_column(
+        Enum(WeddingInviteStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        default=WeddingInviteStatus.ACTIVE,
+        index=True,
+        nullable=False,
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -418,7 +486,12 @@ class StoryVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     story_text: Mapped[str] = mapped_column(Text, nullable=False)
     style: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="draft", index=True, nullable=False)
+    status: Mapped[StoryVersionStatus] = mapped_column(
+        Enum(StoryVersionStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        default=StoryVersionStatus.DRAFT,
+        index=True,
+        nullable=False,
+    )
     owner_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
@@ -460,7 +533,12 @@ class StoryboardShot(Base):
     frame_asset_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_assets.id"), nullable=True)
     selected_asset_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_assets.id"), nullable=True)
     selected_candidate_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    status: Mapped[str] = mapped_column(String(24), default="draft", index=True, nullable=False)
+    status: Mapped[StoryboardShotStatus] = mapped_column(
+        Enum(StoryboardShotStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=24),
+        default=StoryboardShotStatus.DRAFT,
+        index=True,
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     story_version: Mapped[StoryVersion] = relationship(back_populates="shots")
@@ -481,7 +559,10 @@ class ParticipantReview(Base):
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_storyboard_shots.id"), nullable=True)
     render_version_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_render_versions.id"), nullable=True)
     asset_id: Mapped[str] = mapped_column(ForeignKey("wedding_assets.id"), nullable=False)
-    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    result: Mapped[ParticipantReviewStatus] = mapped_column(
+        Enum(ParticipantReviewStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        nullable=False,
+    )
     confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     carried_from_review_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_participant_reviews.id"), nullable=True)
 
@@ -553,7 +634,11 @@ class ShotCandidate(Base):
     provider: Mapped[str] = mapped_column(String(80), nullable=False)
     model_version: Mapped[str] = mapped_column(String(120), nullable=False)
     quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    review_result: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    review_result: Mapped[CandidateReviewStatus] = mapped_column(
+        Enum(CandidateReviewStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        default=CandidateReviewStatus.PENDING,
+        nullable=False,
+    )
     actual_cost_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
@@ -569,7 +654,12 @@ class RenderVersion(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("wedding_projects.id"), index=True, nullable=False)
     project_version: Mapped[int] = mapped_column(Integer, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="queued", index=True, nullable=False)
+    status: Mapped[RenderVersionStatus] = mapped_column(
+        Enum(RenderVersionStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        default=RenderVersionStatus.QUEUED,
+        index=True,
+        nullable=False,
+    )
     timeline_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     input_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     preview_asset_id: Mapped[str | None] = mapped_column(ForeignKey("wedding_assets.id"), nullable=True)
@@ -595,7 +685,12 @@ class BudgetLedger(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("wedding_projects.id"), index=True, nullable=False)
     generation_job_id: Mapped[str] = mapped_column(ForeignKey("wedding_generation_jobs.id"), unique=True, nullable=False)
     reservation_key: Mapped[str] = mapped_column(String(140), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="reserved", index=True, nullable=False)
+    status: Mapped[BudgetLedgerStatus] = mapped_column(
+        Enum(BudgetLedgerStatus, native_enum=False, create_constraint=True, values_callable=lambda values: [item.value for item in values], length=16),
+        default=BudgetLedgerStatus.RESERVED,
+        index=True,
+        nullable=False,
+    )
     reserved_fen: Mapped[int] = mapped_column(Integer, nullable=False)
     actual_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     released_fen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

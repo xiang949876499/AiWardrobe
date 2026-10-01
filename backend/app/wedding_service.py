@@ -4,6 +4,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import uuid4
@@ -18,12 +19,21 @@ from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import (
     BudgetLedger,
+    BudgetLedgerStatus,
+    ConsentInvite,
     GenerationJob,
     ParticipantReview,
+    ParticipantReviewStatus,
+    RenderVersion,
+    RenderVersionStatus,
     StoryVersion,
+    StoryVersionStatus,
     StoryboardShot,
+    StoryboardShotStatus,
     WeddingAsset,
+    WeddingConsentStatus,
     WeddingConsent,
+    WeddingInviteStatus,
     WeddingJobStatus,
     WeddingParticipant,
     WeddingProject,
@@ -48,6 +58,110 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _set_status(entity: object, attribute: str, value: StrEnum, allowed: dict[StrEnum, set[StrEnum]]) -> None:
+    current = type(value)(getattr(entity, attribute))
+    if current == value:
+        return
+    if value not in allowed[current]:
+        raise ValueError(f"Illegal {type(value).__name__} transition: {current.value} -> {value.value}")
+    setattr(entity, attribute, value)
+
+
+def set_consent_status(participant: WeddingParticipant, value: WeddingConsentStatus) -> None:
+    _set_status(
+        participant,
+        "consent_status",
+        WeddingConsentStatus(value),
+        {
+            WeddingConsentStatus.PENDING: {WeddingConsentStatus.ACTIVE, WeddingConsentStatus.DECLINED, WeddingConsentStatus.REVOKED},
+            WeddingConsentStatus.ACTIVE: {WeddingConsentStatus.REVOKED},
+            WeddingConsentStatus.DECLINED: {WeddingConsentStatus.PENDING, WeddingConsentStatus.ACTIVE},
+            WeddingConsentStatus.REVOKED: {WeddingConsentStatus.PENDING, WeddingConsentStatus.ACTIVE},
+        },
+    )
+
+
+def set_invite_status(invite: ConsentInvite, value: WeddingInviteStatus) -> None:
+    _set_status(
+        invite,
+        "status",
+        WeddingInviteStatus(value),
+        {
+            WeddingInviteStatus.ACTIVE: {WeddingInviteStatus.CONSUMED, WeddingInviteStatus.REVOKED, WeddingInviteStatus.EXPIRED},
+            WeddingInviteStatus.CONSUMED: set(),
+            WeddingInviteStatus.REVOKED: set(),
+            WeddingInviteStatus.EXPIRED: set(),
+        },
+    )
+
+
+def set_story_status(story: StoryVersion, value: StoryVersionStatus) -> None:
+    _set_status(
+        story,
+        "status",
+        StoryVersionStatus(value),
+        {
+            StoryVersionStatus.DRAFT: {StoryVersionStatus.APPROVED, StoryVersionStatus.SUPERSEDED},
+            StoryVersionStatus.APPROVED: {StoryVersionStatus.SUPERSEDED},
+            StoryVersionStatus.SUPERSEDED: set(),
+        },
+    )
+
+
+def set_shot_status(shot: StoryboardShot, value: StoryboardShotStatus) -> None:
+    _set_status(
+        shot,
+        "status",
+        StoryboardShotStatus(value),
+        {
+            StoryboardShotStatus.DRAFT: {StoryboardShotStatus.FRAME_PENDING, StoryboardShotStatus.FAILED},
+            StoryboardShotStatus.FRAME_PENDING: {StoryboardShotStatus.FRAME_APPROVED, StoryboardShotStatus.FAILED},
+            StoryboardShotStatus.FRAME_APPROVED: {StoryboardShotStatus.GENERATING, StoryboardShotStatus.CANDIDATE_REVIEW, StoryboardShotStatus.FALLBACK, StoryboardShotStatus.FAILED, StoryboardShotStatus.FRAME_PENDING},
+            StoryboardShotStatus.GENERATING: {StoryboardShotStatus.CANDIDATE_REVIEW, StoryboardShotStatus.FAILED, StoryboardShotStatus.FRAME_PENDING},
+            StoryboardShotStatus.CANDIDATE_REVIEW: {StoryboardShotStatus.APPROVED, StoryboardShotStatus.FALLBACK, StoryboardShotStatus.GENERATING, StoryboardShotStatus.FAILED, StoryboardShotStatus.FRAME_PENDING},
+            StoryboardShotStatus.APPROVED: {StoryboardShotStatus.CANDIDATE_REVIEW, StoryboardShotStatus.FALLBACK, StoryboardShotStatus.FRAME_PENDING},
+            StoryboardShotStatus.FALLBACK: {StoryboardShotStatus.CANDIDATE_REVIEW, StoryboardShotStatus.APPROVED, StoryboardShotStatus.FRAME_PENDING},
+            StoryboardShotStatus.FAILED: {StoryboardShotStatus.FRAME_PENDING, StoryboardShotStatus.GENERATING},
+        },
+    )
+
+
+def set_review_status(review: ParticipantReview, value: ParticipantReviewStatus) -> None:
+    normalized = ParticipantReviewStatus(value)
+    if normalized not in {ParticipantReviewStatus.APPROVED, ParticipantReviewStatus.REJECTED}:
+        raise ValueError(f"Invalid participant review status: {normalized}")
+    review.result = normalized
+
+
+def set_render_status(render: RenderVersion, value: RenderVersionStatus) -> None:
+    _set_status(
+        render,
+        "status",
+        RenderVersionStatus(value),
+        {
+            RenderVersionStatus.QUEUED: {RenderVersionStatus.PROCESSING, RenderVersionStatus.READY, RenderVersionStatus.FAILED, RenderVersionStatus.CANCELLED},
+            RenderVersionStatus.PROCESSING: {RenderVersionStatus.READY, RenderVersionStatus.FAILED, RenderVersionStatus.CANCELLED},
+            RenderVersionStatus.READY: {RenderVersionStatus.APPROVED, RenderVersionStatus.CANCELLED},
+            RenderVersionStatus.APPROVED: {RenderVersionStatus.CANCELLED},
+            RenderVersionStatus.FAILED: set(),
+            RenderVersionStatus.CANCELLED: set(),
+        },
+    )
+
+
+def set_budget_status(entry: BudgetLedger, value: BudgetLedgerStatus) -> None:
+    _set_status(
+        entry,
+        "status",
+        BudgetLedgerStatus(value),
+        {
+            BudgetLedgerStatus.RESERVED: {BudgetLedgerStatus.SETTLED, BudgetLedgerStatus.RELEASED},
+            BudgetLedgerStatus.SETTLED: set(),
+            BudgetLedgerStatus.RELEASED: set(),
+        },
+    )
 
 
 def get_wedding_actor(
@@ -167,6 +281,8 @@ def validate_active_consents(db: Session, project: WeddingProject) -> list[Weddi
             or participant.consent_status != "active"
             or "portrait_processing" not in (participant.consent_scope or [])
             or not participant.provider_list
+            or participant.confirmed_at is None
+            or participant.revoked_at is not None
         ):
             raise HTTPException(status_code=409, detail="CONSENT_REQUIRED")
     return [by_key["A"], by_key["B"]]
@@ -243,7 +359,7 @@ def reserve_generation_budget(
         project_id=project.id,
         generation_job_id=job.id,
         reservation_key=reservation_key,
-        status="reserved",
+        status=BudgetLedgerStatus.RESERVED,
         reserved_fen=amount_fen,
     )
     job.reserved_amount_fen = amount_fen
@@ -256,11 +372,11 @@ def reserve_generation_budget(
 def settle_generation_budget(db: Session, job: GenerationJob, actual_fen: int) -> BudgetLedger:
     """Settle an existing reservation once, releasing unused funds. Worker-facing API."""
     entry = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == job.id)).scalar_one()
-    if entry.status == "settled":
+    if entry.status == BudgetLedgerStatus.SETTLED:
         if entry.actual_fen != actual_fen:
             raise ValueError("A settled generation reservation cannot be changed")
         return entry
-    if entry.status != "reserved" or actual_fen < 0 or actual_fen > entry.reserved_fen:
+    if entry.status != BudgetLedgerStatus.RESERVED or actual_fen < 0 or actual_fen > entry.reserved_fen:
         raise ValueError("Invalid generation budget settlement")
     result = db.execute(
         update(WeddingProject)
@@ -273,7 +389,7 @@ def settle_generation_budget(db: Session, job: GenerationJob, actual_fen: int) -
     )
     if result.rowcount != 1:
         raise ValueError("Wedding budget reservation is inconsistent")
-    entry.status = "settled"
+    set_budget_status(entry, BudgetLedgerStatus.SETTLED)
     entry.actual_fen = actual_fen
     entry.released_fen = entry.reserved_fen - actual_fen
     entry.settled_at = utc_now()
@@ -285,9 +401,9 @@ def settle_generation_budget(db: Session, job: GenerationJob, actual_fen: int) -
 def release_generation_budget(db: Session, job: GenerationJob) -> BudgetLedger:
     """Release a reservation when a job is safely cancelled before dispatch."""
     entry = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == job.id)).scalar_one()
-    if entry.status == "released":
+    if entry.status == BudgetLedgerStatus.RELEASED:
         return entry
-    if entry.status != "reserved":
+    if entry.status != BudgetLedgerStatus.RESERVED:
         raise ValueError("Only an unsettled reservation can be released")
     result = db.execute(
         update(WeddingProject)
@@ -297,7 +413,7 @@ def release_generation_budget(db: Session, job: GenerationJob) -> BudgetLedger:
     )
     if result.rowcount != 1:
         raise ValueError("Wedding budget reservation is inconsistent")
-    entry.status = "released"
+    set_budget_status(entry, BudgetLedgerStatus.RELEASED)
     entry.released_fen = entry.reserved_fen
     entry.settled_at = utc_now()
     job.reserved_amount_fen = 0

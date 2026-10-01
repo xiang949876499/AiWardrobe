@@ -20,15 +20,22 @@ from app.models import (
     BudgetLedger,
     ConsentInvite,
     GenerationJob,
+    BudgetLedgerStatus,
+    ParticipantReviewStatus,
     ParticipantReview,
     RenderVersion,
+    RenderVersionStatus,
     ShotCandidate,
     StoryFact,
     StoryVersion,
+    StoryVersionStatus,
     StoryboardShot,
+    StoryboardShotStatus,
     WeddingAsset,
     WeddingAssetType,
     WeddingConsent,
+    WeddingConsentStatus,
+    WeddingInviteStatus,
     WeddingJobStatus,
     WeddingParticipant,
     WeddingProject,
@@ -74,7 +81,14 @@ from app.wedding_service import (
     require_project_owner,
     reserve_generation_budget,
     set_job_status,
+    set_budget_status,
+    set_consent_status,
+    set_invite_status,
     set_project_status,
+    set_render_status,
+    set_review_status,
+    set_shot_status,
+    set_story_status,
     validate_active_consents,
     validate_identity_reviews,
 )
@@ -390,10 +404,18 @@ def update_wedding_project(
         project.current_version += 1
         project.frame_approved_version = None
         _set_project_status(project, WeddingProjectStatus.STORY_REVIEW)
+        current_story = db.execute(
+            select(StoryVersion).where(
+                StoryVersion.project_id == project.id,
+                StoryVersion.version == body.version,
+            )
+        ).scalar_one_or_none()
+        if current_story is not None:
+            set_story_status(current_story, StoryVersionStatus.SUPERSEDED)
         for job in db.execute(
             select(GenerationJob).where(
                 GenerationJob.project_id == project.id,
-                GenerationJob.status == WeddingJobStatus.QUEUED,
+                GenerationJob.status.in_([WeddingJobStatus.QUEUED, WeddingJobStatus.PROCESSING]),
             )
         ).scalars():
             if job.status == WeddingJobStatus.QUEUED:
@@ -441,12 +463,19 @@ def confirm_owner_consent(
         )
     ).scalar_one()
     now = utc_now()
-    participant.consent_status = "active"
+    set_consent_status(participant, WeddingConsentStatus.ACTIVE)
     participant.consent_scope = sorted(set(body.scope))
     participant.provider_list = sorted(set(body.provider_list))
     participant.terms_version = body.terms_version
     participant.confirmed_at = now
     participant.revoked_at = None
+    for previous in db.execute(
+        select(WeddingConsent).where(
+            WeddingConsent.participant_id == participant.id,
+            WeddingConsent.revoked_at.is_(None),
+        )
+    ).scalars():
+        previous.revoked_at = now
     db.add(
         WeddingConsent(
             project_id=project.id,
@@ -498,18 +527,20 @@ def create_consent_invite(
         if participant.consent_status == "active":
             raise HTTPException(status_code=409, detail="PARTICIPANT_ALREADY_CONSENTED")
         participant.display_name = body.display_name
-        participant.consent_status = "pending"
+        set_consent_status(participant, WeddingConsentStatus.PENDING)
         participant.session_token_hash = None
         participant.session_expires_at = None
     for previous in db.execute(
         select(ConsentInvite).where(
             ConsentInvite.project_id == project.id,
             ConsentInvite.participant_id == participant.id,
+            ConsentInvite.status == WeddingInviteStatus.ACTIVE,
             ConsentInvite.consumed_at.is_(None),
             ConsentInvite.revoked_at.is_(None),
         )
     ).scalars():
         previous.revoked_at = utc_now()
+        set_invite_status(previous, WeddingInviteStatus.REVOKED)
     raw_token = secrets.token_urlsafe(32)
     expires_at = utc_now() + timedelta(days=7)
     invite = ConsentInvite(
@@ -519,6 +550,7 @@ def create_consent_invite(
         scope=["portrait_processing", "preview_review", "storage"],
         provider_list=sorted(set(body.provider_list)),
         terms_version=body.terms_version,
+        status=WeddingInviteStatus.ACTIVE,
         expires_at=expires_at,
     )
     db.add(invite)
@@ -545,9 +577,15 @@ def confirm_consent_invite(
         raise HTTPException(status_code=404, detail="Consent invite not found")
     now = utc_now()
     expires_at = invite.expires_at if invite.expires_at.tzinfo else invite.expires_at.replace(tzinfo=now.tzinfo)
-    if invite.revoked_at is not None or invite.consumed_at is not None:
+    if (
+        invite.status != WeddingInviteStatus.ACTIVE
+        or invite.revoked_at is not None
+        or invite.consumed_at is not None
+    ):
         raise HTTPException(status_code=409, detail="CONSENT_INVITE_ALREADY_USED")
     if expires_at <= now:
+        set_invite_status(invite, WeddingInviteStatus.EXPIRED)
+        db.commit()
         raise HTTPException(status_code=410, detail="CONSENT_INVITE_EXPIRED")
     if body.terms_version != invite.terms_version:
         raise HTTPException(status_code=409, detail="CONSENT_TERMS_VERSION_MISMATCH")
@@ -556,8 +594,9 @@ def confirm_consent_invite(
     if participant is None or project is None:
         raise HTTPException(status_code=404, detail="Consent invite not found")
     invite.consumed_at = now
+    set_invite_status(invite, WeddingInviteStatus.CONSUMED)
     if not body.accepted:
-        participant.consent_status = "declined"
+        set_consent_status(participant, WeddingConsentStatus.DECLINED)
         participant.session_token_hash = None
         _record_audit(
             db,
@@ -580,7 +619,7 @@ def confirm_consent_invite(
     if not body.display_name:
         raise HTTPException(status_code=422, detail="DISPLAY_NAME_REQUIRED")
     participant.display_name = body.display_name
-    participant.consent_status = "active"
+    set_consent_status(participant, WeddingConsentStatus.ACTIVE)
     participant.consent_scope = invite.scope
     participant.provider_list = invite.provider_list
     participant.terms_version = invite.terms_version
@@ -602,6 +641,13 @@ def confirm_consent_invite(
     )
     participant.session_token_hash = hashlib.sha256(participant_token.encode("utf-8")).hexdigest()
     participant.session_expires_at = session_expires
+    for previous in db.execute(
+        select(WeddingConsent).where(
+            WeddingConsent.participant_id == participant.id,
+            WeddingConsent.revoked_at.is_(None),
+        )
+    ).scalars():
+        previous.revoked_at = now
     db.add(
         WeddingConsent(
             project_id=project.id,
@@ -653,16 +699,16 @@ def revoke_consent(
         raise HTTPException(status_code=404, detail="Wedding project not found")
     participant = _participant_for_actor(db, project, actor)
     now = utc_now()
-    participant.consent_status = "revoked"
+    set_consent_status(participant, WeddingConsentStatus.REVOKED)
     participant.revoked_at = now
     participant.session_token_hash = None
     participant.session_expires_at = None
-    consent = db.execute(
-        select(WeddingConsent)
-        .where(WeddingConsent.participant_id == participant.id, WeddingConsent.revoked_at.is_(None))
-        .order_by(WeddingConsent.confirmed_at.desc())
-    ).scalars().first()
-    if consent is not None:
+    for consent in db.execute(
+        select(WeddingConsent).where(
+            WeddingConsent.participant_id == participant.id,
+            WeddingConsent.revoked_at.is_(None),
+        )
+    ).scalars():
         consent.revoked_at = now
     _set_project_status(project, WeddingProjectStatus.AWAITING_CONSENT)
     for job in db.execute(
@@ -693,11 +739,49 @@ async def upload_wedding_asset(
     db: Session = Depends(get_db),
     storage: WeddingPrivateStorage = Depends(private_storage),
 ) -> WeddingAssetResponse:
-    project = require_project_owner(db, actor, project_id)
+    project = db.get(WeddingProject, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Wedding project not found")
     if asset_type not in ALLOWED_ASSET_TYPES:
         raise HTTPException(status_code=422, detail="ASSET_TYPE_UNSUPPORTED")
+    if asset_type not in {WeddingAssetType.PHOTO.value, WeddingAssetType.STORYBOARD_FRAME.value}:
+        raise HTTPException(status_code=422, detail="ASSET_TYPE_UPLOAD_UNSUPPORTED")
     if asset_type in {WeddingAssetType.PHOTO.value, WeddingAssetType.STORYBOARD_FRAME.value} and person_key is None:
         raise HTTPException(status_code=422, detail="PERSON_KEY_REQUIRED")
+    if actor.kind == "owner":
+        if actor.owner_id != project.owner_id:
+            raise HTTPException(status_code=404, detail="Wedding project not found")
+        if person_key != "A":
+            raise HTTPException(status_code=403, detail="SUBJECT_UPLOAD_SCOPE_REQUIRED")
+    else:
+        if actor.project_id != project.id or actor.participant_id is None:
+            raise HTTPException(status_code=404, detail="Wedding project not found")
+        participant = db.get(WeddingParticipant, actor.participant_id)
+        if (
+            participant is None
+            or participant.project_id != project.id
+            or participant.person_key != "B"
+            or actor.person_key != "B"
+        ):
+            raise HTTPException(status_code=404, detail="Wedding project not found")
+        if person_key != participant.person_key or asset_type != WeddingAssetType.PHOTO.value:
+            raise HTTPException(status_code=403, detail="SUBJECT_UPLOAD_SCOPE_REQUIRED")
+    subject = db.execute(
+        select(WeddingParticipant).where(
+            WeddingParticipant.project_id == project.id,
+            WeddingParticipant.person_key == person_key,
+        )
+    ).scalar_one_or_none()
+    if (
+        subject is None
+        or subject.consent_status != WeddingConsentStatus.ACTIVE
+        or subject.confirmed_at is None
+        or subject.revoked_at is not None
+        or "portrait_processing" not in (subject.consent_scope or [])
+    ):
+        raise HTTPException(status_code=409, detail="SUBJECT_CONSENT_REQUIRED")
+    if asset_type == WeddingAssetType.STORYBOARD_FRAME.value:
+        validate_active_consents(db, project)
     if asset_type == WeddingAssetType.PHOTO.value:
         photo_count = db.execute(
             select(WeddingAsset).where(
@@ -779,7 +863,7 @@ def delete_wedding_asset(
     ).scalars():
         shot.frame_asset_id = None
         shot.selected_asset_id = None
-        shot.status = "frame_pending"
+        set_shot_status(shot, StoryboardShotStatus.FRAME_PENDING)
         project.frame_approved_version = None
         _set_project_status(project, WeddingProjectStatus.FRAME_REVIEW)
     db.delete(asset)
@@ -864,10 +948,10 @@ def approve_storyboard(
     now = utc_now()
     for fact in story.facts:
         fact.confirmed_at = now
-    story.status = "approved"
+    set_story_status(story, StoryVersionStatus.APPROVED)
     story.owner_approved_at = now
     for shot in story.shots:
-        shot.status = "frame_pending"
+        set_shot_status(shot, StoryboardShotStatus.FRAME_PENDING)
     _set_project_status(project, WeddingProjectStatus.FRAME_REVIEW)
     project.frame_approved_version = None
     _record_audit(db, project, actor, "storyboard.approved", "story_version", story.id)
@@ -906,7 +990,7 @@ def approve_storyboard_frames(
         if asset is None or asset.asset_type not in {WeddingAssetType.STORYBOARD_FRAME, WeddingAssetType.GENERATED_FRAME}:
             raise HTTPException(status_code=422, detail="FRAME_ASSET_INVALID")
         shots[shot_id].frame_asset_id = asset_id
-        shots[shot_id].status = "frame_approved"
+        set_shot_status(shots[shot_id], StoryboardShotStatus.FRAME_APPROVED)
     project.frame_approved_version = project.current_version
     _set_project_status(project, WeddingProjectStatus.READY_TO_GENERATE)
     _record_audit(db, project, actor, "frames.approved", "story_version", story.id)
@@ -959,13 +1043,13 @@ def create_participant_review(
             project_version=project.current_version,
             shot_id=shot.id,
             asset_id=asset.id,
-            result=body.result,
+            result=ParticipantReviewStatus(body.result),
             confirmed_at=now,
         )
         db.add(existing)
     else:
         existing.asset_id = asset.id
-        existing.result = body.result
+        set_review_status(existing, ParticipantReviewStatus(body.result))
         existing.confirmed_at = now
     _record_audit(db, project, actor, "identity_review.recorded", "shot", shot.id, {"result": body.result})
     db.commit()
@@ -1070,19 +1154,19 @@ def _create_generation_job(
         reserved_amount_fen=0,
         actual_cost_fen=0,
     )
-    db.add(job)
-    db.flush()
-    reserve_generation_budget(
-        db,
-        project,
-        job,
-        reservation_key=f"generation:{idempotency_key}",
-        amount_fen=quote.max_budget_fen,
-    )
-    quote.consumed_at = utc_now()
-    _set_project_status(project, WeddingProjectStatus.GENERATING)
-    _record_audit(db, project, actor, "generation.queued", "generation_job", job.id, {"shots": job.total_shots})
     try:
+        db.add(job)
+        db.flush()
+        reserve_generation_budget(
+            db,
+            project,
+            job,
+            reservation_key=f"generation:{idempotency_key}",
+            amount_fen=quote.max_budget_fen,
+        )
+        quote.consumed_at = utc_now()
+        _set_project_status(project, WeddingProjectStatus.GENERATING)
+        _record_audit(db, project, actor, "generation.queued", "generation_job", job.id, {"shots": job.total_shots})
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -1142,6 +1226,26 @@ def cancel_generation_job(
         set_job_status(job, WeddingJobStatus.CANCELLED)
         release_generation_budget(db, job)
         job.finished_at = utc_now()
+        active_job = db.execute(
+            select(GenerationJob.id).where(
+                GenerationJob.project_id == project.id,
+                GenerationJob.status.in_(
+                    [WeddingJobStatus.QUEUED, WeddingJobStatus.PROCESSING, WeddingJobStatus.CANCEL_REQUESTED]
+                ),
+            )
+        ).first()
+        if active_job is None and project.status == WeddingProjectStatus.GENERATING:
+            ready_render = db.execute(
+                select(RenderVersion.id).where(
+                    RenderVersion.project_id == project.id,
+                    RenderVersion.project_version == project.current_version,
+                    RenderVersion.status.in_([RenderVersionStatus.READY, RenderVersionStatus.APPROVED]),
+                )
+            ).first()
+            _set_project_status(
+                project,
+                WeddingProjectStatus.PREVIEW_REVIEW if ready_render else WeddingProjectStatus.READY_TO_GENERATE,
+            )
     elif job.status == WeddingJobStatus.PROCESSING:
         set_job_status(job, WeddingJobStatus.CANCEL_REQUESTED)
         job.cancel_requested_at = utc_now()
@@ -1162,6 +1266,9 @@ def regenerate_wedding_shot(
     shot = db.get(StoryboardShot, shot_id)
     if shot is None or shot.project_id != project.id:
         raise HTTPException(status_code=404, detail="Storyboard shot not found")
+    current_story = _current_story(db, project)
+    if shot.story_version_id != current_story.id or shot.project_version != project.current_version:
+        raise HTTPException(status_code=409, detail="SHOT_VERSION_STALE")
     return _create_generation_job(project, body, idempotency_key, actor, db, target_shot=shot)
 
 
@@ -1185,7 +1292,7 @@ def select_wedding_shot_candidate(
         raise HTTPException(status_code=409, detail="REJECTED_CANDIDATE_CANNOT_BE_SELECTED")
     shot.selected_candidate_id = candidate.id
     shot.selected_asset_id = None
-    shot.status = "candidate_review"
+    set_shot_status(shot, StoryboardShotStatus.CANDIDATE_REVIEW)
     _record_audit(db, project, actor, "shot.candidate_selected", "shot_candidate", candidate.id)
     db.commit()
     return _story_response(_current_story(db, project))
@@ -1209,7 +1316,7 @@ def accept_photo_fallback(
         raise HTTPException(status_code=422, detail="PHOTO_FALLBACK_ASSET_INVALID")
     shot.selected_asset_id = asset.id
     shot.selected_candidate_id = None
-    shot.status = "fallback"
+    set_shot_status(shot, StoryboardShotStatus.FALLBACK)
     _record_audit(db, project, actor, "shot.photo_fallback_accepted", "shot", shot.id, {"asset_id": asset.id})
     db.commit()
     return _story_response(_current_story(db, project))
@@ -1279,7 +1386,7 @@ def create_render_version(
         project_id=project.id,
         project_version=project.current_version,
         version=version,
-        status="queued",
+        status=RenderVersionStatus.QUEUED,
         timeline_hash=timeline_hash,
         input_asset_ids=selected_assets,
     )
@@ -1374,13 +1481,13 @@ def create_render_review(
             project_version=project.current_version,
             render_version_id=render.id,
             asset_id=body.asset_id,
-            result=body.result,
+            result=ParticipantReviewStatus(body.result),
             confirmed_at=now,
         )
         db.add(review)
     else:
         review.asset_id = body.asset_id
-        review.result = body.result
+        set_review_status(review, ParticipantReviewStatus(body.result))
         review.confirmed_at = now
     _record_audit(db, project, actor, "render.identity_reviewed", "render_version", render.id, {"result": body.result})
     db.commit()
@@ -1422,7 +1529,7 @@ def approve_wedding_render(
         if review is None:
             raise HTTPException(status_code=409, detail="FINAL_IDENTITY_REVIEW_REQUIRED")
     render.owner_approved_at = utc_now()
-    render.status = "approved"
+    set_render_status(render, RenderVersionStatus.APPROVED)
     _set_project_status(project, WeddingProjectStatus.READY_TO_EXPORT)
     _record_audit(db, project, actor, "render.owner_approved", "render_version", render.id)
     db.commit()
