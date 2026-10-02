@@ -1371,6 +1371,299 @@ describe("AiWardrobe app", () => {
     expect(screen.getByText("white上衣")).toBeInTheDocument();
   });
 
+  test("password login keeps an invalid session out and allows a corrected retry", async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input) === "/auth/login") {
+        attempts += 1;
+        expect(init?.method).toBe("POST");
+        return jsonResponse(attempts === 1 ? { detail: "邮箱或密码错误" } : { access_token: "new-session" }, attempts === 1 ? 401 : 200);
+      }
+      return jsonResponse({ items: [], has_more: false, next_cursor: null });
+    });
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    expect(screen.getByLabelText("密码")).toHaveAttribute("autoComplete", "current-password");
+    expect(screen.getByRole("button", { name: "登录账号" })).toBeDisabled();
+    await user.type(screen.getByLabelText("邮箱"), "couple@example.com");
+    await user.type(screen.getByLabelText("密码"), "incorrect");
+    await user.click(screen.getByRole("button", { name: "登录账号" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("邮箱或密码错误");
+    expect(localStorage.getItem("aiwardrobe_token")).toBeNull();
+    await user.clear(screen.getByLabelText("密码"));
+    await user.type(screen.getByLabelText("密码"), "corrected-password");
+    await user.click(screen.getByRole("button", { name: "登录账号" }));
+    await screen.findByRole("heading", { name: "买衣服前，先让 AI 帮你看看值不值得买" });
+    expect(localStorage.getItem("aiwardrobe_token")).toBe("new-session");
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls.find(([, init]) => init?.body?.toString().includes("corrected-password"))?.[1]?.body))).toEqual({ email: "couple@example.com", password: "corrected-password" });
+  });
+
+  test.each([false, true])("tag edits use the trusted save or pending confirmation boundary (pending=%s)", async (pending) => {
+    const user = userEvent.setup();
+    const original = pending ? pendingGarment : garment;
+    const saved = { ...original, review_status: "confirmed", user_confirmed_at: "2026-10-02T00:00:00Z", tags: ["婚礼", "简约"] };
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?")) return jsonResponse({ items: [original], has_more: false });
+      if (path === `/v2/garments/${original.id}/confirm`) return jsonResponse({});
+      if (path === `/v2/garments/${original.id}` || (path === `/garments/${original.id}` && init?.method === "PATCH")) return jsonResponse(saved);
+      return jsonResponse({ detail: "unexpected request" }, 500);
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(await screen.findByText(/white/));
+    await user.clear(screen.getByLabelText("标签"));
+    await user.type(screen.getByLabelText("标签"), " 婚礼, 简约 ");
+    await user.click(screen.getByRole("button", { name: pending ? "确认并加入衣橱" : "保存标签" }));
+    await screen.findByRole("heading", { name: "我的衣橱" });
+    expect(screen.getByText("婚礼", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("简约", { exact: true })).toBeInTheDocument();
+    const mutation = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === (pending ? "POST" : "PATCH"));
+    expect(mutation?.[0]).toBe(pending ? `/v2/garments/${original.id}/confirm` : `/garments/${original.id}`);
+    expect(JSON.parse(String(mutation?.[1]?.body))).toEqual({ tags: ["婚礼", "简约"] });
+    expect(screen.queryByText("待确认单品")).not.toBeInTheDocument();
+  });
+
+  test("failed tag edits retain the draft and never report a saved garment", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (_input, init) => init?.method === "PATCH"
+      ? jsonResponse({ detail: "保存服务暂不可用" }, 503)
+      : jsonResponse({ items: [garment], has_more: false }));
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(await screen.findByText(/white/));
+    await user.clear(screen.getByLabelText("标签"));
+    await user.type(screen.getByLabelText("标签"), "婚礼");
+    await user.click(screen.getByRole("button", { name: "保存标签" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存服务暂不可用");
+    expect(screen.getByLabelText("标签")).toHaveValue("婚礼");
+    expect(screen.getByRole("button", { name: "保存标签" })).not.toBeDisabled();
+  });
+
+  test("cancelled deletion sends no request and a rejected deletion keeps the item visible", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (_input, init) => init?.method === "DELETE"
+      ? jsonResponse({ detail: "仍有关联记录" }, 409)
+      : jsonResponse({ items: [garment], has_more: false }));
+    try {
+      render(<App />);
+      await user.click(await screen.findByRole("button", { name: "衣橱" }));
+      await user.click(await screen.findByText(/white/));
+      await user.click(screen.getByRole("button", { name: "删除衣服" }));
+      expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+      await user.click(screen.getByRole("button", { name: "删除衣服" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("仍有关联记录");
+      expect(screen.getByRole("heading", { name: "编辑单品标签" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "删除衣服" })).not.toBeDisabled();
+    } finally { confirm.mockRestore(); }
+  });
+
+  test("an empty wardrobe filter can be cleared and selection can be cancelled without deletion", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => jsonResponse({ items: String(input).includes("q=missing") ? [] : [garment, secondGarment], has_more: false }));
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(screen.getByRole("button", { name: "上衣" }));
+    await user.type(screen.getByLabelText("搜索衣服"), "missing");
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("q=missing"))).toBe(true));
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.getByLabelText("搜索衣服")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
+    await screen.findByText(/white/);
+    await user.click(screen.getByRole("button", { name: "批量管理" }));
+    const selections = screen.getAllByRole("checkbox");
+    await user.click(selections[0]);
+    expect(screen.getByRole("status")).toHaveTextContent("已选 1 件");
+    await user.click(selections[0]);
+    expect(screen.getByRole("button", { name: "删除所选" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "取消管理" }));
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+  });
+
+  test("preference settings preserve money bounds and remove explicitly unchecked categories", async () => {
+    const user = userEvent.setup();
+    const preference = { primary_goal: "常穿", scenes: ["通勤"], styles: ["简约"], avoid_types: [], budget_range: "", budget_min: "100", budget_max: "300", avoid_categories: ["top"] };
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).startsWith("/v2/garments?")
+      ? jsonResponse({ items: [garment, secondGarment, shoesGarment], has_more: false }) : jsonResponse(preference));
+    render(<App />);
+    await waitFor(() => expect(screen.getByLabelText("最低预算（元）")).toHaveValue(100));
+    await user.clear(screen.getByLabelText("最低预算（元）"));
+    await user.type(screen.getByLabelText("最低预算（元）"), "129.50");
+    await user.clear(screen.getByLabelText("最高预算（元）"));
+    const categories = within(screen.getByRole("group", { name: "不考虑的类别" }));
+    const checked = categories.getAllByRole("checkbox").find((item) => (item as HTMLInputElement).checked)!;
+    await user.click(checked);
+    const alternative = categories.getAllByRole("checkbox")[1];
+    await user.click(alternative);
+    await user.clear(screen.getByLabelText("常用场景"));
+    await user.type(screen.getByLabelText("常用场景"), " 通勤、婚礼，周末 ");
+    await user.click(screen.getByRole("button", { name: "保存偏好" }));
+    await waitFor(() => expect(screen.queryByLabelText("最低预算（元）")).not.toBeInTheDocument());
+    const mutation = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === "PUT");
+    expect(JSON.parse(String(mutation?.[1]?.body))).toMatchObject({ budget_min: "129.5", budget_max: null, currency: "CNY", scenes: ["通勤", "婚礼", "周末"], avoid_categories: ["bottom"] });
+  });
+
+  test.each([401, 503])("preference save failure (%s) expires the session or keeps a recoverable form", async (status) => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (init?.method === "PUT") return jsonResponse({ detail: "偏好保存失败" }, status);
+      return jsonResponse(String(input).startsWith("/v2/garments?") ? { items: [garment, secondGarment, shoesGarment] } : {});
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存偏好" }));
+    if (status === 401) {
+      await screen.findByRole("button", { name: "注册账号" });
+      expect(localStorage.getItem("aiwardrobe_token")).toBeNull();
+    } else {
+      expect(await screen.findByRole("alert")).toHaveTextContent("偏好保存失败");
+      expect(screen.getByRole("button", { name: "保存偏好" })).not.toBeDisabled();
+    }
+  });
+
+  test.each([401, 503])("report failure (%s) expires authorization or shows a recoverable error", async (status) => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).startsWith("/v2/garments?")
+      ? jsonResponse({ items: [garment] }) : jsonResponse({ detail: "报告暂不可用" }, status));
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "报告" }));
+    if (status === 401) {
+      await screen.findByRole("button", { name: "注册账号" });
+      expect(localStorage.getItem("aiwardrobe_token")).toBeNull();
+    } else expect(await screen.findByRole("alert")).toHaveTextContent("报告暂不可用");
+    expect(screen.queryByText(wardrobeReport.summary)).not.toBeInTheDocument();
+  });
+
+  test("empty report distributions and empty cached recommendations are honest empty states", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    const emptyReport = { ...wardrobeReport, summary: "暂无已确认衣物", wardrobe_gaps: [], avoid_categories: [], category_distribution: [], color_distribution: [], style_distribution: [] };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?")) return jsonResponse({ items: [] });
+      if (path.includes("/report")) return jsonResponse(emptyReport);
+      return jsonResponse({ ...shoppingRun, cache_hit: true, items: [], wardrobe_gaps: [], avoid_categories: [] });
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "报告" }));
+    await screen.findByText("暂无已确认衣物");
+    expect(screen.queryByText("white上衣")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看衣橱缺口商品" }));
+    await user.click(await screen.findByRole("button", { name: "查看缺口" }));
+    expect(await screen.findByText("已复用缓存")).toBeInTheDocument();
+    expect(screen.queryByText("Black Work Skirt")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "你的衣橱当前缺口" })).toBeInTheDocument();
+  });
+
+  test("restored image jobs distinguish unknown outcomes, empty completion, retry and cancellation", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    const paused = { ...taskRecord("paused-upload", "garment_split", "queued"), status: "running", stage: "awaiting_resolution", action_required: true, submission_status: "unknown" };
+    const failed = { ...taskRecord("failed-upload", "garment_single", "queued"), status: "failed", error: { code: "provider_unavailable", retryable: true } };
+    let retried = false;
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?")) return jsonResponse({ items: [] });
+      if (path === "/v2/tasks?limit=50") return jsonResponse({ items: [paused, failed, taskRecord("empty-completed", "garment_single", "succeeded"), { ...taskRecord("cancelled-upload", "garment_single", "queued"), status: "cancelled" }, { ...taskRecord("irrelevant-purchase", "garment_single", "queued"), kind: "purchase_url" }] });
+      if (path === "/v2/tasks/paused-upload/cancel") return jsonResponse({ ...paused, status: "cancelled", cancel_requested: true });
+      if (path === "/v2/tasks/paused-upload") return jsonResponse(paused);
+      if (path === "/v2/tasks/failed-upload/retry") { retried = true; return jsonResponse(taskRecord(failed.id, "garment_single", "queued")); }
+      if (path === "/v2/tasks/failed-upload") return jsonResponse(taskRecord(failed.id, "garment_single", "succeeded", [pendingGarment.id]));
+      if (path === `/v2/garments/${pendingGarment.id}`) return jsonResponse(pendingGarment);
+      return jsonResponse({ detail: "unexpected request" }, 500);
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(await screen.findByRole("button", { name: "上传衣服" }));
+    expect(await screen.findByText("供应商结果需要人工核验。请保留任务记录，不要重新提交相同请求。")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "重试此项" }));
+    expect(await screen.findByText("识别结果")).toBeInTheDocument();
+    expect(retried).toBe(true);
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "取消任务" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "取消任务" })).not.toBeInTheDocument());
+    expect(screen.getAllByText("已取消")).toHaveLength(2);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST").map(([path]) => path)).toEqual(["/v2/tasks/failed-upload/retry", "/v2/tasks/paused-upload/cancel"]);
+  });
+
+  test.each([401, 503])("failed recovered image polling (%s) cannot invent recognized garments", async (status) => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?")) return jsonResponse({ items: [] });
+      if (path === "/v2/tasks?limit=50") return jsonResponse({ items: [taskRecord("unavailable", "garment_split", "queued")] });
+      return jsonResponse({ detail: "识别进度读取失败" }, status);
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(await screen.findByRole("button", { name: "上传衣服" }));
+    if (status === 401) await screen.findByRole("button", { name: "注册账号" });
+    else expect(await screen.findByRole("status")).toHaveTextContent("识别进度读取失败");
+    expect(screen.queryByText("识别结果")).not.toBeInTheDocument();
+  });
+
+  test.each([401, 503])("failed image submission (%s) can be retried without reporting an analysis result", async (status) => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?") || path === "/v2/tasks?limit=50") return jsonResponse({ items: [] });
+      return jsonResponse({ detail: "上传被拒绝" }, status);
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "衣橱" }));
+    await user.click(await screen.findByRole("button", { name: "上传衣服" }));
+    await user.upload(screen.getByLabelText("选择单件图片"), new File(["photo"], "shirt.png", { type: "image/png" }));
+    if (status === 401) await screen.findByRole("button", { name: "注册账号" });
+    else expect(await screen.findByRole("status")).toHaveTextContent("上传被拒绝");
+    expect(screen.queryByText("识别结果")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([path]) => /^\/v2\/tasks\/[^/]+$/.test(String(path)) && String(path) !== "/v2/tasks/garment-upload")).toBe(false);
+  });
+
+  test("weather failure still permits a manual temperature and records an outfit favorite once", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("aiwardrobe_token", "token");
+    const outfit = { id: "favorite-outfit", name: "周末婚礼", occasion: "formal", temperature: 22, source: "ai", is_favorite: false, is_fixed: false, items: [], explanation: "已确认衣物组合", weather_snapshot: null, result_revision: 3 };
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.startsWith("/v2/garments?")) return jsonResponse({ items: [garment] });
+      if (path.startsWith("/weather/")) return jsonResponse({ detail: "weather unavailable" }, 503);
+      if (path === "/outfits/generate") return jsonResponse(outfit);
+      if (path.endsWith("/favorite")) return jsonResponse({ ...outfit, is_favorite: true });
+      if (path.endsWith("/fixed")) return jsonResponse({ ...outfit, is_favorite: true, is_fixed: JSON.parse(String(init?.body)).is_fixed });
+      if (path === "/v2/feedback") return jsonResponse({ id: "favorite-feedback" });
+      return jsonResponse({ detail: "unexpected request" }, 500);
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "搭配" }));
+    await screen.findByText("天气服务暂不可用，可继续生成");
+    await user.click(screen.getByRole("button", { name: "正式场合" }));
+    await user.click(screen.getByRole("button", { name: "生成搭配" }));
+    await screen.findByText("周末婚礼");
+    const generated = vi.mocked(fetch).mock.calls.find(([path]) => path === "/outfits/generate");
+    expect(JSON.parse(String(generated?.[1]?.body))).toMatchObject({ occasion: "formal", temperature: 22, weather: null, garment_id: null });
+    await user.click(screen.getByRole("button", { name: "喜欢" }));
+    await screen.findByText("已记录反馈");
+    expect(screen.getByRole("button", { name: "已收藏" })).toBeInTheDocument();
+    const feedback = vi.mocked(fetch).mock.calls.find(([path]) => path === "/v2/feedback");
+    expect(JSON.parse(String(feedback?.[1]?.body))).toMatchObject({ target_id: outfit.id, snapshot_revision: 3, value: "helpful", occasion: "formal" });
+    await user.click(screen.getByRole("button", { name: "已收藏" }));
+    expect(vi.mocked(fetch).mock.calls.filter(([path, init]) => String(path).endsWith("/favorite") && init?.method === "PATCH")).toHaveLength(1);
+    expect(vi.mocked(fetch).mock.calls.filter(([path, init]) => path === "/v2/feedback" && init?.method === "POST")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "保存固定搭配" }));
+    await screen.findByRole("button", { name: "取消固定" });
+  });
+
   test("shopping recommendations show a readable rate limit message", async () => {
     const user = userEvent.setup();
     localStorage.setItem("aiwardrobe_token", "token");

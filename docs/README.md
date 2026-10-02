@@ -13,6 +13,8 @@
 
 衣橱优化与婚礼工作区已整合至本地 `main`；当前合并后审查、修复和验证状态以[main 整合审查](reviews/2026-10-02-main-integration-code-review.md)为准。2026-10-01 优化审核和 215/58 项测试是历史阶段证据；本地隔离 PostgreSQL 的双迁移与并发启动已另行验证。真实供应商、实际部署与完整无障碍验收仍需对应环境。
 
+- [2026-10-02 本地验收补齐](reviews/2026-10-02-local-acceptance-gap-fixes.md)：完整173项前端、四项全局80%覆盖率门禁、此前跳过的实际媒体测试及独立复审。
+
 - [2026-10-01 优化建议](optimization-proposal-2026-10-01.md)：参考项目与现有代码证据、路线比较和建议优先级。
 - [2026-10-01 优化 Spec](superpowers/specs/2026-10-01-aiwardrobe-optimization-spec.md)：目标行为、数据模型、v2 接口、任务恢复、迁移与分阶段验收。
 - [2026-10-01 优化实施计划](superpowers/plans/2026-10-01-aiwardrobe-optimization.md)：实现范围、测试结果及未执行的环境验证。

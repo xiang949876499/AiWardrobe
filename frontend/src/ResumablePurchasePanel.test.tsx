@@ -171,6 +171,139 @@ describe("ResumablePurchasePanel", () => {
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/v2/tasks/purchase-analysis" || String(input).startsWith("/v2/purchase/candidates/"))).toBe(false);
   });
 
+  it("cancels an uncertain accepted task while preserving the remote-outcome warning", async () => {
+    const user = userEvent.setup();
+    const paused = { ...completedTask("paused"), status: "running", stage: "awaiting_resolution", action_required: true, submission_status: "unknown", result_refs: [],
+      stage_durations_ms: { downloading: 120 }, operations: [{ operation_key: "op", generation: 1, provider: "provider", duration_ms: 100, usage: { total_tokens: 42 }, reported_cost: { amount: "0.50", currency: "CNY" }, error_code: "pending" }] };
+    const analyzed = vi.fn();
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/tasks?limit=50") return response({ items: [paused] });
+      if (path.endsWith("/cancel")) return response({ ...paused, status: "cancelled", cancel_requested: true });
+      return response(paused);
+    });
+    render(<ResumablePurchasePanel token="owner" url="" onAuthExpired={vi.fn()} onAnalyzed={analyzed} />);
+    await user.click(await screen.findByRole("button", { name: "取消任务" }));
+    expect(await screen.findByText("已停止本地处理，远端仍可能完成")).toBeInTheDocument();
+    expect(screen.getByText(/42 tokens.*0.50 CNY.*pending/)).toBeInTheDocument();
+    expect(analyzed).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).startsWith("/v2/purchase/candidates/"))).toBe(false);
+  });
+
+  it("an explicit safe retry reuses the task identity and keeps result provenance", async () => {
+    const user = userEvent.setup(); const analyzed = vi.fn();
+    const failed = { ...completedTask("failed"), status: "failed", submission_status: "not_submitted", result_refs: [], error: { code: "provider_unavailable", retryable: true } };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/tasks?limit=50") return response({ items: [failed] });
+      if (path === "/v2/tasks/failed/retry") return response({ ...completedTask("failed"), status: "queued", submission_status: "not_submitted", result_refs: [] });
+      if (path === "/v2/tasks/failed") return response(completedTask("failed"));
+      if (path === "/v2/purchase/candidates/candidate-failed") return response({ ...candidate("failed"), title: "retry result", score: 74, stale: true, image_url: "/private-image" });
+      return response({});
+    });
+    render(<ResumablePurchasePanel token="owner" url="" onAuthExpired={vi.fn()} onAnalyzed={analyzed} />);
+    await user.click(await screen.findByRole("button", { name: "安全重试" }));
+    expect(await screen.findByText("retry result")).toBeInTheDocument();
+    expect(screen.getByText("建议评分 74")).toBeInTheDocument();
+    expect(screen.getByText(/此分析标记为过期/)).toBeInTheDocument();
+    expect(analyzed).toHaveBeenCalledOnce();
+    const call = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith("/retry"));
+    expect(new Headers(call?.[1]?.headers).get("Idempotency-Key")).toBeTruthy();
+  });
+
+  it.each([401, 503])("keeps a failed cursor load (%s) recoverable without displaying another account's candidate", async (status) => {
+    const user = userEvent.setup(); const expired = vi.fn(); const shown = vi.fn();
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("cursor=")
+      ? new Response(JSON.stringify({ detail: { code: "page_unavailable" } }), { status })
+      : response({ items: [], next_cursor: "older", has_more: true }));
+    render(<ResumablePurchasePanel token="owner" url="" onAuthExpired={expired} onAnalyzed={vi.fn()} onCandidate={shown} />);
+    await user.click(await screen.findByRole("button", { name: "加载更多分析任务" }));
+    if (status === 401) await waitFor(() => expect(expired).toHaveBeenCalledOnce());
+    else expect(await screen.findByRole("alert")).toHaveTextContent("page_unavailable");
+    expect(shown.mock.calls.filter(([value]) => value)).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "加载更多分析任务" })).not.toBeDisabled();
+  });
+
+  it("unmount aborts the task-list request and ignores a late successful response", async () => {
+    const loading = deferred<Response>(); const shown = vi.fn(); const expired = vi.fn();
+    let signal: AbortSignal | null | undefined;
+    vi.mocked(fetch).mockImplementation(async (_input, init) => { signal = init?.signal; return loading.promise; });
+    const view = render(<ResumablePurchasePanel token="owner" url="" onAuthExpired={expired} onAnalyzed={vi.fn()} onCandidate={shown} />);
+    view.unmount(); expect(signal?.aborted).toBe(true);
+    await act(async () => loading.resolve(response({ items: [completedTask("late")] })));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expired).not.toHaveBeenCalled(); expect(shown.mock.calls.filter(([value]) => value)).toHaveLength(0);
+  });
+
+  it("submits an image with a stable key and the trimmed product URL", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/tasks?limit=50") return response({ items: [] });
+      if (path === "/v2/tasks/purchase-analysis") return response(completedTask("image"));
+      if (path === "/v2/tasks/image") return response(completedTask("image"));
+      return response(candidate("image"));
+    });
+    render(<ResumablePurchasePanel token="owner" url="  https://shop.example/item  " onAuthExpired={vi.fn()} onAnalyzed={vi.fn()} />);
+    await user.upload(screen.getByLabelText("选择商品图片"), new File(["photo"], "item.png", { type: "image/png" }));
+    await user.click(screen.getByRole("button", { name: "提交图片分析任务" }));
+    expect(await screen.findByText("image result")).toBeInTheDocument();
+    const call = vi.mocked(fetch).mock.calls.find(([url]) => url === "/v2/tasks/purchase-analysis");
+    expect((call?.[1]?.body as FormData).get("product_url")).toBe("https://shop.example/item");
+    expect(new Headers(call?.[1]?.headers).get("Idempotency-Key")).toBeTruthy();
+  });
+
+  it.each([401, 503])("a rejected task submission (%s) never enters polling", async (status) => {
+    const user = userEvent.setup();
+    const expired = vi.fn(); const analyzed = vi.fn();
+    vi.mocked(fetch).mockImplementation(async (input) => String(input) === "/v2/tasks?limit=50"
+      ? response({ items: [] })
+      : new Response(JSON.stringify({ detail: "submission_denied" }), { status }));
+    render(<ResumablePurchasePanel token="owner" url="https://shop.example/item" onAuthExpired={expired} onAnalyzed={analyzed} />);
+    await user.click(screen.getByRole("button", { name: "提交链接分析任务" }));
+    if (status === 401) await waitFor(() => expect(expired).toHaveBeenCalledOnce());
+    else expect(await screen.findByRole("alert")).toHaveTextContent("submission_denied");
+    expect(analyzed).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => /^\/v2\/tasks\/[^/]+$/.test(String(url)) && String(url) !== "/v2/tasks/purchase-analysis")).toBe(false);
+    expect(screen.getByRole("button", { name: "提交链接分析任务" })).not.toBeDisabled();
+  });
+
+  it.each([401, 503])("poll access failure (%s) cannot display a successful candidate", async (status) => {
+    const expired = vi.fn(); const analyzed = vi.fn();
+    const queued = { ...completedTask("queued"), status: "queued", result_refs: [] };
+    vi.mocked(fetch).mockImplementation(async (input) => String(input) === "/v2/tasks?limit=50"
+      ? response({ items: [queued] })
+      : new Response(JSON.stringify({ detail: "poll_denied" }), { status }));
+    render(<ResumablePurchasePanel token="owner" url="" onAuthExpired={expired} onAnalyzed={analyzed} />);
+    if (status === 401) await waitFor(() => expect(expired).toHaveBeenCalledOnce());
+    else expect(await screen.findByRole("alert")).toHaveTextContent("poll_denied");
+    expect(analyzed).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).startsWith("/v2/purchase/candidates/"))).toBe(false);
+  });
+
+  it.each([
+    ["retry", "安全重试", 401], ["retry", "安全重试", 503],
+    ["cancel", "取消任务", 401], ["cancel", "取消任务", 503],
+    ["reconcile", "再次查询供应商状态", 401], ["reconcile", "再次查询供应商状态", 503],
+  ])("%s refusal (%s, %s) preserves task state and never resubmits analysis", async (operation, label, status) => {
+    const user = userEvent.setup(); const expired = vi.fn(); const analyzed = vi.fn();
+    const original = { ...completedTask("original"), stage: operation === "retry" ? "persisting" : "awaiting_resolution", result_refs: [], status: operation === "retry" ? "failed" : "running", action_required: operation !== "retry",
+      error: operation === "retry" ? { code: "provider_unavailable", retryable: true } : null, submission_status: operation === "retry" ? "not_submitted" : "unknown" };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === "/v2/tasks?limit=50") return response({ items: [original] });
+      if (path === `/v2/tasks/original/${operation}`) return new Response(JSON.stringify({ detail: "action_denied" }), { status: Number(status) });
+      return response(original);
+    });
+    render(<ResumablePurchasePanel token="owner" url="" onAuthExpired={expired} onAnalyzed={analyzed} />);
+    await user.click(await screen.findByRole("button", { name: String(label) }));
+    if (status === 401) await waitFor(() => expect(expired).toHaveBeenCalledOnce());
+    else expect(await screen.findByRole("alert")).toHaveTextContent("action_denied");
+    expect(screen.getByText(`${operation === "retry" ? "保存" : "等待核验"} · ${original.status}`)).toBeInTheDocument();
+    expect(analyzed).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url) === "/v2/tasks/purchase-analysis")).toBe(false);
+  });
+
   it("loads older purchase analysis tasks using the server cursor", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);

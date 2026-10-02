@@ -136,7 +136,7 @@ Wedding routes are also proxied. Draft/blob recovery stays scoped to account, ac
 
 ### Test Strategy
 
-Backend tests use `TestClient` with SQLite temp DB + local storage + demo AI mode. A `conftest.py` fixture provides `client`, test DB, and a `login()` helper. Frontend tests use vitest + jsdom, mocking `fetch` globally and stubbing `navigator.geolocation`.
+Backend tests use `TestClient` with SQLite temp DB + local storage + demo AI mode. A `conftest.py` fixture provides `client`, test DB, and a `login()` helper. Frontend tests use vitest + jsdom, mocking `fetch` globally and stubbing `navigator.geolocation`. `npm run test:coverage` enforces80% globally for statements, branches, functions and lines without narrowing application coverage; one isolated thread worker keeps local Windows runs stable.
 
 ## Design Conventions
 

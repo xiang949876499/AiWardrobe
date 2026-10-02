@@ -13,7 +13,7 @@ Run `cd backend; python -m app.migrations upgrade` before production API/worker;
 - API: `python -m uvicorn app.main:app --host 127.0.0.1 --port 8031`.
 - Wardrobe worker: `python -m app.task_worker`; local launcher manages API, both workers and Vite with shared configuration and verified process records.
 - Independent wedding worker with identical environment: `python -m app.wedding_worker --poll-seconds 2`.
-- Frontend: Node >=24.14.0 <25; `cd frontend; npm ci`; `npm test`; `npm run build`.
+- Frontend: Node >=24.14.0 <25; `cd frontend; npm ci`; `npm test`; `npm run test:coverage`; `npm run build`. Coverage checks all four global metrics at80%; preserve the measurement scope. Vitest uses one isolated thread worker for stable local Windows runs.
 - Compose >=2.24: frontend5173/API8000; local Vite5174/API8031.
 
 ## Invariants

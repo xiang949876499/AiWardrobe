@@ -180,8 +180,11 @@ python -m pytest
 ~~~powershell
 cd frontend
 npm test
+npm run test:coverage
 npm run build
 ~~~
+
+`test:coverage` 同时运行完整前端用例并检查语句、分支、函数、行四项全局覆盖率，任一低于80%即返回失败；未通过排除业务文件缩小统计范围。测试保留文件隔离，默认使用单个线程 worker。实际媒体检查的开关和配置见[婚礼运行指南](docs/wedding-mv.md)。
 
 ## 许可与第三方声明 / License & third-party notices
 

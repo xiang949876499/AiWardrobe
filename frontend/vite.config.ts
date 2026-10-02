@@ -26,6 +26,13 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    setupFiles: "./src/test/setup.ts"
+    setupFiles: "./src/test/setup.ts",
+    pool: "threads",
+    maxWorkers: 1,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json", "json-summary"],
+      thresholds: { statements: 80, branches: 80, functions: 80, lines: 80 }
+    }
   }
 });

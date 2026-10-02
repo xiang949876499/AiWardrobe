@@ -167,13 +167,17 @@ Compose 至少使用2.24版，API和两个worker共享可选 `.env` 文件。必
 ```powershell
 cd backend
 python -m pytest
-# 可选真实媒体测试：先配置 WEDDING_FFMPEG_PATH / WEDDING_FFPROBE_PATH
-# 具体 opt-in 变量见 tests/test_wedding_render_media.py
+# 可选实际媒体测试：先配置 WEDDING_FFMPEG_PATH / WEDDING_FFPROBE_PATH
+$env:WEDDING_ACTUAL_MEDIA = "1"
+python -m pytest tests/test_wedding_render_media.py
 cd ../frontend
 npm test
+npm run test:coverage
 npm run build
 npm audit
 ```
+
+实际媒体用例使用合成照片及测试音，执行 FFmpeg 编码、完整解码、720p/1080p、90秒、中文字幕和音频检查；不访问付费模型，不建立音乐商业授权。未设置 `WEDDING_ACTUAL_MEDIA=1` 时，其中两项会明确跳过。前端覆盖率命令检查四项全局指标均至少80%，任一不足即失败；统计范围与原基线一致。
 
 完整的合成产品链已通过公开产品 API 制作90秒720p/1080p MP4，并验证解码、音乐、字幕、私有导出和历史。浏览器检查使用真实 Vite/API，包括保存、两标签页 CAS 冲突、角色隔离、历史播放下载和照片重新分配。合成图片与内部测试音只建立工程证据；人物一致性、当前账号费用、真实音乐交付授权与婚礼设备效果没有由这些检查建立。
 
