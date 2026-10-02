@@ -45,7 +45,7 @@ Windows 下可使用一键启动：
 
 默认本地模式会启动独立 FastAPI API、衣橱 worker、婚礼 worker 和 Vite 前端，共用数据库、私有存储及 provider 配置；未配置时使用 SQLite 与本地存储。进程隐藏运行，日志保存在 `.local-services/`。停止服务使用 `start.bat stop-local`，会校验进程身份后停止本次记录的服务。
 
-优化分支八项审核问题的修复与本地复验见[修复报告](docs/reviews/2026-10-01-optimization-fix-verification.md)；PostgreSQL 和真实供应商验证仍需在对应环境执行。[部署说明](docs/deployment-and-migrations.md)包含独立 worker、迁移与恢复操作。
+衣橱优化与婚礼工作区已合入本地 `main`。当前合并、审查与验证状态见[main 整合审查](docs/reviews/2026-10-02-main-integration-code-review.md)，旧优化分支证据保留在[历史修复报告](docs/reviews/2026-10-01-optimization-fix-verification.md)。本地隔离 PostgreSQL 已验证双迁移及并发启动；真实供应商、实际部署和完整无障碍验收仍需对应环境。[部署说明](docs/deployment-and-migrations.md)包含两个独立 worker、迁移与恢复操作。
 
 - 前端 / Frontend: http://localhost:5174
 - 后端 API / Backend API: http://127.0.0.1:8031/docs
@@ -128,20 +128,21 @@ OPEN_METEO_BASE_URL=https://api.open-meteo.com
 
 ## Docker / Full stack
 
+使用 Docker Compose 2.24 或以上。先在未提交的 `.env` 或当前进程环境中提供 `JWT_SECRET`、`POSTGRES_PASSWORD`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`；三种 secret 使用各自唯一的至少 32 字节随机值，S3 access key 由运营者提供。模板没有公开默认密码；配置检查失败时数据库和对象存储不会启动。密码原文通过环境传递，应用构造数据库 URL 时会正确编码特殊字符。
+
 ~~~powershell
 docker compose up --build
 ~~~
 
-使用 Docker Compose 2.24 或以上；API 与两个 worker 共享 `.env`，实际授权音乐目录只读挂载。容器内的音乐目录、FFmpeg 与字体配置见婚礼运行说明。
+API、迁移和两个 worker 使用同一组数据库、私有存储及 provider 配置，实际授权音乐目录只读挂载。默认只发布前端 `http://localhost:5173` 和 API `http://localhost:8000`；PostgreSQL 和 MinIO 保持容器内部网络。容器音乐、FFmpeg 与字体配置见婚礼运行说明。
 
-默认服务：
+需要本机数据库或存储控制台时显式使用回环地址覆盖：
 
-- 前端 / Frontend: http://localhost:5173
-- 后端 / Backend: http://localhost:8000
-- MinIO Console: http://localhost:9101
-- PostgreSQL: localhost:5432
+~~~powershell
+docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+~~~
 
-Docker Compose 会启动独立的 `worker` 服务处理图片与购买分析任务。生产环境需单独部署 worker，并与 API 服务共享数据库、存储和 provider 配置。
+该覆盖仅在 `127.0.0.1` 提供 PostgreSQL `5432`、MinIO S3 `9100` 和控制台 `9101`，仍要求唯一凭证。已有 PostgreSQL 卷不会因修改初始化环境变量而自动更新密码；升级前按[部署说明](docs/deployment-and-migrations.md)备份并协调实际凭证更新，本任务没有更改你的真实数据库或密钥。
 
 ## 数据库迁移与私有图片
 

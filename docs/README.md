@@ -11,7 +11,7 @@
 
 ## AiWardrobe 优化与历史设计
 
-当前代码整合衣橱优化与婚礼工作区；`codex/aiwardrobe-optimization` 分支保留历史实现。2026-10-01 审核发现的 4 项 P1 和 4 项 P2 已修复并通过本地复验；PostgreSQL、真实供应商和完整无障碍验收仍待对应环境验证，状态以修复报告及实施计划为准。
+衣橱优化与婚礼工作区已整合至本地 `main`；当前合并后审查、修复和验证状态以[main 整合审查](reviews/2026-10-02-main-integration-code-review.md)为准。2026-10-01 优化审核和 215/58 项测试是历史阶段证据；本地隔离 PostgreSQL 的双迁移与并发启动已另行验证。真实供应商、实际部署与完整无障碍验收仍需对应环境。
 
 - [2026-10-01 优化建议](optimization-proposal-2026-10-01.md)：参考项目与现有代码证据、路线比较和建议优先级。
 - [2026-10-01 优化 Spec](superpowers/specs/2026-10-01-aiwardrobe-optimization-spec.md)：目标行为、数据模型、v2 接口、任务恢复、迁移与分阶段验收。

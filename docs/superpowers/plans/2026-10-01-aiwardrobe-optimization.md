@@ -1,6 +1,6 @@
 # AiWardrobe 优化实现计划
 
-> 依据 [优化 Spec](../specs/2026-10-01-aiwardrobe-optimization-spec.md)，在 `codex/aiwardrobe-optimization` 分支实施。`[x]` 表示该项代码与本地验证完成，`[~]` 表示环境验收或部分行为尚未完成。2026-10-01 审核发现的 R1～R8 已修复并完成本地复验，证据见[修复报告](../../reviews/2026-10-01-optimization-fix-verification.md)；PostgreSQL、真实供应商和完整无障碍验收仍不能标为通过。
+> 原实施依据 [优化 Spec](../specs/2026-10-01-aiwardrobe-optimization-spec.md)，在 `codex/aiwardrobe-optimization` 分支完成；2026-10-02 已整合到本地 `main`，当前证据与复审见[main 整合审查](../../reviews/2026-10-02-main-integration-code-review.md)。下列清单保留原阶段状态及证据；该阶段 PostgreSQL 不可用不表示后续未验证，本轮双迁移/并发启动已有隔离 PostgreSQL 证据。`[x]` 表示该项代码与本地验证完成，`[~]` 表示环境验收或部分行为尚未完成。2026-10-01 审核发现的 R1～R8 已修复并完成本地复验，证据见[修复报告](../../reviews/2026-10-01-optimization-fix-verification.md)；PostgreSQL、真实供应商和完整无障碍验收仍不能标为通过。
 
 ## M1：真实链路可靠
 
@@ -39,7 +39,7 @@
 - [~] SQLite 新库/旧库迁移测试通过。当前环境没有 Docker 或 PostgreSQL 客户端/服务，PostgreSQL 集成迁移及并发测试未运行。
 - [x] 更新 API、部署、迁移说明与 `docs/README.md` 索引；保持当前已有工作区内容，不清理或回滚其他文件。
 
-## 当前验证证据
+## 2026-10-01 阶段验证证据（历史）
 
 - 后端：全量 pytest **215 passed，170.86 秒**；当前 schema version **13**，增加原八项缺陷、供应商恢复/取消、关联并发、真实组合与资产保留的回归。
 - 前端：全量 Vitest **58 passed**、`npm run build` 通过；包含四种后端生成的 nullable 契约、真实待确认状态、默认持久购买、恢复/账号竞争、只读核验及同场景搭配组。

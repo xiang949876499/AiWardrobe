@@ -4,7 +4,7 @@
 
 **日期**：2026-10-01
 
-**状态**：待评审；本文定义目标行为，不代表已经实现
+**状态**：工程实现已整合至本地 `main`；合并后修复复审状态见[main 整合审查](../../reviews/2026-10-02-main-integration-code-review.md)。本文保留目标行为与验收要求，环境验收须以具体证据为准。
 
 **代码基线**：`f2deaec`
 **来源**：[优化方案](../../optimization-proposal-2026-10-01.md)、当前代码、MVP 规范及上传规范。
@@ -349,7 +349,9 @@ wear 事件影响报告使用统计，不影响本版购买评分，不要求增
 
 ## 14. 实施与验证快照
 
-实现位于 `codex/aiwardrobe-optimization` 分支。2026-10-01 审核 R1～R8 已修复，本地全量验证为后端 pytest **215 passed**、前端 Vitest **58 passed**、`npm run build` 通过、`python -m compileall -q app` 通过。schema version 为 13；回归覆盖持久兼容入口、安全重试、可查询供应商只读恢复/取消、所有权并发、真实组合、null 契约和账号/请求隔离。
+2026-10-02 当前实现已合入本地 `main`；双 schema 在同一锁和事务中升级，生产只验证，两个独立 worker 共用配置。最新测试、独立代码审查与本地 PostgreSQL 证据见[main 整合审查](../../reviews/2026-10-02-main-integration-code-review.md)。真实付费供应商、生产环境、读屏及负载验收尚未执行。
+
+以下为 2026-10-01 优化阶段的历史快照，不作为合并后统计。历史实现位于 `codex/aiwardrobe-optimization` 分支。2026-10-01 审核 R1～R8 已修复，本地全量验证为后端 pytest **215 passed**、前端 Vitest **58 passed**、`npm run build` 通过、`python -m compileall -q app` 通过。schema version 为 13；回归覆盖持久兼容入口、安全重试、可查询供应商只读恢复/取消、所有权并发、真实组合、null 契约和账号/请求隔离。
 
 PostgreSQL 服务不可用，PostgreSQL 新库/既有库迁移和并发集成测试未运行；SQLite 新库/升级及独立会话竞争有测试。真实付费 provider 恢复/计费尚未验证，成本只展示有效供应商回报。真实浏览器已完成独立 worker 上传到确认、空衣橱购买/刷新/保存/组合/删除冒烟；375px 和 640px 等效重排无横向溢出，移动键盘导航通过。读屏、实际浏览器 200% 缩放、全部页面和负载指标尚未验收。相应状态见[实施计划](../plans/2026-10-01-aiwardrobe-optimization.md)与[修复报告](../../reviews/2026-10-01-optimization-fix-verification.md)。
 

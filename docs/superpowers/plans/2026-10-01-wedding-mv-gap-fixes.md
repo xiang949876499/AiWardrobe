@@ -1,12 +1,12 @@
 # Wedding MV completion gap fixes
 
-> For agentic workers: use subagent-driven-development to execute this plan. The user has already authorized local implementation on `codex/ai-wedding-mv`.
+> Historical feature-stage plan: completed locally on `codex/ai-wedding-mv`. The user subsequently authorized full local `main` integration and review on 2026-10-02. Current merge, corrections and validation: [main integration review](../../reviews/2026-10-02-main-integration-code-review.md). Keep the original D checkout/private state untouched; no remote or paid actions are authorized.
 
 Goal: implement the missing P0 product logic identified in `docs/wedding-mv-completion-audit-2026-10-01.md`, and replace assumptions with executable evidence. Keep the original worktree untouched.
 
 ## Global constraints
 
-- Work only in `C:/Users/94987/.codex/worktrees/ai-wedding-mv/AiWardrobe`, branch `codex/ai-wedding-mv`. No pushing, paid calls, remote agents, publication, or credential changes.
+- Work only in `C:/Users/94987/.codex/worktrees/ai-wedding-mv/AiWardrobe`; feature work used `codex/ai-wedding-mv`, later explicit user authorization permits local `main` integration/corrections. No pushing, paid calls, remote agents, publication, or credential changes.
 - Private media access always checks project membership, current consent, expiry and render state. Lock parent project before child job/render when both locks are needed. Never hold database transactions open during remote calls or FFmpeg.
 - Fixed production baseline: `doubao-seed-2-0-pro-260215`, `doubao-seedream-4-5-251128`, `wan2.7-r2v-2026-06-12`, `wan2.6-i2v-flash`. Provider, region, model and price versions are explicit. Default remains disabled; demo assets remain visibly marked.
 - 18 shots, 90 seconds, 8 person AI / 4 scene AI / 6 photo shots. At most 2 AI shots may become photos, with at least 6 person AI and 10 AI motion shots in a live standard export. Human A/B identity approval is still mandatory.
