@@ -136,7 +136,7 @@ def _project_response(project: WeddingProject) -> WeddingProjectResponse:
 def _asset_response(asset: WeddingAsset) -> WeddingAssetResponse:
     return WeddingAssetResponse(
         id=asset.id,
-        expires_at=asset.expires_at,
+        expires_at=_as_utc(asset.expires_at),
         asset_type=str(asset.asset_type),
         person_key=asset.person_key,
         mime=asset.mime,
@@ -170,6 +170,8 @@ def _story_response(story: StoryVersion, fingerprint: str | None = None) -> Stor
             {
                 "id": shot.id,
                 "project_version": shot.project_version,
+                "source_shot_id": shot.source_shot_id,
+                "generation_attempts": shot.generation_attempts,
                 "shot_index": shot.shot_index,
                 "shot_type": shot.shot_type,
                 "duration_ms": shot.duration_ms,
@@ -389,7 +391,18 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
                 RenderVersion.status.in_([RenderVersionStatus.READY, RenderVersionStatus.APPROVED]),
                 RenderVersion.preview_asset_id == asset.id,
             )
-        return db.execute(render_query).scalars().first() is not None
+        render = db.execute(render_query).scalars().first()
+        if render is None:
+            return False
+        if render.timeline_snapshot:
+            from app.wedding_authoring import validate_timeline
+            try:
+                validate_timeline(db, project, render.timeline_snapshot)
+            except HTTPException:
+                return False
+        elif get_settings().wedding_media_mode == 'live':
+            return False
+        return True
     if actor.kind == "owner":
         return True
     if asset.person_key == actor.person_key:
@@ -401,13 +414,14 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
         WeddingAssetType.VIDEO_CANDIDATE,
     }:
         return False
-    linked_shot = db.execute(
+    linked_shots = db.execute(
         select(StoryboardShot).where(
             StoryboardShot.project_id == project.id,
+            StoryboardShot.project_version == project.current_version,
             (StoryboardShot.frame_asset_id == asset.id) | (StoryboardShot.selected_asset_id == asset.id),
         )
-    ).scalar_one_or_none()
-    if linked_shot is not None and actor.person_key in linked_shot.person_keys:
+    ).scalars()
+    if any(actor.person_key in shot.person_keys for shot in linked_shots):
         return True
     candidate_shot_ids = db.execute(
         select(ShotCandidate.shot_id).where(
@@ -415,10 +429,11 @@ def _can_read_asset(db: Session, asset: WeddingAsset, actor: WeddingActor) -> bo
             ShotCandidate.asset_id == asset.id,
         )
     ).scalars()
-    return any(
-        (shot := db.get(StoryboardShot, shot_id)) is not None and actor.person_key in shot.person_keys
-        for shot_id in candidate_shot_ids
-    )
+    sources = set(candidate_shot_ids)
+    from app.wedding_guards import source_ids
+    return any(actor.person_key in shot.person_keys and bool(source_ids(shot)&sources)
+        for shot in db.scalars(select(StoryboardShot).where(StoryboardShot.project_id == project.id,
+            StoryboardShot.project_version == project.current_version)))
 
 
 def _readable_project(db: Session, actor: WeddingActor, project_id: str) -> WeddingProject:
@@ -461,6 +476,10 @@ def _check_job_prerequisites(db: Session, project: WeddingProject, version: int)
         raise HTTPException(status_code=409, detail="STORYBOARD_APPROVAL_REQUIRED")
     if project.frame_approved_version != project.current_version:
         raise HTTPException(status_code=409, detail="STATIC_FRAME_APPROVAL_REQUIRED")
+    from app.wedding_guards import validate_composition, validate_frame
+    validate_composition(db, project, story.shots)
+    for shot in story.shots:
+        validate_frame(db,project,shot,db.get(WeddingAsset,shot.frame_asset_id),reviews=True)
     validate_identity_reviews(db, project, story)
     from app.wedding_authoring import require_photo_readiness
     require_photo_readiness(db, project)
@@ -671,7 +690,9 @@ def list_wedding_candidates(
     ).scalars()
     visible: list[WeddingCandidateResponse] = []
     for candidate in candidates:
-        shot = db.get(StoryboardShot, candidate.shot_id)
+        from app.wedding_guards import source_ids
+        shot = next((s for s in db.scalars(select(StoryboardShot).where(StoryboardShot.project_id==project.id,
+            StoryboardShot.project_version==project.current_version)) if candidate.shot_id in source_ids(s)),None)
         asset = db.get(WeddingAsset, candidate.asset_id)
         if shot is None or asset is None:
             continue
@@ -682,7 +703,7 @@ def list_wedding_candidates(
         visible.append(
             WeddingCandidateResponse(
                 id=candidate.id,
-                shot_id=candidate.shot_id,
+                shot_id=shot.id,
                 generation_job_id=candidate.generation_job_id,
                 asset_id=candidate.asset_id,
                 asset=_asset_response(asset),
@@ -709,7 +730,7 @@ def update_wedding_project(
     changed = False
     if body.title is not None and body.title != project.title:
         project.title = body.title
-        changed = True
+        _record_audit(db, project, actor, 'project.renamed', 'project', project.id, {})
     if body.style is not None and body.style != project.style:
         project.style = body.style
         changed = True
@@ -883,6 +904,9 @@ def create_consent_invite(
         status=WeddingInviteStatus.ACTIVE,
         expires_at=expires_at,
     )
+    from app.wedding_invitations import disclosure
+    invite.kind = "consent"
+    invite.disclosure = disclosure(invite, participant)
     db.add(invite)
     _set_project_status(project, WeddingProjectStatus.AWAITING_CONSENT)
     _record_audit(db, project, actor, "consent.invite_created", "participant", participant.id)
@@ -937,6 +961,14 @@ def confirm_consent_invite(
     project = db.get(WeddingProject, invite.project_id)
     if participant is None or project is None:
         raise HTTPException(status_code=404, detail="Consent invite not found")
+    from app.wedding_retention import lock_project
+    project = lock_project(db, project.id)
+    db.refresh(participant)
+    from app.wedding_invitations import disclosure_hash, redeem_access
+    if body.disclosure_hash != disclosure_hash(invite, participant):
+        raise HTTPException(409, "INVITATION_DISCLOSURE_CHANGED")
+    if invite.kind == "access":
+        return redeem_access(db, invite, participant, body)
     if body.accepted and not body.display_name:
         raise HTTPException(status_code=422, detail="DISPLAY_NAME_REQUIRED")
     claimed = db.execute(
@@ -992,6 +1024,7 @@ def confirm_consent_invite(
             "participant_id": participant.id,
             "project_id": project.id,
             "token_type": "wedding_participant",
+            "jti": secrets.token_urlsafe(24),
             "iat": int(now.timestamp()),
             "exp": int(session_expires.timestamp()),
         },
@@ -1266,18 +1299,6 @@ def delete_wedding_asset(
         raise HTTPException(status_code=404, detail="Wedding asset not found")
     from app.wedding_retention import lock_project, remove_asset
     project=lock_project(db,project_id)
-    for shot in db.execute(
-        select(StoryboardShot).where(
-            StoryboardShot.project_id == project.id,
-            (StoryboardShot.frame_asset_id == asset.id)
-            | (StoryboardShot.selected_asset_id == asset.id),
-        )
-    ).scalars():
-        shot.frame_asset_id = None
-        shot.selected_asset_id = None
-        set_shot_status(shot, StoryboardShotStatus.FRAME_PENDING)
-        project.frame_approved_version = None
-        _set_project_status(project, WeddingProjectStatus.FRAME_REVIEW)
     remove_asset(db,project,asset)
     _record_audit(db, project, actor, "asset.deleted", "asset", asset_id)
     db.commit()
@@ -1313,6 +1334,8 @@ def submit_storyboard(
     ).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(status_code=409, detail="STORYBOARD_VERSION_ALREADY_EXISTS")
+    if any(shot.shot_type == "scene_ai" and shot.person_keys for shot in body.shots):
+        raise HTTPException(422, "STORYBOARD_SCOPE_INVALID")
     if len({shot.shot_index for shot in body.shots}) != len(body.shots):
         raise HTTPException(status_code=422, detail="SHOT_INDEX_DUPLICATE")
     story = StoryVersion(
@@ -1374,6 +1397,8 @@ def update_storyboard_draft(
     story = _current_story(db, project)
     if story.status != StoryVersionStatus.DRAFT or story.owner_approved_at is not None:
         raise HTTPException(status_code=409, detail="APPROVED_STORYBOARD_IMMUTABLE")
+    if any(shot.shot_type == "scene_ai" and shot.person_keys for shot in body.shots):
+        raise HTTPException(422, "STORYBOARD_SCOPE_INVALID")
     if len({shot.shot_index for shot in body.shots}) != len(body.shots):
         raise HTTPException(status_code=422, detail="SHOT_INDEX_DUPLICATE")
     if any(index < 0 or index >= len(body.facts) for shot in body.shots for index in shot.fact_indexes):
@@ -1381,34 +1406,8 @@ def update_storyboard_draft(
     if any(shot.shot_type == "person_ai" and not shot.person_keys for shot in body.shots):
         raise HTTPException(status_code=422, detail="PERSON_KEYS_REQUIRED")
 
-    # Only the unapproved current draft is replaceable. Approved facts, shots, renders,
-    # and exports keep their original version and IDs.
-    story.shots.clear()
-    story.facts.clear()
-    db.flush()
-    story.story_text = body.story_text
-    story.style = project.style
-    for fact in body.facts:
-        story.facts.append(StoryFact(source_field=fact.source_field, text=fact.text))
-    db.flush()
-    facts = list(story.facts)
-    for shot in body.shots:
-        story.shots.append(
-            StoryboardShot(
-                project_id=project.id,
-                story_version_id=story.id,
-                project_version=project.current_version,
-                shot_index=shot.shot_index,
-                shot_type=shot.shot_type,
-                duration_ms=shot.duration_ms,
-                person_keys=shot.person_keys,
-                fact_ids=[facts[index].id for index in shot.fact_indexes],
-                description=shot.description,
-                subtitle=shot.subtitle,
-                creative_scene=shot.creative_scene,
-                status=StoryboardShotStatus.DRAFT,
-            )
-        )
+    from app.wedding_revisions import apply_draft
+    apply_draft(db, project, story, body)
     project.frame_approved_version = None
     _set_project_status(project, WeddingProjectStatus.STORY_REVIEW)
     _record_audit(db, project, actor, "storyboard.draft_updated", "story_version", story.id)
@@ -1431,13 +1430,16 @@ def approve_storyboard(
     story = _current_story(db, project)
     if story.owner_approved_at is not None or not story.facts or not story.shots:
         raise HTTPException(status_code=409, detail="STORYBOARD_NOT_REVIEWABLE")
+    from app.wedding_guards import validate_composition
+    validate_composition(db, project, story.shots)
     now = utc_now()
     for fact in story.facts:
         fact.confirmed_at = now
     set_story_status(story, StoryVersionStatus.APPROVED)
     story.owner_approved_at = now
     for shot in story.shots:
-        set_shot_status(shot, StoryboardShotStatus.FRAME_PENDING)
+        if not shot.frame_asset_id:
+            set_shot_status(shot, StoryboardShotStatus.FRAME_PENDING)
     _set_project_status(project, WeddingProjectStatus.FRAME_REVIEW)
     project.frame_approved_version = None
     _record_audit(db, project, actor, "storyboard.approved", "story_version", story.id)
@@ -1508,6 +1510,10 @@ def approve_storyboard_frames(
         from app.wedding_authoring import valid_asset
         if not valid_asset(asset, project.id):
             raise HTTPException(422, "FRAME_ASSET_INVALID")
+        from app.wedding_guards import validate_frame, invalidate_shots
+        validate_frame(db, project, shot, asset)
+        if shot.shot_type != "photo" and shot.frame_asset_id and shot.frame_asset_id != asset_id:
+            invalidate_shots(db, project, [shot])
         if shot.shot_type == "photo":
             # Explicit original-photo assignment is also the render selection.
             # Derive identity scope from the uploaded subject, never from an AI
@@ -1565,8 +1571,9 @@ def create_participant_review(
         raise HTTPException(status_code=404, detail="Wedding asset not found")
     belongs_to_shot = shot.frame_asset_id == asset.id or shot.selected_asset_id == asset.id
     if not belongs_to_shot:
+        from app.wedding_guards import source_ids
         belongs_to_shot = db.execute(
-            select(ShotCandidate).where(ShotCandidate.shot_id == shot.id, ShotCandidate.asset_id == asset.id)
+            select(ShotCandidate).where(ShotCandidate.shot_id.in_(source_ids(shot)), ShotCandidate.asset_id == asset.id)
         ).scalar_one_or_none() is not None
     if not belongs_to_shot:
         raise HTTPException(status_code=409, detail="REVIEW_ASSET_VERSION_MISMATCH")
@@ -1595,6 +1602,12 @@ def create_participant_review(
         existing.asset_id = asset.id
         set_review_status(existing, ParticipantReviewStatus(body.result))
         existing.confirmed_at = now
+    if body.result == "rejected":
+        from app.wedding_guards import fence_dependencies
+        fence_dependencies(db, project, {shot.id})
+        if asset.id == shot.frame_asset_id and shot.shot_type != "photo":
+            project.frame_approved_version = None
+            project.status = "frame_review"
     _record_audit(db, project, actor, "identity_review.recorded", "shot", shot.id, {"result": body.result})
     db.commit()
     db.refresh(existing)
@@ -1669,6 +1682,10 @@ def _create_generation_job(
     db: Session,
     target_shot: StoryboardShot | None = None,
 ) -> GenerationJobResponse:
+    from app.wedding_retention import lock_project
+    project = lock_project(db, project.id)
+    if target_shot:
+        db.refresh(target_shot)
     fingerprint = hashlib.sha256(
         f"{body.quote_id}:{body.version}:{target_shot.id if target_shot else 'all'}".encode("utf-8")
     ).hexdigest()
@@ -1700,6 +1717,10 @@ def _create_generation_job(
     pending = [target_shot] if target_shot else pending_video_shots(db, story)
     if not pending:
         raise HTTPException(409, "NO_SHOTS_REQUIRE_GENERATION")
+    if any(s.generation_attempts >= 3 for s in pending):
+        raise HTTPException(409, "SHOT_ATTEMPT_LIMIT_REACHED")
+    for shot in pending:
+        shot.generation_attempts += 1
     reservation = video_reservation(pending)
     if reservation > quote.max_budget_fen:
         raise HTTPException(409, "QUOTE_INVALID")
@@ -1850,7 +1871,10 @@ def select_wedding_shot_candidate(
     candidate = db.get(ShotCandidate, body.candidate_id)
     if shot is None or shot.project_id != project.id or candidate is None:
         raise HTTPException(status_code=404, detail="Shot candidate not found")
-    if candidate.project_id != project.id or candidate.shot_id != shot.id:
+    from app.wedding_guards import candidate_matches, source_ids
+    if shot.project_version != project.current_version or not candidate_matches(shot, candidate):
+        raise HTTPException(409, "CANDIDATE_PROVENANCE_STALE")
+    if candidate.project_id != project.id or candidate.shot_id not in source_ids(shot):
         raise HTTPException(status_code=404, detail="Shot candidate not found")
     from app.wedding_authoring import valid_asset
     if not valid_asset(db.get(WeddingAsset, candidate.asset_id), project.id):
@@ -1913,6 +1937,8 @@ def create_render_version(
     if story.status != "approved" or project.frame_approved_version != project.current_version:
         raise HTTPException(status_code=409, detail="STORYBOARD_OR_FRAME_APPROVAL_REQUIRED")
     shots = sorted(story.shots, key=lambda item: item.shot_index)
+    from app.wedding_guards import validate_composition
+    validate_composition(db, project, shots, selected=True)
     if not shots or sum(shot.duration_ms for shot in shots) != project.target_duration_ms:
         raise HTTPException(status_code=409, detail="TIMELINE_DURATION_INVALID")
     selected_assets: list[str] = []
@@ -1929,7 +1955,8 @@ def create_render_version(
         asset_id = shot.selected_asset_id
         if shot.selected_candidate_id:
             candidate = db.get(ShotCandidate, shot.selected_candidate_id)
-            if candidate is None or candidate.shot_id != shot.id:
+            from app.wedding_guards import candidate_matches
+            if not candidate_matches(shot, candidate):
                 raise HTTPException(status_code=409, detail="SELECTED_CANDIDATE_MISSING")
             asset_id = candidate.asset_id
         if asset_id is None:
@@ -2130,6 +2157,9 @@ def approve_wedding_render(
         ).scalar_one_or_none()
         if review is None:
             raise HTTPException(status_code=409, detail="FINAL_IDENTITY_REVIEW_REQUIRED")
+    from app.wedding_authoring import validate_timeline
+    if render.timeline_snapshot or get_settings().wedding_media_mode == "live":
+        validate_timeline(db,project,render.timeline_snapshot)
     from app.wedding_retention import touch_activity
     touch_activity(db,project,delivered=True)
     render.owner_approved_at = utc_now()
@@ -2182,6 +2212,9 @@ def export_wedding_render(
     ).scalars().first()
     if render is None or render.export_asset_id is None:
         raise HTTPException(status_code=409, detail="EXPORT_NOT_READY")
+    from app.wedding_authoring import validate_timeline
+    if render.timeline_snapshot or get_settings().wedding_media_mode == "live":
+        validate_timeline(db,project,render.timeline_snapshot)
     asset = db.get(WeddingAsset, render.export_asset_id)
     from app.wedding_authoring import valid_asset
     if not valid_asset(asset, project.id) or asset.asset_type != WeddingAssetType.FINAL_VIDEO:

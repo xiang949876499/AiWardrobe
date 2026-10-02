@@ -123,7 +123,7 @@ function BlurImage({ src, alt, className = "" }: { src: string; alt: string; cla
 function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
   const [activeView, setActiveView] = useState<View>(() => {
-    const query = new URLSearchParams(window.location.search);
+    const query = new URLSearchParams(window.location.hash.includes("wedding_invite=") ? window.location.hash.slice(1) : window.location.search);
     return query.has("wedding_invite") || query.has("wedding_project") || sessionStorage.getItem("wedding_active_project") ? "wedding" : "home";
   });
   const [garments, setGarments] = useState<Garment[]>([]);
@@ -245,7 +245,7 @@ function App() {
     setActiveView("home");
   }, []);
 
-  const weddingQuery = new URLSearchParams(window.location.search);
+  const weddingQuery = new URLSearchParams(window.location.hash.includes("wedding_invite=") ? window.location.hash.slice(1) : window.location.search);
   const weddingInvite = weddingQuery.get("wedding_invite");
   const weddingProject = weddingQuery.get("wedding_project") || sessionStorage.getItem("wedding_active_project");
 

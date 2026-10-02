@@ -155,3 +155,5 @@ npm run build
 本仓库维护者的原创贡献采用[学习与非商业使用许可](./LICENSE)：个人学习与非商业研究可免费使用；任何商业使用均须先获得著作权人的书面授权。第三方依赖、字体、素材、数据与服务仍适用各自的许可证或条款，详见[第三方声明](./THIRD_PARTY_NOTICES.md)。
 
 商业授权请通过本仓库的 GitHub Issues，或 [维护者主页](https://github.com/xiang949876499) 联系。
+
+生产部署先运行 `cd backend; python -m app.migrations upgrade`，再启动 API 和婚礼 worker；生产启动只验证 schema。Compose 已包含迁移先行服务。婚礼邀请披露、一次性重新进入、已批准故事修订及费用恢复规则见 [婚礼 MV 指南](docs/wedding-mv.md)。

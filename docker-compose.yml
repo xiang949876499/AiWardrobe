@@ -93,6 +93,16 @@ services:
       mc anonymous set none local/$$WEDDING_S3_BUCKET
       "
 
+  migrate:
+    <<: *wedding-runtime
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.migrations", "upgrade"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     <<: *wedding-runtime
     build:
@@ -103,6 +113,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
 
@@ -116,6 +128,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
 

@@ -257,7 +257,7 @@ def timeline_snapshot(db,project,shots,asset_ids,subtitles):
             raise HTTPException(409,'TIMELINE_ASSET_INVALID')
         items.append(dict(shot_id=shot.id,shot_index=shot.shot_index,shot_type=shot.shot_type,
             person_keys=shot.person_keys,asset_id=asset_id,asset_sha256=asset.sha256,
-            candidate_id=shot.selected_candidate_id,frame_asset_id=shot.frame_asset_id,
+            candidate_id=shot.selected_candidate_id,frame_asset_id=shot.frame_asset_id,fallback_accepted=shot.status=="fallback",
             subtitle=validate_subtitle(subtitles.get(shot.id,shot.subtitle)),duration_ms=shot.duration_ms,
             consent={p.person_key: {'participant_id':p.id,'confirmed_at':_as_utc(p.confirmed_at).isoformat(),'terms_version':p.terms_version} for p in project.participants},
             primary_references={p.person_key:p.primary_photo_asset_id for p in project.participants if p.person_key in shot.person_keys and shot.shot_type!='photo'}))
@@ -268,6 +268,8 @@ def validate_timeline(db,project,items):
     from app.models import StoryboardShot, ShotCandidate
     from app.wedding_retention import asset_expired
     validate_active_consents(db,project)
+    from app.wedding_guards import validate_composition, candidate_matches
+    validate_composition(db, project, [db.get(StoryboardShot, i["shot_id"]) for i in items], selected=True, items=items)
     # Snapshot dependencies must remain retained at both worker fences, including
     # frames/primary references that are not themselves selected render inputs.
     dependencies = set()
@@ -300,7 +302,7 @@ def validate_timeline(db,project,items):
             raise HTTPException(409,'PRIMARY_REFERENCE_CHANGED')
         if item.get('candidate_id'):
             candidate=db.get(ShotCandidate,item['candidate_id'])
-            if candidate is None or candidate.shot_id!=shot.id or candidate.asset_id!=asset.id or candidate.review_result=='rejected':
+            if not candidate_matches(shot, candidate) or candidate.asset_id!=asset.id:
                 raise HTTPException(409,'TIMELINE_CANDIDATE_INVALID')
         for key in item['person_keys']:
             review=db.scalar(select(ParticipantReview).where(ParticipantReview.participant_id==people[key].id,
@@ -373,8 +375,10 @@ def pending_video_shots(db,story,job_id=None):
     for shot in sorted(story.shots,key=lambda s:s.shot_index):
         if shot.shot_type=='photo':
             continue
-        candidates=list(db.scalars(select(ShotCandidate).where(ShotCandidate.shot_id==shot.id,
+        from app.wedding_guards import candidate_matches, source_ids
+        candidates=list(db.scalars(select(ShotCandidate).where(ShotCandidate.shot_id.in_(source_ids(shot)),
             ShotCandidate.review_result!='rejected')))
+        candidates = [c for c in candidates if candidate_matches(shot,c)]
         if candidates and any(c.generation_job_id==job_id for c in candidates):
             result.append(shot)
             continue

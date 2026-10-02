@@ -89,6 +89,7 @@ class VideoGenerationRequest:
     reference_mime: str
     idempotency_key: str
     primary_references: tuple[tuple[str, bytes, str], ...] = ()
+    reconcile_only: bool = False
     existing_task_id: str | None = None
     checkpoint: Callable[[str], None] | None = None
     heartbeat: Callable[[], None] | None = None

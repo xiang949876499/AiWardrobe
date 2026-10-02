@@ -175,7 +175,8 @@ def test_expired_reference_and_output_invalidate_render_history(client):
     with factory() as db:
         row=db.get(RenderVersion,work.render_id)
         assert row.invalidated_at is not None and row.preview_asset_id is None
-        assert db.get(WeddingProject,work.project_id).budget_reserved_fen==reserved
+        assert reserved == 1000
+        assert db.get(WeddingProject,work.project_id).budget_reserved_fen == 0  # Proven queued work is safely released.
 
 
 def test_upload_changed_consent_during_put_never_attaches(client):

@@ -70,6 +70,17 @@ def reserve_egress(db, project, asset):
 
 def remove_asset(db, project, asset):
     """Caller owns parent lock. Transfer physical ownership before removing every FK."""
+    from app.wedding_guards import invalidate_shots
+    affected = list(db.scalars(select(StoryboardShot).where(StoryboardShot.project_id == project.id,
+        StoryboardShot.project_version == project.current_version,
+        or_(StoryboardShot.frame_asset_id == asset.id, StoryboardShot.selected_asset_id == asset.id))))
+    primary_people = list(db.scalars(select(WeddingParticipant.person_key).where(WeddingParticipant.project_id==project.id,
+        WeddingParticipant.primary_photo_asset_id==asset.id)))
+    candidate_ids = list(db.scalars(select(ShotCandidate.id).where(ShotCandidate.asset_id==asset.id)))
+    for shot in db.scalars(select(StoryboardShot).where(StoryboardShot.project_id==project.id,StoryboardShot.project_version==project.current_version)):
+        if (shot.selected_candidate_id in candidate_ids or (shot.shot_type!='photo' and set(shot.person_keys)&set(primary_people))) and shot not in affected:
+            affected.append(shot)
+    invalidate_shots(db, project, affected)
     if db.get(WeddingObjectCleanup,asset.object_key) is None:
         db.add(WeddingObjectCleanup(object_key=asset.object_key, project_id=project.id,
             size_bytes=asset.size_bytes, state='pending', discard_requested=True,writer_finished_at=utc_now()))

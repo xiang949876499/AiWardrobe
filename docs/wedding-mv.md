@@ -130,9 +130,15 @@ python -m app.wedding_accounting C:/absolute/path/bills.json
 
 API 与 worker 必须共同读取同一份运行环境文件、数据库和私有音乐目录。Compose 的音乐目录应以只读方式挂载；容器音乐目录 JSON 和每条音乐的 `path` 都使用容器内路径，不能直接填写 Windows 主机路径。Windows 本地使用 Microsoft YaHei；Linux 镜像提供 Noto CJK 字体。FFmpeg/ffprobe 路径也应按当前操作系统设置。
 
-现有 PostgreSQL 的历史无时区列需要保持原先写入时的绝对时刻。若迁移前后数据库会话时区改变，运营者应配置 `WEDDING_LEGACY_TIMESTAMP_TIMEZONE` 为原写入时区，并在备份后执行启动迁移；不要把已有北京时间值直接当 UTC。迁移只对历史无时区列执行转换，采用 PostgreSQL 绑定表达式验证时区，支持命名时区和合法固定偏移。已经带时区的列不重新解释，也不校验未使用的覆盖值。实际 PostgreSQL 的北京时间、UTC 切换、固定偏移和重复迁移已验证；来源混杂或未知的历史时间仍需人工厘清。
+现有 PostgreSQL 的历史无时区列需要保持原先写入时的绝对时刻。若迁移前后数据库会话时区改变，运营者应配置 `WEDDING_LEGACY_TIMESTAMP_TIMEZONE` 为原写入时区，并在备份后显式执行 `python -m app.migrations upgrade`；不要把已有北京时间值直接当 UTC。迁移只对历史无时区列执行转换，采用 PostgreSQL 绑定表达式验证时区，支持命名时区和合法固定偏移。已经带时区的列不重新解释，也不校验未使用的覆盖值。实际 PostgreSQL 的北京时间、UTC 切换、固定偏移和重复迁移已验证；来源混杂或未知的历史时间仍需人工厘清。
 
 Compose 至少使用2.24版，API和婚礼worker共享可选 `.env` 文件。额外故事价格、音乐目录和资源限制在文件中配置；显式 `environment` 字段优先于 `env_file`。容器默认用 Noto Sans CJK SC；Windows本地默认用Microsoft YaHei，可在需要时按运行环境覆盖。Docker路径配置示例：音乐主机目录 `WEDDING_MUSIC_DIRECTORY=./runtime/wedding-music`，容器目录 `WEDDING_MUSIC_CATALOG_FILE=/wedding-music/catalog.json`，曲目 `path=/wedding-music/your-licensed-track.wav`。共享只读目录不附带任何商业音乐授权。对应规则见[Compose环境变量文档](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/)。
+
+## 显式生产迁移与恢复
+
+在同一份数据库配置下，先于 API 和婚礼 worker 执行 `cd backend; python -m app.migrations upgrade`。迁移使用版本表，PostgreSQL 在同一连接持有 advisory lock，SQLite 使用写事务序列化；重复执行安全。`python -m app.migrations verify` 只检查版本及必需表/列。生产启动只验证，不创建或修改表；未升级时拒绝启动。Compose 的 `migrate` 服务成功退出后才启动 API/worker。开发和测试仍可自动初始化；这不改变生产边界。
+
+取消、撤回或失效后的已知供应商任务继续由 worker 使用已保存任务 ID 做只读查询，直至得到终态，再结算一次；不会重新 POST、下载产物或恢复产品访问。未提交的排队任务释放预留并结束凭证。未知提交保留预留，不允许用新 key、浏览器或版本绕过。故事/静帧未知任务必须由运营者取得供应商终态证据后，用现有账务对账命令导入包含 `operation_key`、`terminal_state`（`succeeded`/`failed`/`not_submitted`）、`cost_fen`、`evidence_id` 的记录；`not_submitted` 只允许零费用。该能力没有浏览器接口，且不能替代外部查证。视频每个镜头输入修订最多三次尝试，已排队、未知和可能收费的尝试都计入，删候选不重置次数。
 
 ## 草稿、角色与制作界面
 
@@ -140,9 +146,17 @@ Compose 至少使用2.24版，API和婚礼worker共享可选 `.env` 文件。额
 
 所有者分镜响应中的 `draft_fingerprint` 用于可选的原始 `If-Match` 请求头，直接发送字段值，不添加 ETag 引号。草稿 POST、PUT 与批准在项目锁内比较；409 `DRAFT_CONFLICT` 需要加载或比对服务器版本，不自动覆盖。初次创建使用 JSON null 的指纹 `74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b`。B 响应不提供所有者草稿指纹。
 
+邀请链接使用 fragment 保存令牌。客户端先 `POST /consent-invites/preview`，JSON `{token}`，显示实际 `project_id`、人物、`provider_list`、`scope`、`purposes`、`terms_version`、`deletion`、到期时间及不可变 `disclosure_hash`；不返回私人故事或素材。本人确认使用 `POST /consent-invites/confirm`，JSON `{token, accepted, display_name, terms_version, disclosure_hash}`。旧路径确认仍要求相同 hash。新 API 请求不把 token 放入 URL；分享后妥善处理浏览器历史中的旧 query 链接。
+
+会话丢失或 24 小时到期后，所有者点击“生成重新进入邀请”，调用 `POST /wedding-projects/{id}/access-invites`（无请求体）；B 本人预览并兑换七天内有效的一次性邀请。兑换旋转会话，旧令牌和重放失效；不重授授权、不修改原同意条款或精确素材审核。预览过期返回 `CONSENT_INVITE_EXPIRED`，重放返回 `CONSENT_INVITE_ALREADY_USED`，披露 hash 不匹配拒绝确认。
+
 已确认的 B 会话不会代替衣橱账号令牌；同时持有两个会话时，通过“切换 B 方本人”或“切换项目所有者”明确操作身份。B 只看本人素材与本人涉及的镜头，不能代所有者保存故事或发起收费任务。项目、账号或角色切换立即隐藏上一个作用域的私有画面，晚到 blob 会被释放。
 
 故事、静帧、视频任务显示实际进度与错误；未知提交禁用新的收费尝试，已知终止后的重试会提示可能新增费用。真实 MP4 候选使用视频播放器；DEMO 图片保留明确的占位标识。照片镜头的关键帧选择器支持双方有效原图，重新批准会从所选本人原图确定 A/B 范围并选中该原片；必须由该人物审核后才能渲染。换照片只清除该照片镜头的旧审核，并作废依赖它的成片。
+
+已批准故事通过“修订事实与镜头”进入编辑，修改事实或镜头场景/动作后点击“创建修订版本”。界面提示受影响镜头需要重新审核和报价、再次模型调用会产生费用。`POST /wedding-projects/{id}/storyboard/revisions` 接收当前 `version`、完整 `story_text`、`facts` 和 `shots`（与草稿提交相同），`If-Match` 发送当前 `draft_fingerprint`。响应是下一版本草稿；旧批准版本保持不可变。新镜头的 `source_shot_id` 记录未变输入的直接来源，复用原始素材/候选 ID、原到期时间、审核和尝试次数；修改的镜头清除派生产物和审核。继续批准、生成静帧和视频只处理缺失/变更镜头。仅改展示标题不产生内容版本。新版本会清空旧的自动保存和媒体响应作用域。
+
+场景镜头不能选带 A/B 人物来源的原图或人物生成帧。实际更换非照片关键帧会清除该镜头的候选、审核、选择及依赖成片，旧候选不能重选；原图与其他镜头保持。收费任务在派发前再次检查有效期、关键帧来源和每位人物的精确审核。LIVE 手工和自动路径都要求 18×5 秒、8 人物/4 场景/6 照片，且按实际固定供应商 MP4 验证至少 6 人物、10 AI 动态镜头及最多 2 个明确接受的原图回退；TESTING 不绕过这些检查。
 
 历史列表明确选择渲染 ID；播放、本人审核、所有者批准、字幕编辑、恢复与导出均针对这个版本。切换历史版本清除未提交的字幕或音乐修改。作废、过期或缺失有效快照的版本保留状态信息，不能播放或导出。
 

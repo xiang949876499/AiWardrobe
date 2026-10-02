@@ -53,6 +53,10 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    from app.wedding_invitations import router as invitation_router
+    app.include_router(invitation_router)
+    from app.wedding_revisions import router as revision_router
+    app.include_router(revision_router)
     return app
 
 

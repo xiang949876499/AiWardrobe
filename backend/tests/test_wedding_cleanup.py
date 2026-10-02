@@ -41,14 +41,14 @@ from app.models import WeddingAsset,WeddingObjectCleanup,utc_now
 from datetime import timedelta
 
 
-@pytest.mark.parametrize('failure',['insert','commit','connection'])
+@pytest.mark.parametrize('failure',['insert','commit','writer_commit','connection'])
 def test_frame_upload_db_failure_leaves_recoverable_ownership(client,monkeypatch,failure):
     from app.wedding_creation import process_next_creation_job
     project,headers,story,photos,ids=prepare_frames(client,monkeypatch)
     assert enqueue_frames(client,project,headers,photos).status_code==202
     factory=get_session_factory();engine=factory.kw['bind']
     real=WeddingPrivateStorage(get_settings())
-    uploaded=[];armed=[False];raised=[False]
+    uploaded=[];armed=[False];raised=[False];attaching=[False]
     class Storage:
         def put(self,*args):
             key=real.put(*args);uploaded.append(key);armed[0]=True;return key
@@ -57,25 +57,30 @@ def test_frame_upload_db_failure_leaves_recoverable_ownership(client,monkeypatch
         def read(self,key):return real.read(key)
         def delete(self,key):raise OSError('delete temporarily failed')
     def fail_sql(conn,cursor,statement,parameters,context,executemany):
-        if armed[0] and not raised[0] and failure=='insert' and statement.startswith('INSERT INTO wedding_assets'):
-            raised[0]=True;raise OperationalError('synthetic insert',{},Exception('DB unavailable'))
+        if armed[0] and statement.startswith('INSERT INTO wedding_assets'):
+            attaching[0]=True
+            if not raised[0] and failure=='insert':
+                raised[0]=True;raise OperationalError('synthetic insert',{},Exception('DB unavailable'))
     def fail_commit(conn):
-        if armed[0] and not raised[0] and failure=='commit':
+        target = (failure=='commit' and attaching[0]) or (failure=='writer_commit' and not attaching[0])
+        if armed[0] and not raised[0] and target:
             raised[0]=True;raise OperationalError('synthetic commit',{},Exception('DB unavailable'))
     def fail_checkout(*args):
         if armed[0] and not raised[0] and failure=='connection':
             raised[0]=True;raise OperationalError('synthetic checkout',{},Exception('DB unavailable'))
     event.listen(engine,'before_cursor_execute',fail_sql);event.listen(engine,'commit',fail_commit);event.listen(engine,'checkout',fail_checkout)
     try:
-        if failure=='connection':
+        if failure in ('connection','writer_commit'):
             # Writer-finished checkpoint is now the first post-upload DB access.
             # Creation preserves the stage and reports needs_action when that fails.
-            assert process_next_creation_job(storage=Storage()).status=='needs_action'
+            result=process_next_creation_job(storage=Storage())
+            assert result.status=='needs_action' and result.error_code=='PROVIDER_RESULT_INVALID'
         else:
             with pytest.raises(OperationalError):process_next_creation_job(storage=Storage())
     finally:
         event.remove(engine,'before_cursor_execute',fail_sql);event.remove(engine,'commit',fail_commit);event.remove(engine,'checkout',fail_checkout)
     assert uploaded and raised[0]
+    assert attaching[0] == (failure in ('insert','commit'))
     with factory() as db:
         assert db.scalar(select(WeddingAsset).where(WeddingAsset.object_key==uploaded[0])) is None
         stage=db.get(WeddingObjectCleanup,uploaded[0])

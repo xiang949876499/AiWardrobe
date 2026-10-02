@@ -9,6 +9,7 @@ from app.models import WeddingBillingReceipt, WeddingProject, GenerationJob, Sto
 from app.wedding_creation import digest
 from app.wedding_references import selected_references, consent_provenance
 from app.wedding_media import ProviderUnavailable
+from app.wedding_guards import exact_reviews
 
 
 def receipt_for(db, job_id, shot_id):
@@ -27,6 +28,13 @@ def video_configuration(shot):
 
 
 def validate_receipt_provenance(db, project, shot, receipt):
+    from app.wedding_guards import validate_frame, exact_reviews
+    from app.models import WeddingAsset
+    validate_frame(db, project, shot, db.get(WeddingAsset, shot.frame_asset_id), reviews=True)
+    if receipt.provenance.get('frame_asset_id', shot.frame_asset_id) != shot.frame_asset_id:
+        raise HTTPException(409, 'FRAME_CHANGED')
+    if receipt.provenance.get('frame_reviews', exact_reviews(db, project, shot, shot.frame_asset_id)) != exact_reviews(db, project, shot, shot.frame_asset_id):
+        raise HTTPException(409, 'IDENTITY_REVIEW_CHANGED')
     configuration = receipt.provenance.get('configuration')
     if configuration and configuration != video_configuration(shot):
         raise HTTPException(409, 'PROVIDER_CONFIGURATION_CHANGED')
@@ -56,7 +64,9 @@ def prepare_receipt(db, project, job, shot):
     receipt = WeddingBillingReceipt(operation_key=f'{job.id}:{shot.id}', owner_id=project.owner_id,
         project_id=project.id, job_id=job.id, provider=provider, model=model, state='dispatching',
         reserved_fen=int((rate * 5).to_integral_value(rounding=ROUND_CEILING)) if live else 0,
-        provenance={'input_hash': digest({'description': shot.description, 'frame': shot.frame_asset_id,
+        provenance={'shot_type': shot.shot_type, 'frame_asset_id': shot.frame_asset_id,
+                    'frame_reviews': exact_reviews(db, project, shot, shot.frame_asset_id),
+                    'input_hash': digest({'description': shot.description, 'frame': shot.frame_asset_id,
                     'references': [(r['asset_id'],r['sha256']) for r in refs]}),
                     'consent_hash': digest(consent), 'consent': consent, 'price_version': cfg.wedding_price_version,
                     'region_endpoint': cfg.wedding_dashscope_base_url, 'configuration': video_configuration(shot)})

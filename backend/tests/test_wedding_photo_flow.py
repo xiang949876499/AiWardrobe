@@ -2,7 +2,7 @@
 from app.config import get_settings
 from app.wedding_creation import process_next_creation_job
 from app.wedding_worker import process_next_generation_job
-from tests.conftest import login
+from tests.conftest import invitation_hash, login
 from io import BytesIO
 from PIL import Image
 
@@ -29,7 +29,7 @@ def photo_flow(client, monkeypatch):
         'person_key': 'B', 'display_name': 'B', 'provider_list': ['local_demo'],
         'terms_version': 'photo-v1'})
     partner = client.post(f"/consent-invites/{invite.json()['invite_token']}/confirm",
-                          json={'accepted': True, 'display_name': 'B', 'terms_version': 'photo-v1'})
+                          json={**{'accepted': True, 'display_name': 'B', 'terms_version': 'photo-v1'}, "disclosure_hash": invitation_hash(client, invite.json()['invite_token'])})
     assert partner.status_code == 200, partner.text
     actors = {'A': owner, 'B': {'Authorization': 'Bearer ' + partner.json()['access_token']}}
     ids = {}

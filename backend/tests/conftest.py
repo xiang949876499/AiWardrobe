@@ -38,3 +38,8 @@ def login(client: TestClient, email: str = "stylist@example.com") -> str:
     verify = client.post("/auth/email-code/verify", json={"email": email, "code": code})
     assert verify.status_code == 200
     return verify.json()["access_token"]
+
+
+def invitation_hash(client, token):
+    response = client.post('/consent-invites/preview', json={'token':token})
+    return response.json().get('disclosure_hash', '0'*64)

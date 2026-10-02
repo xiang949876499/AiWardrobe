@@ -311,7 +311,7 @@ describe("AiWardrobe app", () => {
     expect(await screen.findByRole("heading", { name: "开始共同创作" })).toBeInTheDocument();
   });
 
-  test("opens a bare wedding invite directly without requiring wardrobe login", async () => {
+  test.each(["?", "#"])("opens a bare wedding invite through %s without requiring wardrobe login", async (separator) => {
     const user = userEvent.setup();
     const inviteToken = "one-use-invite";
     const serverProjectId = "server-project-id";
@@ -323,14 +323,15 @@ describe("AiWardrobe app", () => {
     };
     vi.mocked(fetch).mockImplementation(async (input) => {
       const path = String(input);
-      if (path === `/consent-invites/${inviteToken}/confirm`) return jsonResponse({ accepted: true, access_token: "participant-only-token", project_id: serverProjectId, participant: { person_key: "B", display_name: "小林", consent_status: "active", confirmed_at: "2026-10-01T00:00:00Z" } });
+      if (path === "/consent-invites/preview") return jsonResponse({project_id:serverProjectId,person_key:"B",display_name:"小林",kind:"consent",terms_version:"portrait-v1",provider_list:["wan_r2v"],scope:["wedding"],purposes:["Create wedding film"],deletion:"Delete on withdrawal",expires_at:"2027-01-01T00:00:00Z",disclosure_hash:"a".repeat(64)});
+      if (path === "/consent-invites/confirm") return jsonResponse({ accepted: true, access_token: "participant-only-token", project_id: serverProjectId, participant: { person_key: "B", display_name: "小林", consent_status: "active", confirmed_at: "2026-10-01T00:00:00Z" } });
       if (path === "/wedding-capabilities") return jsonResponse({ mode: "demo", demo_only: true, providers: {}, ffmpeg_available: false, licensed_music_available: false, real_export_available: false });
       if (path === `/wedding-projects/${serverProjectId}`) return jsonResponse(project);
       if (path.endsWith("/assets") || path.endsWith("/generation-jobs") || path.endsWith("/candidates") || path.endsWith("/renders")) return jsonResponse([]);
       if (path.endsWith("/storyboard")) return jsonResponse({ detail: "STORYBOARD_NOT_APPROVED" }, 409);
       return jsonResponse({ detail: "unexpected request" }, 404);
     });
-    window.history.replaceState({}, "", `/?wedding_project=untrusted-query-id&wedding_invite=${inviteToken}`);
+    window.history.replaceState({}, "", `/${separator}wedding_project=untrusted-query-id&wedding_invite=${inviteToken}`);
 
     render(<App />);
 
@@ -344,6 +345,8 @@ describe("AiWardrobe app", () => {
     expect(sessionStorage.getItem(`wedding_participant:${serverProjectId}`)).toBe("participant-only-token");
     expect(sessionStorage.getItem("wedding_participant:untrusted-query-id")).toBeNull();
     expect(localStorage.getItem("aiwardrobe_token")).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.every(([url])=>!String(url).includes(inviteToken))).toBe(true);
+    expect(window.location.href).not.toContain(inviteToken);
     window.history.replaceState({}, "", "/");
   });
 

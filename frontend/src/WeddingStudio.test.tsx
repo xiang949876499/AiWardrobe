@@ -12,6 +12,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
   acceptWeddingInvite: vi.fn(),
+  previewWeddingInvite: vi.fn(),
+  createWeddingAccessInvite: vi.fn(),
+  reviseWeddingStoryboard: vi.fn(),
   approveWeddingFrames: vi.fn(),
   approveWeddingRender: vi.fn(),
   approveWeddingStoryboard: vi.fn(),
@@ -1349,4 +1352,33 @@ describe("Wedding Studio candidate review and regeneration", () => {
     ).toBeInTheDocument();
     confirm.mockRestore();
   });
+});
+
+
+test("invitation displays immutable suppliers terms and deletion before accepting", async () => {
+  api.previewWeddingInvite.mockResolvedValue({project_id:project.id,person_key:"B",display_name:"B",kind:"consent",
+    terms_version:"live-v7",provider_list:["seedream","wan_r2v"],scope:["portrait_processing"],
+    purposes:["Wedding portrait generation"],deletion:"Delete primary storage within 24 hours",expires_at:"2027-01-01T00:00:00Z",disclosure_hash:"f".repeat(64)});
+  render(<WeddingStudio ownerToken="" inviteToken="private-invite" />);
+  expect(await screen.findByText(/seedream、wan_r2v/)).toBeVisible();
+  expect(screen.getByText(/live-v7/)).toBeVisible();
+  expect(screen.getByText(/Delete primary storage within 24 hours/)).toBeVisible();
+  fireEvent.change(screen.getByLabelText("你的称呼"),{target:{value:"B"}});
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("button",{name:"接受邀请并继续"}));
+  await waitFor(()=>expect(api.acceptWeddingInvite).toHaveBeenCalledWith("private-invite","B",expect.objectContaining({terms_version:"live-v7",disclosure_hash:"f".repeat(64)})));
+});
+
+test("approved fact and scene correction submits a new explicit content revision", async () => {
+  const before={...storyboard(["A"]),draft_fingerprint:"revision-base"};
+  api.fetchWeddingStoryboard.mockResolvedValue(before);
+  api.reviseWeddingStoryboard.mockResolvedValue({...before,version:2,status:"draft",owner_approved_at:null});
+  render(<WeddingStudio ownerToken="owner-token" initialProjectId={project.id} />);
+  fireEvent.click(await screen.findByRole("button",{name:"修订事实与镜头"}));
+  expect(screen.getByText(/受影响镜头需要重新审核与报价/)).toBeVisible();
+  fireEvent.change(screen.getByLabelText("修订事实 1"),{target:{value:"Corrected date"}});
+  fireEvent.change(screen.getByLabelText("修订镜头 1 场景与动作"),{target:{value:"Walk beside the lake"}});
+  fireEvent.click(screen.getByRole("button",{name:"创建修订版本"}));
+  await waitFor(()=>expect(api.reviseWeddingStoryboard).toHaveBeenCalledWith("owner-token",project.id,
+    expect.objectContaining({version:1,facts:[expect.objectContaining({text:"Corrected date"})],shots:[expect.objectContaining({description:"Walk beside the lake"})]}),"revision-base"));
 });

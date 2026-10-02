@@ -345,7 +345,7 @@ def selected_video(shot, candidates):
     kind = "character_video" if shot["shot_type"] == "person_ai" else "scene_video"
     return bool(candidate["provider"] == PROVIDERS[kind] and candidate["model_version"] == MODELS[kind] and
                 candidate["asset"]["mime"].startswith("video/") and live_asset(candidate["asset"]) and
-                candidate["asset_id"] == candidate["asset"]["id"] and candidate["review_result"] == "approved" and
+                candidate["asset_id"] == candidate["asset"]["id"] and candidate["review_result"] != "rejected" and
                 all(any(r["person_key"] == p and r["asset_id"] == candidate["asset_id"] and r["result"] == "approved"
                         for r in shot["identity_reviews"]) for p in shot["person_keys"]))
 

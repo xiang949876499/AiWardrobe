@@ -25,7 +25,7 @@ from app.models import (
     utc_now,
 )
 from app.wedding_service import WeddingPrivateStorage
-from tests.conftest import login
+from tests.conftest import invitation_hash, login
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -76,7 +76,7 @@ def _confirm_partner(client: TestClient, owner_token: str, project_id: str) -> s
     assert invite.status_code == 201, invite.text
     confirmed = client.post(
         f"/consent-invites/{invite.json()['invite_token']}/confirm",
-        json={"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"},
+        json={**{"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"}, "disclosure_hash": invitation_hash(client, invite.json()['invite_token'])},
     )
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["project_id"] == project_id
@@ -205,7 +205,7 @@ def test_invite_is_hashed_single_use_and_participant_asset_access_is_scoped(clie
 
     confirmed = client.post(
         f"/consent-invites/{invite_token}/confirm",
-        json={"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"},
+        json={**{"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"}, "disclosure_hash": invitation_hash(client, invite_token)},
     )
     assert confirmed.status_code == 200, confirmed.text
     participant_token = confirmed.json()["access_token"]
@@ -215,7 +215,7 @@ def test_invite_is_hashed_single_use_and_participant_asset_access_is_scoped(clie
 
     replay = client.post(
         f"/consent-invites/{invite_token}/confirm",
-        json={"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"},
+        json={**{"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"}, "disclosure_hash": invitation_hash(client, invite_token)},
     )
     assert replay.status_code == 409
 
@@ -687,7 +687,7 @@ def test_storyboard_draft_can_be_updated_but_approved_story_is_immutable(client:
     updated = client.put(f"/wedding-projects/{project_id}/storyboard", headers=headers, json=payload("修订稿", "修订后的字幕"))
     assert updated.status_code == 200, updated.text
     assert updated.json()["id"] == first.json()["id"]
-    assert updated.json()["shots"][0]["id"] != first.json()["shots"][0]["id"]
+    assert updated.json()["shots"][0]["id"] == first.json()["shots"][0]["id"]  # Stable editable shot identity.
     assert updated.json()["story_text"] == "修订稿"
     assert updated.json()["shots"][0]["subtitle"] == "修订后的字幕"
 
@@ -740,7 +740,7 @@ def test_concurrent_invite_redemption_returns_one_participant_session(client: Te
         try:
             return client.post(
                 f"/consent-invites/{invite_token}/confirm",
-                json={"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"},
+                json={**{"accepted": True, "display_name": "小周", "terms_version": "portrait-v1"}, "disclosure_hash": invitation_hash(client, invite_token)},
             )
         except Exception as exc:  # Keep SQLite write races observable as a failed response assertion.
             return exc
@@ -930,7 +930,7 @@ def test_generation_job_requires_consents_storyboard_static_frames_and_identity_
     edited = client.patch(
         f"/wedding-projects/{project_id}",
         headers=_headers(owner_token),
-        json={"version": 1, "title": "Version changed during provider work"},
+        json={"version": 1, "title": "Version changed during provider work", "style": "romantic_film"},
     )
     assert edited.status_code == 200, edited.text
     assert edited.json()["version"] == 2
@@ -1031,7 +1031,7 @@ def test_portrait_upload_requires_both_participants_before_storage(client: TestC
     assert invite.status_code == 201
     confirmed = client.post(
         f"/consent-invites/{invite.json()['invite_token']}/confirm",
-        json={"accepted": True, "display_name": "Chen", "terms_version": "portrait-v1"},
+        json={**{"accepted": True, "display_name": "Chen", "terms_version": "portrait-v1"}, "disclosure_hash": invitation_hash(client, invite.json()['invite_token'])},
     )
     assert confirmed.status_code == 200
     partner_token = confirmed.json()["access_token"]
@@ -1054,7 +1054,7 @@ def test_portrait_upload_requires_both_participants_before_storage(client: TestC
     assert partner_invite.status_code == 201
     partner_confirmed = client.post(
         f"/consent-invites/{partner_invite.json()['invite_token']}/confirm",
-        json={"accepted": True, "display_name": "Chen", "terms_version": "portrait-v1"},
+        json={**{"accepted": True, "display_name": "Chen", "terms_version": "portrait-v1"}, "disclosure_hash": invitation_hash(client, partner_invite.json()['invite_token'])},
     )
     assert partner_confirmed.status_code == 200
     partner_only_token = partner_confirmed.json()["access_token"]
@@ -1114,7 +1114,7 @@ def test_shot_regeneration_rejects_a_shot_from_an_old_story_version(client: Test
     updated = client.patch(
         f"/wedding-projects/{project_id}",
         headers=_headers(owner_token),
-        json={"version": 1, "title": "New version"},
+        json={"version": 1, "title": "New version", "style": "romantic_film"},
     )
     assert updated.status_code == 200
     submit_story(2)

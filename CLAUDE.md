@@ -15,6 +15,10 @@ AiWardrobe is an AI wardrobe assistant with buy-before-you-buy analysis, wardrob
 - **AI**: OpenAI-compatible multimodal API (`gpt-4o-mini`), with demo mode fallback
 - **Infrastructure**: Docker Compose (postgres, minio, minio-init, backend, wedding-worker, frontend)
 
+## Wedding production boundaries
+
+Run `cd backend; python -m app.migrations upgrade` before production API/worker; startup verifies only. Compose uses a successful migration service barrier. Invitation acceptance requires preview-bound disclosure hash; re-entry rotates session without new consent. Use explicit storyboard revisions for approved facts/scenes, preserving unchanged lineage/attempts. Shared frame/composition guards apply to LIVE even during tests; unknown provider outcomes retain reservations. See `docs/wedding-mv.md` for API contracts.
+
 ## Commands
 
 ### Backend (`backend/`)

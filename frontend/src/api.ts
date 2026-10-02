@@ -267,15 +267,26 @@ export function createWeddingInvite(token: string, projectId: string, displayNam
   );
 }
 
-export function acceptWeddingInvite(inviteToken: string, displayName: string) {
+export type WeddingInviteDisclosure = { project_id: string; person_key: "B"; display_name: string; kind: "consent" | "access"; terms_version: string; provider_list: string[]; scope: string[]; purposes: string[]; deletion: string; expires_at: string; disclosure_hash: string };
+export function previewWeddingInvite(token: string) {
+  return request<WeddingInviteDisclosure>("/consent-invites/preview", {method:"POST",body:JSON.stringify({token})});
+}
+export function createWeddingAccessInvite(token: string, projectId: string) {
+  return request<{invite_token:string}>(`/wedding-projects/${encodeURIComponent(projectId)}/access-invites`,{method:"POST"},token);
+}
+export function reviseWeddingStoryboard(token: string, projectId: string, draft: WeddingStoryDraft, fingerprint: string) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard/revisions`,
+    {method:"POST",headers:{"If-Match":fingerprint},body:JSON.stringify(draft)},token);
+}
+export function acceptWeddingInvite(inviteToken: string, displayName: string, disclosure: WeddingInviteDisclosure) {
   return request<{
     access_token: string | null;
     accepted: boolean;
     project_id: string;
     participant: { person_key: "B"; display_name: string; consent_status: string; confirmed_at: string | null };
-  }>(`/consent-invites/${encodeURIComponent(inviteToken)}/confirm`, {
+  }>("/consent-invites/confirm", {
     method: "POST",
-    body: JSON.stringify({ accepted: true, display_name: displayName, terms_version: "portrait-v1" })
+    body: JSON.stringify({ token: inviteToken, accepted: true, display_name: displayName, terms_version: disclosure.terms_version, disclosure_hash: disclosure.disclosure_hash })
   });
 }
 

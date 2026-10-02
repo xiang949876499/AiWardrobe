@@ -417,6 +417,8 @@ class WeddingParticipant(Base):
 
 
 class ConsentInvite(Base):
+    kind: Mapped[str] = mapped_column(String(16), default="consent", nullable=False)
+    disclosure: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     __tablename__ = "wedding_consent_invites"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -458,6 +460,7 @@ class WeddingConsent(Base):
 
 
 class WeddingAsset(Base):
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     __tablename__ = "wedding_assets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -523,6 +526,8 @@ class StoryFact(Base):
 
 
 class StoryboardShot(Base):
+    source_shot_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    generation_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     __tablename__ = "wedding_storyboard_shots"
     __table_args__ = (
         UniqueConstraint("story_version_id", "shot_index", name="uq_wedding_shot_index"),
@@ -634,6 +639,7 @@ class GenerationJob(Base):
 
 
 class ShotCandidate(Base):
+    frame_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     __tablename__ = "wedding_shot_candidates"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

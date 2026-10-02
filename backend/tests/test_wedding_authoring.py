@@ -478,6 +478,7 @@ def test_authoring_migration_upgrades_legacy_columns_once(client,monkeypatch):
     with get_session_factory()() as db:
         engine=db.get_bind()
     with engine.begin() as conn:
+        conn.execute(text('DROP TABLE wedding_schema_versions'))
         for table,columns in fields.items():
             for column in columns:conn.execute(text(f'ALTER TABLE {table} DROP COLUMN {column}'))
     init_db();init_db()
@@ -490,7 +491,7 @@ def test_authoring_migration_upgrades_legacy_columns_once(client,monkeypatch):
 def superseded_render(client,monkeypatch):
     project,headers,photos,ids=rendered_story(client,monkeypatch)
     row=client.post(f'/wedding-projects/{project}/render',headers=headers,json={'version':1}).json()
-    changed=client.patch(f'/wedding-projects/{project}',headers=headers,json={'version':1,'title':'New content version'})
+    changed=client.patch(f'/wedding-projects/{project}',headers=headers,json={'version':1,'title':'New content version','style':'romantic_film'})
     assert changed.status_code==200 and changed.json()['version']==2
     return project,headers,row
 

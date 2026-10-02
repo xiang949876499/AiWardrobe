@@ -1,10 +1,12 @@
 """Additive SQLite/PostgreSQL creation migration and once-only account backfill."""
 from sqlalchemy import inspect, text, literal
+from sqlalchemy.engine import Engine
+from contextlib import nullcontext
 from sqlalchemy.exc import DataError
 
 
 def migrate_creation(engine):
-    with engine.begin() as conn:
+    with (engine.begin() if isinstance(engine, Engine) else nullcontext(engine)) as conn:
         postgres = conn.dialect.name == 'postgresql'
         zone_literal = None
         columns = {c['name'] for c in inspect(conn).get_columns('wedding_participants')}

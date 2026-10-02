@@ -4,6 +4,10 @@ Keep wardrobe functionality intact; wedding projects use independent participant
 Runtime/contracts: `docs/wedding-mv.md`; product requirements: `docs/superpowers/specs/2026-10-01-ai-wedding-mv-design.md`.
 Completion evidence and external limits: `docs/wedding-mv-completion-audit-2026-10-01.md`.
 
+## Wedding production boundaries
+
+Run `cd backend; python -m app.migrations upgrade` before production API/worker; startup verifies only. Compose uses a successful migration service barrier. Invitation acceptance requires preview-bound disclosure hash; re-entry rotates session without new consent. Use explicit storyboard revisions for approved facts/scenes, preserving unchanged lineage/attempts. Shared frame/composition guards apply to LIVE even during tests; unknown provider outcomes retain reservations. See `docs/wedding-mv.md` for API contracts.
+
 ## Commands
 - Backend: `cd backend; python -m pip install -e ".[dev]"`; `python -m pytest`.
 - API: `python -m uvicorn app.main:app --host 127.0.0.1 --port 8031`.

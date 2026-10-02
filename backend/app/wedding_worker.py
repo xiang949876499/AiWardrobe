@@ -430,6 +430,8 @@ def _dispatch_preflight(
             or (job.target_shot_id is not None and shot.id != job.target_shot_id)
         ):
             return None, "SHOT_NOT_FOUND"
+        if shot.generation_attempts > 3:
+            return None, "SHOT_ATTEMPT_LIMIT_REACHED"
         if shot.shot_type == "photo":
             return None, "PHOTO_SHOT_DOES_NOT_DISPATCH"
         if shot.shot_type not in {"person_ai", "scene_ai"}:
@@ -439,6 +441,11 @@ def _dispatch_preflight(
         frame = db.get(WeddingAsset, shot.frame_asset_id)
         if frame is None or frame.project_id != project.id:
             return None, "STATIC_FRAME_MISSING"
+        try:
+            from app.wedding_guards import validate_frame
+            validate_frame(db, project, shot, frame, reviews=True)
+        except HTTPException as exc:
+            return None, str(exc.detail)
         if mark_dispatching:
             from app.wedding_video_operations import prepare_receipt
             try:
@@ -930,6 +937,7 @@ def _record_provider_output(
                     project_id=project.id,
                     shot_id=shot.id,
                     generation_job_id=job.id,
+                    frame_asset_id=shot.frame_asset_id,
                     asset_id=asset.id,
                     provider=output.provider,
                     model_version=output.model_version,
@@ -966,6 +974,10 @@ def process_next_generation_job(
     storage: WeddingPrivateStorage | None = None,
 ) -> WorkerResult | None:
     factory = session_factory or get_session_factory()
+    from app.wedding_reconciliation import reconcile_cancelled
+    reconciled = reconcile_cancelled(factory, providers or build_provider_bundle(get_settings()))
+    if reconciled is not None:
+        return reconciled
     claimed = claim_next_generation_job(factory)
     if claimed is None:
         return None

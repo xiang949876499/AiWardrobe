@@ -122,6 +122,9 @@ def enqueue(db, actor, project_id, body, key, kind):
         raise HTTPException(409, 'PROJECT_NOT_CREATABLE')
     if db.scalar(select(WeddingCreationJob.id).where(WeddingCreationJob.project_id == project.id, WeddingCreationJob.status.in_(['queued','processing']))):
         raise HTTPException(409, 'CREATION_ALREADY_ACTIVE')
+    if db.scalar(select(WeddingBillingReceipt.id).where(WeddingBillingReceipt.project_id == project.id,
+            WeddingBillingReceipt.settled.is_(False), WeddingBillingReceipt.state.in_(['dispatching','unknown','running']))):
+        raise HTTPException(409, 'CREATION_OUTCOME_UNRESOLVED')
     config = get_settings()
     demo = config.wedding_media_mode == 'demo'
     from app.wedding_providers import provider_capabilities
@@ -460,7 +463,8 @@ def process_next_creation_job(session_factory=None, providers=None, storage=None
                     asset = WeddingAsset(project_id=project.id, asset_type=WeddingAssetType.GENERATED_FRAME,
                         object_key=object_key, sha256=hashlib.sha256(output.data).hexdigest(), mime=mime,
                         size_bytes=len(output.data), width=width, height=height, generated=True,
-                        provider=output.provider, expires_at=retention_deadline(project))
+                        provider=output.provider, expires_at=retention_deadline(project),
+                        provenance={'shot_id': operation, 'person_keys': shot['person_keys'], 'project_version': job.project_version})
                     db.add(asset)
                     db.flush()
                     db.get(StoryboardShot, operation).frame_asset_id = asset.id

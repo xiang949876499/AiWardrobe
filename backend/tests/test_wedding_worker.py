@@ -58,7 +58,7 @@ from app.wedding_media import (
     ProviderUnavailable,
     build_provider_bundle,
 )
-from tests.conftest import login
+from tests.conftest import invitation_hash, login
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +144,7 @@ def _project_with_job(client, *, with_render: bool = False) -> ProjectWork:
     assert invite.status_code == 201, invite.text
     partner = client.post(
         f"/consent-invites/{invite.json()['invite_token']}/confirm",
-        json={"accepted": True, "display_name": "B", "terms_version": "worker-v1"},
+        json={**{"accepted": True, "display_name": "B", "terms_version": "worker-v1"}, "disclosure_hash": invitation_hash(client, invite.json()['invite_token'])},
     )
     assert partner.status_code == 200, partner.text
 
@@ -191,6 +191,11 @@ def _project_with_job(client, *, with_render: bool = False) -> ProjectWork:
             status=StoryboardShotStatus.FRAME_APPROVED,
         )
         db.add(shot)
+        db.flush()
+        from app.models import ParticipantReview
+        participant = db.scalar(select(WeddingParticipant).where(WeddingParticipant.project_id==project_id, WeddingParticipant.person_key=='A'))
+        db.add(ParticipantReview(project_id=project_id,participant_id=participant.id,person_key='A',project_version=1,
+            shot_id=shot.id,asset_id=frame.id,result='approved',confirmed_at=utc_now()))
         quote = WeddingQuote(
             project_id=project_id,
             project_version=1,
@@ -425,6 +430,8 @@ def test_partial_shot_failure_preserves_success_and_settles_known_cost_for_recov
             status=StoryboardShotStatus.FRAME_APPROVED,
         )
         db.add(second)
+        db.flush()
+        _approve_worker_frame(db, second)
         job.target_shot_id = None
         job.total_shots = 2
         db.commit()
@@ -808,6 +815,7 @@ def test_stale_processing_job_recovers_and_resumes_only_unfinished_shots(client,
         )
         db.add(second_shot)
         db.flush()
+        _approve_worker_frame(db, second_shot)
         second_shot_id = second_shot.id
         output_key = storage.put(work.project_id, b"persisted-first-candidate", ".mp4", "video/mp4")
         output_asset = WeddingAsset(
@@ -1028,3 +1036,10 @@ def test_worker_initializes_database_before_polling(monkeypatch):
     wedding_worker.main()
 
     assert calls == ["init", "poll"]
+
+
+def _approve_worker_frame(db, shot):
+    from app.models import ParticipantReview
+    person = db.scalar(select(WeddingParticipant).where(WeddingParticipant.project_id==shot.project_id,WeddingParticipant.person_key=='A'))
+    db.add(ParticipantReview(project_id=shot.project_id,participant_id=person.id,person_key='A',project_version=1,
+        shot_id=shot.id,asset_id=shot.frame_asset_id,result='approved',confirmed_at=utc_now()))

@@ -625,6 +625,7 @@ class ConsentInviteResponse(BaseModel):
 
 
 class ConsentConfirmRequest(BaseModel):
+    disclosure_hash: str = Field(min_length=64, max_length=64)
     accepted: bool
     display_name: str | None = Field(default=None, max_length=20)
     terms_version: str = Field(min_length=1, max_length=64)
@@ -682,6 +683,8 @@ class WeddingShotReviewSummary(BaseModel):
 
 
 class StoryboardShotResponse(BaseModel):
+    source_shot_id: str | None = None
+    generation_attempts: int = 0
     id: str
     project_version: int
     shot_index: int

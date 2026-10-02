@@ -402,6 +402,10 @@ def release_generation_budget(db: Session, job: GenerationJob) -> BudgetLedger:
     from app.wedding_accounting import settle
     project = db.get(WeddingProject, job.project_id)
     settle(db, project, entry.reserved_fen, 0)
+    for receipt in db.scalars(select(WeddingBillingReceipt).where(WeddingBillingReceipt.job_id == job.id)):
+        receipt.settled = True
+        receipt.state = 'not_submitted'
+        receipt.estimated_fen = 0
     set_budget_status(entry, BudgetLedgerStatus.RELEASED)
     entry.released_fen = entry.reserved_fen
     entry.settled_at = utc_now()

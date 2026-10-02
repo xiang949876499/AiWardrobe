@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from contextlib import nullcontext
 
 from sqlalchemy import create_engine
 from sqlalchemy import inspect, text
@@ -50,14 +51,11 @@ def reset_database_connection() -> None:
 
 
 def init_db() -> None:
-    from app import models  # noqa: F401
-
-    engine = get_engine()
-    Base.metadata.create_all(bind=engine)
-    _ensure_lightweight_columns(engine)
-    _ensure_wedding_project_columns(engine)
-    from app.wedding_migrations import migrate_creation
-    migrate_creation(engine)
+    from app.migrations import upgrade, verify
+    if get_settings().environment == "production":
+        verify(get_engine())
+    else:
+        upgrade(get_engine())
 
 
 def _ensure_lightweight_columns(engine: Engine) -> None:
@@ -66,7 +64,7 @@ def _ensure_lightweight_columns(engine: Engine) -> None:
     if "users" not in tables:
         return
     user_columns = {column["name"] for column in inspector.get_columns("users")}
-    with engine.begin() as connection:
+    with (engine.begin() if isinstance(engine, Engine) else nullcontext(engine)) as connection:
         if "password_hash" not in user_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(128)"))
         if "garments" in tables:
@@ -109,7 +107,7 @@ def _ensure_wedding_project_columns(engine: Engine) -> None:
         "budget_reserved_fen": "INTEGER NOT NULL DEFAULT 0",
         "budget_spent_fen": "INTEGER NOT NULL DEFAULT 0",
     }
-    with engine.begin() as connection:
+    with (engine.begin() if isinstance(engine, Engine) else nullcontext(engine)) as connection:
         for name, ddl in missing.items():
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE wedding_projects ADD COLUMN {name} {ddl}"))

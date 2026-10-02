@@ -500,6 +500,8 @@ class WanVideoProvider(_HTTP):
         price["reservation_fen"] = _ceil(rate * 5)
         cost, usage, request_id, state = _ceil(rate * 5), {}, None, "unknown"
         task_id = request.existing_task_id
+        if request.reconcile_only and not task_id:
+            raise ProviderUnavailable("RECONCILIATION_TASK_REQUIRED", "Existing task is required")
         if task_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", task_id):
             raise ProviderUnavailable("PROVIDER_INPUT_INVALID", "Provider task identity is invalid")
         headers = {"Authorization": "Bearer " + (key or "")}
@@ -560,6 +562,9 @@ class WanVideoProvider(_HTTP):
                 if status == "SUCCEEDED":
                     state = "succeeded"
                     cost = _ceil(rate * _number(usage.get("duration", 5), maximum=5))
+                    if request.reconcile_only:
+                        return MediaOutput(b"", "video/mp4", self.kind, model, cost, request_id=request_id,
+                            task_id=task_id, usage=usage, price_version=cfg.wedding_price_version, price_metadata=price)
                     data, mime = self._download(output["video_url"], deadline=deadline, heartbeat=request.heartbeat)
                     if mime != "video/mp4":
                         raise ValueError()

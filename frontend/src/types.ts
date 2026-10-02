@@ -291,6 +291,8 @@ export type WeddingFact = {
 
 export type WeddingShot = {
   id: string;
+  source_shot_id?: string | null;
+  generation_attempts?: number;
   project_version: number;
   shot_index: number;
   shot_type: "person_ai" | "scene_ai" | "photo";

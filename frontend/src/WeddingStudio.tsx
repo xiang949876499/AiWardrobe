@@ -14,6 +14,10 @@ import {
 } from "lucide-react";
 import {
   acceptWeddingInvite,
+  previewWeddingInvite,
+  createWeddingAccessInvite,
+  reviseWeddingStoryboard,
+  type WeddingInviteDisclosure,
   approveWeddingFrames,
   approveWeddingRender,
   approveWeddingStoryboard,
@@ -64,7 +68,7 @@ import type {
   WeddingPhotoReadiness,
   WeddingMusicTrack,
 } from "./types";
-import { useWeddingDraft, weddingActorKey } from "./useWeddingDraft";
+import { useWeddingDraft, weddingActorKey, storyToDraft } from "./useWeddingDraft";
 import "./WeddingStudio.css";
 import {
   CreationProgress,
@@ -224,6 +228,8 @@ function WeddingWorkspace({
   onRoleChange?: (participant: boolean) => void;
 }) {
   const [invite, setInvite] = useState(inviteToken);
+  const [disclosure, setDisclosure] = useState<WeddingInviteDisclosure | null>(null);
+  const [revisionDraft, setRevisionDraft] = useState<WeddingStoryDraft | null>(null);
   const [projectId, setProjectId] = useState(
     initialProjectId || sessionStorage.getItem(ACTIVE_PROJECT_KEY),
   );
@@ -432,6 +438,13 @@ function WeddingWorkspace({
     if (inviteToken) setInvite(inviteToken);
   }, [inviteToken]);
 
+  useEffect(() => {
+    let current = true;
+    setDisclosure(null);
+    if (invite) previewWeddingInvite(invite).then(value => {if (current) setDisclosure(value);}).catch(e => {if(current) setError(message(e));});
+    return () => {current=false;};
+  }, [invite]);
+
   async function act<T>(
     fn: () => Promise<T>,
     done?: (result: T) => void,
@@ -533,7 +546,7 @@ function WeddingWorkspace({
     event.preventDefault();
     if (!invite) return;
     const result = await act(
-      () => acceptWeddingInvite(invite, partnerName.trim()),
+      () => { if (!disclosure) throw new Error("INVITATION_DISCLOSURE_REQUIRED"); return acceptWeddingInvite(invite, partnerName.trim(), disclosure); },
       (response) => {
         if (!response.accepted || !response.access_token)
           throw new Error("INVITE_NOT_ACCEPTED");
@@ -549,6 +562,7 @@ function WeddingWorkspace({
         onRoleChange?.(true);
         const next = new URL(window.location.href);
         next.searchParams.delete("wedding_invite");
+        if (next.hash.includes("wedding_invite=")) next.hash = "";
         next.searchParams.delete("wedding_project");
         window.history.replaceState(
           {},
@@ -581,6 +595,13 @@ function WeddingWorkspace({
             确认后，你将以 B
             方身份加入项目。你可以上传自己的照片并审核涉及自己的镜头。
           </p>
+          {disclosure && <div className="ws-disclosure">
+            <p>项目：{disclosure.project_id} · 参与者：{disclosure.person_key} · {disclosure.display_name}</p>
+            <p>条款版本：{disclosure.terms_version}</p><p>处理供应商：{disclosure.provider_list.join("、")}</p>
+            <p>授权范围：{disclosure.scope.join("、")}</p><p>用途：{disclosure.purposes.join("；")}</p>
+            <p>{disclosure.deletion}</p><p>邀请到期：{new Date(disclosure.expires_at).toLocaleString()}</p>
+            {disclosure.kind === "access" && <p>这是重新进入邀请；既有授权保持有效，兑换后旧会话失效。</p>}
+          </div>}
           <form onSubmit={(e) => void acceptInvite(e)}>
             <label htmlFor="ws-partner-name">你的称呼</label>
             <input
@@ -593,14 +614,14 @@ function WeddingWorkspace({
             />
             <label className="ws-check">
               <input type="checkbox" required />
-              我同意将本人上传的照片用于本项目制作与预览审核。
+              我已阅读以上供应商、用途、条款版本和删除说明，并同意继续。
             </label>
             <p className="ws-small">
               接受后令牌仅保存在此项目的 sessionStorage，不会替换衣橱登录状态。
             </p>
             <button
               className="ws-primary"
-              disabled={busy || !partnerName.trim()}
+              disabled={busy || !partnerName.trim() || !disclosure}
             >
               <Check size={17} />
               接受邀请并继续
@@ -1042,11 +1063,11 @@ function WeddingWorkspace({
                     />
                     <button
                       className="ws-secondary"
-                      disabled={busy || !inviteName.trim()}
+                      disabled={busy || (participant?.consent_status !== "active" && !inviteName.trim())}
                       onClick={() =>
                         void act(
                           () =>
-                            createWeddingInvite(
+                            participant?.consent_status === "active" ? createWeddingAccessInvite(token, projectId) : createWeddingInvite(
                               token,
                               projectId,
                               inviteName.trim(),
@@ -1054,14 +1075,14 @@ function WeddingWorkspace({
                             ),
                           (result) =>
                             setInviteUrl(
-                              `${window.location.origin}${window.location.pathname}?wedding_project=${encodeURIComponent(projectId)}&wedding_invite=${encodeURIComponent(result.invite_token)}`,
+                              `${window.location.origin}${window.location.pathname}#wedding_project=${encodeURIComponent(projectId)}&wedding_invite=${encodeURIComponent(result.invite_token)}`,
                             ),
                           "邀请链接已创建",
                         )
                       }
                     >
                       <Send size={16} />
-                      生成单次邀请
+                      {participant?.consent_status === "active" ? "生成重新进入邀请" : "生成单次邀请"}
                     </button>
                   </div>
                 )}
@@ -1225,6 +1246,20 @@ function WeddingWorkspace({
                   </button>
                 </>
               )}
+              {canOwner && storyboard?.status === "approved" && <>
+                <button className="ws-secondary" disabled={busy || !!revisionDraft} onClick={() => setRevisionDraft(storyToDraft(storyboard))}>修订事实与镜头</button>
+                {revisionDraft && <section className="ws-card" aria-label="内容修订">
+                  <p>将创建新的内容版本。受影响镜头需要重新审核与报价；调用模型会产生新费用。未修改镜头复用原素材与审核。</p>
+                  <label>修订故事<textarea value={revisionDraft.story_text} onChange={e=>setRevisionDraft({...revisionDraft,story_text:e.target.value})}/></label>
+                  {revisionDraft.facts.map((fact,i)=><label key={i}>修订事实 {i+1}<textarea value={fact.text} onChange={e=>setRevisionDraft({...revisionDraft,facts:revisionDraft.facts.map((f,j)=>j===i?{...f,text:e.target.value}:f)})}/></label>)}
+                  {revisionDraft.shots.map((shot,i)=><label key={i}>修订镜头 {shot.shot_index} 场景与动作<textarea value={shot.description} onChange={e=>setRevisionDraft({...revisionDraft,shots:revisionDraft.shots.map((s,j)=>j===i?{...s,description:e.target.value}:s)})}/></label>)}
+                  <button className="ws-primary" disabled={busy} onClick={()=>void act(
+                    ()=>reviseWeddingStoryboard(token,projectId,revisionDraft,storyboard.draft_fingerprint || ""),
+                    next=>{epoch.current+=1;setBusy(false);setRevisionDraft(null);setRenders([]);setSelectedRenderId("");setFrameChoices({});setStoryboard(next);setProject({...project,version:next.version});void refresh();},
+                    "已创建修订版本，请重新确认事实与受影响静帧")}>创建修订版本</button>
+                  <button className="ws-secondary" onClick={()=>setRevisionDraft(null)}>取消修订</button>
+                </section>}
+              </>}
               <fieldset
                 disabled={
                   (!!storyboard && storyboard.status !== "draft") ||
@@ -2008,7 +2043,6 @@ function ShotReview({
       (a.person_key === "A" || a.person_key === "B") &&
       (!a.expires_at || new Date(a.expires_at).getTime() > Date.now()) &&
       (shot.shot_type === "photo" ||
-        shot.person_keys.length === 0 ||
         shot.person_keys.includes(a.person_key as "A" | "B")),
   );
   const photoOptions = assets.filter(

@@ -142,7 +142,7 @@ python backend/scripts/wedding_acceptance.py --manifest acceptance/private-manif
 
 Report uses metadata GETs, not the final media download that consumes a download slot.
 It checks actual selected candidate provider/model/video MIME, asset expiry and exact
-per-person approvals. The chosen current-version render must match current shot assets,
+per-person approvals. A publicly owner-selected candidate may retain `review_result: pending`; the runner uses selection plus exact participant approvals, and still rejects `rejected`, wrong provider/model, missing MP4, demo or expired assets. It does not require an unreachable aggregate `approved` flag. The chosen current-version render must match current shot assets,
 have 90,000 ms output, owner approval, exact A/B preview reviews and an unexpired final
 video asset. Fallback is counted only when explicitly accepted and its selected photo
 has the required current per-person review. The metric uses actual media types, because

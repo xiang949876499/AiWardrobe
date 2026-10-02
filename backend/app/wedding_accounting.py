@@ -80,6 +80,9 @@ def reconcile_rows(factory, rows):
     """Import exact provider task IDs; repeated equal bills are no-ops, conflicts reported."""
     results = []
     for row in rows:
+        if isinstance(row, dict) and 'operation_key' in row:
+            results.append(resolve_creation_operation(factory,row))
+            continue
         if not isinstance(row, dict) or not isinstance(row.get('task_id'), str) or type(row.get('cost_fen')) is not int or row['cost_fen'] < 0:
             results.append({'status': 'invalid'})
             continue
@@ -125,6 +128,40 @@ def reconcile_rows(factory, rows):
             db.commit()
             results.append({'task_id': row['task_id'], 'status': 'applied', 'difference_fen': delta, 'mismatch': delta != 0, 'over_cap': over_cap})
     return results
+
+
+def resolve_creation_operation(factory, row):
+    """Operator-only local evidence import, never a browser retry or provider POST."""
+    from app.models import WeddingCreationJob
+    state = row.get('terminal_state')
+    if (state not in ('succeeded','failed','not_submitted') or type(row.get('cost_fen')) is not int
+            or row['cost_fen'] < 0 or not isinstance(row.get('evidence_id'),str) or not row['evidence_id'].strip()
+            or len(row['evidence_id']) > 160 or not isinstance(row.get('operation_key'),str)
+            or state == 'not_submitted' and row['cost_fen'] != 0):
+        return {'status':'invalid'}
+    with factory() as db:
+        receipt = db.scalar(select(WeddingBillingReceipt).where(WeddingBillingReceipt.operation_key==row['operation_key']))
+        if not receipt or not db.get(WeddingCreationJob,receipt.job_id):
+            return {'status':'unmatched'}
+        from app.wedding_retention import lock_project
+        project = lock_project(db,receipt.project_id)
+        if project is None:
+            return {'status':'unmatched'}
+        lock_account(db,receipt.owner_id)
+        db.refresh(receipt,with_for_update=True)
+        if receipt.settled:
+            return {'status':'duplicate' if receipt.billed_fen==row['cost_fen'] and receipt.state==state else 'conflict'}
+        if receipt.state not in ('unknown','dispatching','running'):
+            return {'status':'not_unresolved'}
+        if db.get(WeddingCreationJob,receipt.job_id).status in ('queued','processing'):
+            return {'status':'operation_active'}
+        settle(db,project,receipt.reserved_fen,row['cost_fen'])
+        receipt.state = state
+        receipt.billed_fen = receipt.estimated_fen = row['cost_fen']
+        receipt.settled = True
+        receipt.price_metadata = {**receipt.price_metadata,'reconciliation_evidence':row['evidence_id']}
+        db.commit()
+        return {'status':'applied'}
 
 
 def main():
