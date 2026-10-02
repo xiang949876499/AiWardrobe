@@ -101,14 +101,14 @@ export function PurchaseHistoryView({ token, onAuthExpired, onBack }: {
     feedbackController.current?.abort();
   }, []);
 
-  async function run(candidateId: string, action: () => Promise<CandidateV2 | void>) {
+  async function run(candidateId: string, action: () => Promise<CandidateV2 | void>, refreshCandidate = true) {
     setBusyId(candidateId);
     setError("");
     setMessage("");
     try {
       const updated = await action();
       if (updated) setItems((current) => current.map((item) => item.id === candidateId ? updated : item));
-      else if (!feedbackEvents[candidateId]) await load();
+      else if (refreshCandidate) await load();
     } catch (err) {
       if (isAuthError(err)) onAuthExpired();
       else setError(errorMessage(err));
@@ -199,7 +199,7 @@ export function PurchaseHistoryView({ token, onAuthExpired, onBack }: {
       }, createIdempotencyKey());
       setFeedbackEvents((current) => ({ ...current, [candidate.id]: [...(current[candidate.id] || []).filter((item) => item.id !== event.id), event] }));
       setMessage("反馈已保存，将用于后续建议。");
-    });
+    }, false);
   }
 
   function excludeSimilarItem(candidate: CandidateV2, garmentId: string) {
@@ -216,7 +216,7 @@ export function PurchaseHistoryView({ token, onAuthExpired, onBack }: {
       }, createIdempotencyKey());
       setFeedbackEvents((current) => ({ ...current, [candidate.id]: [...(current[candidate.id] || []).filter((item) => item.id !== event.id), event] }));
       setMessage("已明确排除该单品，后续建议会遵守此选择。");
-    });
+    }, false);
   }
 
   function revokeFeedback(candidateId: string, eventId: string) {
@@ -227,7 +227,7 @@ export function PurchaseHistoryView({ token, onAuthExpired, onBack }: {
         [candidateId]: (current[candidateId] || []).filter((event) => event.id !== eventId)
       }));
       setMessage("反馈已撤销，后续建议将不再使用这条记录。");
-    });
+    }, false);
   }
 
   function reanalyze(candidate: CandidateV2) {

@@ -25,6 +25,20 @@ from uuid import uuid4
 from urllib.parse import urlparse
 
 
+def prepare_legacy_schema(engine):
+    """Build an isolated, unversioned prototype fixture before any app startup."""
+    from sqlalchemy import inspect, text
+    from app.database import Base
+    from app import models  # noqa: F401
+    assert not inspect(engine).get_table_names(), 'Legacy fixture requires an empty isolated schema'
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text('ALTER TABLE wedding_object_cleanup DROP COLUMN writer_finished_at'))
+        conn.execute(text('ALTER TABLE wedding_render_versions DROP COLUMN attempts'))
+    assert 'schema_migrations' not in inspect(engine).get_table_names()
+    assert 'wedding_schema_versions' not in inspect(engine).get_table_names()
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--settings',type=Path,required=True)
@@ -60,14 +74,36 @@ def main():
         s3.create_bucket(Bucket=bucket,ACL='private');created_bucket=True
         s3.put_public_access_block(Bucket=bucket,PublicAccessBlockConfiguration=dict(BlockPublicAcls=True,IgnorePublicAcls=True,BlockPublicPolicy=True,RestrictPublicBuckets=True))
         scoped=url.update_query_dict({'options':f'-csearch_path={schema}','connect_timeout':'5'})
-        values={'DATABASE_URL':scoped.render_as_string(hide_password=False),'TESTING':'true','JWT_SECRET':'synthetic-test-only-secret-at-least-thirty-two-bytes',
+        values={'DATABASE_URL':scoped.render_as_string(hide_password=False),'ENVIRONMENT':'production','TESTING':'true','JWT_SECRET':'synthetic-test-only-secret-at-least-thirty-two-bytes',
             'AI_DEMO_MODE':'true','WORKFLOW_PROVIDER':'demo','WEDDING_MEDIA_MODE':'demo','STORAGE_DRIVER':'s3',
             'WEDDING_S3_BUCKET':bucket,'S3_BUCKET':'unrelated-wardrobe-test','S3_ENDPOINT_URL':config['s3_endpoint'],
             'S3_REGION':config['s3_region'],'S3_ACCESS_KEY_ID':config['s3_test_access_key'],'S3_SECRET_ACCESS_KEY':config['s3_test_secret_key']}
         for key,value in values.items():patch.setenv(key,value)
         from app.config import get_settings
-        from app.database import get_session_factory,reset_database_connection,init_db
+        from app.database import get_session_factory,reset_database_connection,get_engine,init_db
         get_settings.cache_clear();reset_database_connection()
+        from app.migrations import upgrade_database, verify
+        from sqlalchemy import inspect
+        engine = get_engine()
+        prepare_legacy_schema(engine)
+        for _ in range(2):
+            assert upgrade_database(engine) == 13
+            verify(engine)
+        with engine.connect() as conn:
+            assert conn.scalar(text('SELECT MAX(version) FROM schema_migrations')) == 13
+            assert conn.scalar(text('SELECT MAX(version) FROM wedding_schema_versions')) == 2
+        for table, column in [('wedding_object_cleanup','writer_finished_at'), ('wedding_render_versions','attempts')]:
+            assert column in {c['name'] for c in inspect(engine).get_columns(table)}
+        statements = []
+        def observe_startup(conn, cursor, sql, params, context, many):
+            statements.append(sql.lstrip().upper())
+        event.listen(engine, 'before_cursor_execute', observe_startup)
+        try:
+            init_db()
+        finally:
+            event.remove(engine, 'before_cursor_execute', observe_startup)
+        assert not any(s.startswith(('CREATE', 'ALTER', 'INSERT', 'UPDATE', 'DELETE')) for s in statements)
+        checks.append('PostgreSQL unversioned legacy fixture, explicit dual-ledger upgrade twice, production read-only startup')
         from app.main import create_app
         from app.models import WeddingProject,WeddingAsset,WeddingObjectCleanup,RenderVersion,WeddingParticipant,utc_now
         from app.wedding_service import WeddingPrivateStorage
@@ -79,11 +115,6 @@ def main():
         from tests.conftest import login
         with TestClient(create_app()) as client,contextlib.redirect_stdout(io.StringIO()):
             factory=get_session_factory();real=WeddingPrivateStorage(get_settings())
-            # Prove the newest additive migration on an already-existing table, twice.
-            with admin.begin() as conn:
-                conn.execute(text(f'ALTER TABLE {schema}.wedding_object_cleanup DROP COLUMN writer_finished_at'))
-                conn.execute(text(f'ALTER TABLE {schema}.wedding_render_versions DROP COLUMN attempts'))
-            init_db();init_db();checks.append('PostgreSQL additive stage/render migration twice')
             work,headers,ids=ready_assets(client)
             with factory() as db:key=db.get(WeddingAsset,ids[0]).object_key
             assert httpx.get(f"{config['s3_endpoint']}/{bucket}/{key}",timeout=5).status_code==403

@@ -62,7 +62,7 @@ Copy `.env.example` to `.env`. Key env vars:
 - `SHOPPING_RECOMMENDATION_DEMO_MODE`, `TAOBAO_*` - wardrobe gap product search settings
 - `STORAGE_DRIVER` - `local` (default) or `s3` (requires `S3_ENDPOINT_URL`, `S3_BUCKET`, AWS credentials)
 - `WEDDING_*` - wedding MV provider, budget, worker, FFmpeg, and music settings; media mode defaults to `disabled`, and wedding S3 storage uses a private bucket distinct from wardrobe storage
-- `JWT_SECRET`, `SMTP_*` for email codes
+- `JWT_SECRET`, `SMTP_*` for email codes; production JWT requires a unique operator-provided random secret of at least32bytes. Compose fails for missing/empty secrets; checked-in public defaults are rejected.
 
 ## Architecture
 

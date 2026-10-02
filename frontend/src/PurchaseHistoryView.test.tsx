@@ -48,6 +48,43 @@ beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("purchase decision history", () => {
+  it.each(["save", "link"])("refreshes ownership after %s with existing feedback before the next revisioned edit", async (action) => {
+    const user = userEvent.setup();
+    let current = { ...candidate, decision_status: "bought" as const };
+    const edits: number[] = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("/v2/purchase/candidates?")) return jsonResponse({ items: [current], next_cursor: null, has_more: false });
+      if (url.startsWith("/v2/feedback")) return jsonResponse({ items: [{ id: "existing-feedback", target_type: "candidate", target_id: candidate.id, value: "helpful", revoked_at: null }], next_cursor: null, has_more: false });
+      if (url.startsWith("/v2/garments?")) return jsonResponse({ items: [{ id: "trusted-1", status: "ready", review_status: "confirmed", user_confirmed_at: "2026-10-01T00:00:00Z", category: "top", style: "Trusted", tags: [] }], has_more: false, next_cursor: null });
+      if (url.endsWith("/save") || url.endsWith("/link-owned-garment")) {
+        current = { ...current, ownership_state: "linked", owned_garment_id: "trusted-1", revision: 2 };
+        return jsonResponse({ garment_id: "trusted-1", candidate_id: candidate.id, ownership_state: "linked", revision: 2 });
+      }
+      if (url === "/v2/purchase/candidates/candidate-1") {
+        if (init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body));
+          edits.push(body.expected_revision);
+          if (body.expected_revision !== current.revision) return jsonResponse({ detail: { code: "revision_conflict" } }, 409);
+          current = { ...current, category: body.category, revision: 3 };
+        }
+        return jsonResponse(current);
+      }
+      return jsonResponse({}, 500);
+    });
+    render(<PurchaseHistoryView token="token" onAuthExpired={vi.fn()} onBack={vi.fn()} />);
+    await screen.findByText("Blue shirt");
+    await screen.findByRole("button", { name: /撤销反馈/ });
+    if (action === "save") await user.click(screen.getByRole("button", { name: "确认已购买并加入衣橱" }));
+    else {
+      await user.click(screen.getByRole("button", { name: "关联已有衣物" }));
+      await user.selectOptions(await screen.findByRole("combobox", { name: "选择已确认的衣橱单品" }), "trusted-1");
+    }
+    expect(await screen.findByRole("button", { name: "已关联衣橱" })).toBeDisabled();
+    await user.selectOptions(screen.getByRole("combobox", { name: "识别类别" }), "outerwear");
+    await waitFor(() => expect(edits).toEqual([2]));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
   it("reuses the link idempotency key after a lost response and offers only trusted garments", async () => {
     const user = userEvent.setup();
     const keys: string[] = [];

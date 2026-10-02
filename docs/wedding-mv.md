@@ -39,7 +39,7 @@ npm run dev
 ## 安全与成本
 
 - B 的受限参与者会话保存在 sessionStorage，作用于一个项目和本人；衣橱账号令牌独立。双方本人确认身份，A 无权替 B 确认。
-- 所有素材通过产品授权网关读取，逐次核查项目归属、当前授权、到期和成片状态；不给浏览器对象存储原始/签名 URL。婚礼 S3 bucket 与衣橱公开桶分开，禁止匿名读取。
+- 所有素材通过产品授权网关读取，逐次核查项目归属、当前授权、到期和成片状态；不给浏览器对象存储原始/签名 URL。婚礼与衣橱使用两个独立私有 S3 bucket，均禁止匿名读取。
 - 撤销、删除和内容更改即时停止产品访问；远程对象清理可以重试。已经下载的文件或供应商已取走的素材不能远程收回。
 - 每项目15000分，预留2000分用于交付；账号累计额度默认15000分。独立账号账本在删除项目后仍保留最小财务元数据，删除再建不能重置额度。
 - 供应商 usage 与本地价格计算的是估算，官方账单才是财务金额。已受理 task_id 在重启后继续GET查询；UNKNOWN_SUBMISSION 持有预占、等待核对，禁止换新key自动重发收费POST。
@@ -132,13 +132,13 @@ API 与 worker 必须共同读取同一份运行环境文件、数据库和私�
 
 现有 PostgreSQL 的历史无时区列需要保持原先写入时的绝对时刻。若迁移前后数据库会话时区改变，运营者应配置 `WEDDING_LEGACY_TIMESTAMP_TIMEZONE` 为原写入时区，并在备份后显式执行 `python -m app.migrations upgrade`；不要把已有北京时间值直接当 UTC。迁移只对历史无时区列执行转换，采用 PostgreSQL 绑定表达式验证时区，支持命名时区和合法固定偏移。已经带时区的列不重新解释，也不校验未使用的覆盖值。实际 PostgreSQL 的北京时间、UTC 切换、固定偏移和重复迁移已验证；来源混杂或未知的历史时间仍需人工厘清。
 
-Compose 至少使用2.24版，API和两个worker共享可选 `.env` 文件。额外故事价格、音乐目录和资源限制在文件中配置；显式 `environment` 字段优先于 `env_file`。容器默认用 Noto Sans CJK SC；Windows本地默认用Microsoft YaHei，可在需要时按运行环境覆盖。Docker路径配置示例：音乐主机目录 `WEDDING_MUSIC_DIRECTORY=./runtime/wedding-music`，容器目录 `WEDDING_MUSIC_CATALOG_FILE=/wedding-music/catalog.json`，曲目 `path=/wedding-music/your-licensed-track.wav`。共享只读目录不附带任何商业音乐授权。对应规则见[Compose环境变量文档](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/)。
+Compose 至少使用2.24版，API和两个worker共享可选 `.env` 文件。必须通过调用 Compose 的进程环境或 `.env` 显式提供唯一、至少32字节的随机 `JWT_SECRET`；缺失或空值在配置解析时失败，迁移、API和两个worker使用同一个值。样例不附带可用密钥，生产设置拒绝仓库旧公开默认值；曾使用该值的部署应更换密钥，旧会话随之失效。存储/数据库也必须提供 `POSTGRES_PASSWORD`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`，不使用公开默认密码；默认仅Compose内网，显式本地管理override只绑定loopback。密钥配置步骤见[部署指南](deployment-and-migrations.md)。额外故事价格、音乐目录和资源限制在文件中配置；显式 `environment` 字段优先于 `env_file`。容器默认用 Noto Sans CJK SC；Windows本地默认用Microsoft YaHei，可在需要时按运行环境覆盖。Docker路径配置示例：音乐主机目录 `WEDDING_MUSIC_DIRECTORY=./runtime/wedding-music`，容器目录 `WEDDING_MUSIC_CATALOG_FILE=/wedding-music/catalog.json`，曲目 `path=/wedding-music/your-licensed-track.wav`。共享只读目录不附带任何商业音乐授权。对应规则见[Compose环境变量文档](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/)。
 
 ## 显式生产迁移与恢复
 
 在同一份数据库配置下，先于 API 和两个 worker 执行 `cd backend; python -m app.migrations upgrade`。衣橱版本表 `schema_migrations` 保持版本13，婚礼版本表 `wedding_schema_versions` 保持版本2，两者在同一事务内升级。PostgreSQL 在同一连接持有 advisory lock，SQLite 使用写事务序列化；重复执行安全。`python -m app.migrations verify` 只检查版本及必需表/列。生产启动只验证，不创建或修改表；未升级时拒绝启动。Compose 的 `migrate` 服务成功退出后才启动 API/worker。开发环境可自动初始化；生产即使设置 `TESTING=true` 也只验证。
 
-取消、撤回或失效后的已知供应商任务继续由 worker 使用已保存任务 ID 做只读查询，直至得到终态，再结算一次；不会重新 POST、下载产物或恢复产品访问。未提交的排队任务释放预留并结束凭证。未知提交保留预留，不允许用新 key、浏览器或版本绕过。故事/静帧未知任务必须由运营者取得供应商终态证据后，用现有账务对账命令导入包含 `operation_key`、`terminal_state`（`succeeded`/`failed`/`not_submitted`）、`cost_fen`、`evidence_id` 的记录；`not_submitted` 只允许零费用。该能力没有浏览器接口，且不能替代外部查证。视频每个镜头输入修订最多三次尝试，已排队、未知和可能收费的尝试都计入，删候选不重置次数。
+取消、撤回或失效后的已知供应商任务继续由 worker 使用已保存任务 ID 做只读查询，直至得到终态，再结算一次；不会重新 POST、下载产物或恢复产品访问。未提交的排队任务释放预留并结束凭证。未知提交保留预留，不允许用新 key、浏览器或版本绕过。故事、静帧和视频未知任务必须由运营者取得供应商终态证据后，用现有账务对账命令导入包含 `operation_key`、`terminal_state`（`succeeded`/`failed`/`not_submitted`）、`cost_fen`、`evidence_id` 的记录；`not_submitted` 只允许零费用。该能力没有浏览器接口，且不能替代外部查证。视频每个镜头输入修订最多三次付费尝试：排队时原子预留次数；明确未派发的取消或预检失败、供应商权威确认的 `not_submitted` 会恰好退还一次。已提交失败、未知和可能收费的尝试继续占用次数，删候选或仅改展示信息不能重置。预算 envelope 持久记录预留镜头和已退还镜头 ID，未变输入的版本后代同步保留余额；旧整项目凭证没有不可变镜头ID集合时保守保留，不能用当前pending集合或相等数量推断；旧单镜头任务仅可按其确定的target_shot_id退还。视频权威终态按整个 job 结算，仍有未决 operation 时不释放预算；权威账单、终态与证据优先于随后返回的GET估算，结算优先使用billed金额。金额超出预留时保留真实账单和原预留，并在所有者层面阻止同项目、其他项目的新付费预留和尚未派发的故事/静帧/视频；删除项目也不能绕过这笔持久财务待处理状态。已知任务的GET对账仍可继续。该hold须在明确财务处理后解除，不能用新key、改版本或截断费用解除。取消任务完成只读对账后，在同一事务恢复可继续生成的工作流；被阻止、取消、授权撤回或另有活动工作时不覆盖项目状态。
 
 ## 草稿、角色与制作界面
 

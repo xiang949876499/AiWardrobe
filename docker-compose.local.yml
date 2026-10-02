@@ -1,0 +1,10 @@
+# Optional local administration only. Unique credentials remain mandatory.
+# docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+  minio:
+    ports:
+      - "127.0.0.1:9100:9000"
+      - "127.0.0.1:9101:9001"

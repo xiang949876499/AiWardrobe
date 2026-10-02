@@ -377,6 +377,11 @@ def process_next_creation_job(session_factory=None, providers=None, storage=None
             if receipt.settled:
                 continue
             try:
+                from app.wedding_accounting import require_no_unsettled_overrun
+                account = lock_account(db, project.owner_id)
+                require_no_unsettled_overrun(db, project.owner_id)
+                if account.spent_fen + account.reserved_fen > get_settings().wedding_account_budget_limit_fen:
+                    raise HTTPException(409, 'ACCOUNT_BUDGET_LIMIT_EXCEEDED')
                 fence(db, project, job)
                 if job.kind == 'frame':
                     check_storage_capacity(db, project.id, get_settings().wedding_max_image_bytes)

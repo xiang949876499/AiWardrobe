@@ -32,8 +32,27 @@ def lock_account(db, owner_id):
     return account
 
 
+def require_no_unsettled_overrun(db, owner_id):
+    """Owner-locked admission fence using durable, unaccounted video liabilities.
+
+    A terminal invoice can exceed its envelope before financial settlement.
+    Keep the original reservation and truthful bill, and hold ALL owner paid
+    admission until that exposure is accounted for; terminal is not settled.
+    """
+    rows = list(db.scalars(select(WeddingBillingReceipt).where(
+        WeddingBillingReceipt.owner_id == owner_id, WeddingBillingReceipt.settled.is_(False))))
+    envelopes = {r.job_id: r for r in rows if r.provider in ('budget_envelope', 'legacy_unknown')}
+    totals = {}
+    for row in rows:
+        if row.provider not in ('budget_envelope', 'legacy_unknown'):
+            totals[row.job_id] = totals.get(row.job_id, 0) + (row.billed_fen if row.billed_fen is not None else row.estimated_fen)
+    if any(totals.get(job_id, 0) > envelope.reserved_fen for job_id, envelope in envelopes.items()):
+        raise HTTPException(409, 'ACCOUNT_RECONCILIATION_REQUIRED')
+
+
 def reserve(db, project, amount):
     account = lock_account(db, project.owner_id)
+    require_no_unsettled_overrun(db, project.owner_id)
     if account.spent_fen + account.reserved_fen + amount > get_settings().wedding_account_budget_limit_fen:
         raise HTTPException(409, 'ACCOUNT_BUDGET_LIMIT_EXCEEDED')
     if project.budget_spent_fen + project.budget_reserved_fen + project.budget_delivery_reserve_fen + amount > project.budget_limit_fen:
@@ -132,7 +151,7 @@ def reconcile_rows(factory, rows):
 
 def resolve_creation_operation(factory, row):
     """Operator-only local evidence import, never a browser retry or provider POST."""
-    from app.models import WeddingCreationJob
+    from app.models import WeddingCreationJob, GenerationJob, utc_now
     state = row.get('terminal_state')
     if (state not in ('succeeded','failed','not_submitted') or type(row.get('cost_fen')) is not int
             or row['cost_fen'] < 0 or not isinstance(row.get('evidence_id'),str) or not row['evidence_id'].strip()
@@ -141,7 +160,11 @@ def resolve_creation_operation(factory, row):
         return {'status':'invalid'}
     with factory() as db:
         receipt = db.scalar(select(WeddingBillingReceipt).where(WeddingBillingReceipt.operation_key==row['operation_key']))
-        if not receipt or not db.get(WeddingCreationJob,receipt.job_id):
+        if not receipt or receipt.provider in ('budget_envelope', 'legacy_unknown'):
+            return {'status':'unmatched'}
+        creation_job = db.get(WeddingCreationJob, receipt.job_id)
+        video_job = db.get(GenerationJob, receipt.job_id)
+        if not creation_job and not video_job:
             return {'status':'unmatched'}
         from app.wedding_retention import lock_project
         project = lock_project(db,receipt.project_id)
@@ -149,17 +172,36 @@ def resolve_creation_operation(factory, row):
             return {'status':'unmatched'}
         lock_account(db,receipt.owner_id)
         db.refresh(receipt,with_for_update=True)
-        if receipt.settled:
+        if receipt.settled or receipt.billed_fen is not None:
             return {'status':'duplicate' if receipt.billed_fen==row['cost_fen'] and receipt.state==state else 'conflict'}
-        if receipt.state not in ('unknown','dispatching','running'):
+        if receipt.state not in ('unknown','dispatching','running','succeeded','failed','not_submitted'):
             return {'status':'not_unresolved'}
-        if db.get(WeddingCreationJob,receipt.job_id).status in ('queued','processing'):
+        job = creation_job or video_job
+        db.refresh(job, with_for_update=True)
+        if job.status in ('queued','processing'):
             return {'status':'operation_active'}
-        settle(db,project,receipt.reserved_fen,row['cost_fen'])
+        if creation_job:
+            settle(db,project,receipt.reserved_fen,row['cost_fen'])
         receipt.state = state
         receipt.billed_fen = receipt.estimated_fen = row['cost_fen']
-        receipt.settled = True
+        receipt.settled = bool(creation_job)
         receipt.price_metadata = {**receipt.price_metadata,'reconciliation_evidence':row['evidence_id']}
+        if video_job:
+            db.flush()
+            operations = list(db.scalars(select(WeddingBillingReceipt).where(
+                WeddingBillingReceipt.job_id == job.id, WeddingBillingReceipt.provider != 'budget_envelope')))
+            if not any(r.state in ('dispatching', 'unknown', 'running') for r in operations):
+                actual = sum(r.billed_fen if r.billed_fen is not None else r.estimated_fen for r in operations)
+                if actual <= job.reserved_amount_fen:
+                    from app.wedding_service import settle_generation_budget
+                    from app.wedding_worker import _restore_project_workflow_state
+                    settle_generation_budget(db, job, actual)
+                    job.status = 'cancelled' if job.cancel_requested_at else 'failed'
+                    job.finished_at = utc_now()
+                    job.error_code = None
+                    _restore_project_workflow_state(db, project)
+                else:
+                    job.error_code = 'ACTUAL_COST_EXCEEDS_RESERVATION'
         db.commit()
         return {'status':'applied'}
 

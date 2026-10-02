@@ -1699,6 +1699,12 @@ def _create_generation_job(
         if existing.request_fingerprint != fingerprint:
             raise HTTPException(status_code=409, detail="IDEMPOTENCY_KEY_REUSED")
         return _job_response(existing)
+    from app.models import WeddingBillingReceipt
+    if db.scalar(select(WeddingBillingReceipt.id).where(
+            WeddingBillingReceipt.project_id == project.id,
+            WeddingBillingReceipt.settled.is_(False),
+            WeddingBillingReceipt.state.in_(['dispatching', 'running', 'unknown', 'succeeded', 'failed', 'not_submitted', 'billed']))):
+        raise HTTPException(409, 'PROVIDER_RECONCILIATION_REQUIRED')
     story = _check_job_prerequisites(db, project, body.version)
     quote = db.get(WeddingQuote, body.quote_id)
     if (
@@ -1749,6 +1755,8 @@ def _create_generation_job(
             reservation_key=f"generation:{idempotency_key}",
             amount_fen=reservation,
         )
+        from app.wedding_attempts import reserve_attempts
+        reserve_attempts(db, job, pending)
         quote.consumed_at = utc_now()
         _set_project_status(project, WeddingProjectStatus.GENERATING)
         _record_audit(db, project, actor, "generation.queued", "generation_job", job.id, {"shots": job.total_shots})
@@ -1803,8 +1811,10 @@ def cancel_generation_job(
     actor: WeddingActor = Depends(get_wedding_actor),
     db: Session = Depends(get_db),
 ) -> GenerationJobCancelResponse:
-    project = require_project_owner(db, actor, project_id)
-    job = db.get(GenerationJob, job_id)
+    require_project_owner(db, actor, project_id)
+    from app.wedding_retention import lock_project
+    project = lock_project(db, project_id)
+    job = db.scalar(select(GenerationJob).where(GenerationJob.id == job_id).with_for_update())
     if job is None or job.project_id != project.id:
         raise HTTPException(status_code=404, detail="Generation job not found")
     if job.status == WeddingJobStatus.QUEUED:

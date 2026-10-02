@@ -51,7 +51,11 @@ def reconcile_cancelled(factory, providers):
             if not job or _as_utc(job.started_at) != token:
                 return None
             receipt = db.get(WeddingBillingReceipt, receipt_id)
-            if receipt and not receipt.settled:
+            if receipt:
+                from app.wedding_accounting import lock_account
+                lock_account(db, receipt.owner_id)
+                db.refresh(receipt, with_for_update=True)
+            if receipt and not receipt.settled and receipt.billed_fen is None:
                 receipt.state = state if state in ('succeeded','failed') else 'running'
                 receipt.estimated_fen = max(0,int(output.actual_cost_fen))
                 receipt.usage = output.usage
@@ -68,12 +72,14 @@ def reconcile_cancelled(factory, providers):
             job.error_code = 'PROVIDER_RECONCILIATION_PENDING'
         else:
             from app.wedding_service import settle_generation_budget
-            actual = sum(r.estimated_fen for r in rows)
+            actual = sum(r.billed_fen if r.billed_fen is not None else r.estimated_fen for r in rows)
             if actual <= job.reserved_amount_fen:
                 settle_generation_budget(db,job,actual)
                 job.status = 'cancelled'
                 job.finished_at = utc_now()
                 job.error_code = None
+                from app.wedding_worker import _restore_project_workflow_state
+                _restore_project_workflow_state(db, project)
             else:
                 job.error_code = 'ACTUAL_COST_EXCEEDS_RESERVATION'
         db.commit()

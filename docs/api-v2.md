@@ -49,6 +49,8 @@ Paginated lists default to 50 records and accept `limit` from 1 to 100. Response
 
 Save/link require a UUID `Idempotency-Key`, `expected_revision`, and `confirm_owned=true`; link also requires `garment_id`. Replay uses semantic input (candidate/garment IDs, confirmation, explicit tags), excluding `expected_revision`, and returns the stored response. Changed semantic input under the same key returns `409 idempotency_conflict`. An already-linked save returns the original garment. `legacy_unlinked` must be explicitly linked first (`409 ownership_link_required`); deleting a linked garment keeps its ID as a `removed` tombstone, and later save/link returns `409 owned_garment_removed`.
 
+After a successful save/link, refresh the candidate ownership and revision before the next revisioned edit, including when feedback is already loaded. Feedback-only mutations can update feedback locally without reloading candidates.
+
 Purchase scores, unavailable score dimensions, risk detail, and suggested prices may be null. Render evidence insufficiency explicitly. Outfit ideas contain a candidate reference plus real, confirmed, owner-bound wardrobe references; zero ideas is valid. Current reads hydrate authorized image URLs and omit ideas with invalid/deleted references. Stored snapshots contain stable IDs rather than expiring signatures; context or purchase-rule version changes mark old snapshots stale.
 
 ## Private asset URLs

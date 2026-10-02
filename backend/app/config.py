@@ -6,12 +6,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True)
 
     app_name: str = "AiWardrobe"
     environment: str = "development"
     testing: bool = False
     database_url: str = "postgresql+psycopg://aiwardrobe:aiwardrobe@localhost:5432/aiwardrobe"
+    postgres_password: str | None = Field(default=None, repr=False)
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 60 * 24 * 7
@@ -145,11 +146,25 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
+        if self.postgres_password is not None:
+            from sqlalchemy.engine import make_url
+            if self.environment == "production" and not self.testing and len(self.postgres_password.encode("utf-8")) < 32:
+                raise ValueError("POSTGRES_PASSWORD must be an operator-provided random secret of at least 32 bytes")
+            self.database_url = make_url(self.database_url).set(password=self.postgres_password).render_as_string(hide_password=False)
         if self.database_url.startswith("sqlite") and self.environment == "production" and not self.testing:
             raise ValueError("SQLite is only allowed for development or tests; set DATABASE_URL to Postgres in production")
         if self.environment == "production" and not self.testing:
-            if self.jwt_secret.strip().lower() in {"", "change-me"} or len(self.jwt_secret.encode("utf-8")) < 32:
-                raise ValueError("JWT_SECRET must be configured with at least 32 bytes in production")
+            public_defaults = {"", "change-me", "docker-development-secret-with-at-least-thirty-two-bytes",
+                               "replace-with-a-random-32-byte-minimum-secret"}
+            if self.jwt_secret.strip().lower() in public_defaults or len(self.jwt_secret.encode("utf-8")) < 32:
+                raise ValueError("JWT_SECRET must be a unique operator-provided random secret of at least 32 bytes in production")
+            from sqlalchemy.engine import make_url
+            if make_url(self.database_url).password in {"aiwardrobe", "change-me", "minioadmin"}:
+                raise ValueError("DATABASE_URL must not use a public default password in production")
+            if self.storage_driver.strip().lower() == "s3" and (
+                    not self.s3_access_key_id or not self.s3_secret_access_key
+                    or len(self.s3_secret_access_key.encode("utf-8")) < 32):
+                raise ValueError("S3 credentials require an operator-provided access key and random secret of at least 32 bytes")
 
         if self.storage_driver.strip().lower() == "s3" and self.s3_bucket == self.wedding_s3_bucket:
             raise ValueError("Wedding S3 assets require a bucket separate from wardrobe storage")

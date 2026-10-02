@@ -21,8 +21,9 @@ Run `cd backend; python -m app.migrations upgrade` before production API/worker;
 - Wardrobe legacy analysis uses bounded20s adapters over the same durable tasks/quotas; provider recovery stays read-only and private images use owner-authorized short-lived URLs.
 - Lock wedding project before child jobs/renders; perform provider, storage and FFmpeg I/O outside DB transactions.
 - Validate current consent, version, lease and exact asset/person reviews before publishing late results.
-- Resume known provider IDs by GET. Quarantine ambiguous submissions; never automatically repeat paid POST.
-- Preserve immutable render/music snapshots and account financial receipts across project deletion.
+- Resume known provider IDs by GET. Quarantine ambiguous submissions across fresh keys and revisions; never automatically repeat paid POST. Return an attempt only with certain non-submission under the project lock.
+- Production requires operator-provided JWT/database/S3 secrets; preserve fail-closed Compose validation, internal-only data services and URL-safe POSTGRES_PASSWORD handling. Local admin ports belong only in the explicit loopback override.
+- Preserve immutable render/music snapshots and account financial receipts across project deletion. Authoritative bills/terminal evidence win over late GET estimates; unsettled overruns hold paid admission across the owner account. Never infer legacy attempt IDs from mutable pending sets.
 - Scope browser draft/session/blob state to account, actor, project and content version; raw If-Match protects same-version writes.
 - Private access rechecks revocation/expiry; storage quotas include staged and physically retained bytes.
 - SQLite is for development/tests; concurrency acceptance and production use PostgreSQL.

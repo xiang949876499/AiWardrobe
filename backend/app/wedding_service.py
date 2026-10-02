@@ -373,6 +373,8 @@ def settle_generation_budget(db: Session, job: GenerationJob, actual_fen: int) -
     from app.wedding_accounting import settle
     project = db.get(WeddingProject, job.project_id)
     settle(db, project, entry.reserved_fen, actual_fen)
+    from app.wedding_attempts import return_unsubmitted_attempts
+    return_unsubmitted_attempts(db, job)
     from app.models import WeddingBillingReceipt
     for receipt in db.scalars(select(WeddingBillingReceipt).where(WeddingBillingReceipt.job_id == job.id)):
         receipt.settled = True
@@ -402,9 +404,12 @@ def release_generation_budget(db: Session, job: GenerationJob) -> BudgetLedger:
     from app.wedding_accounting import settle
     project = db.get(WeddingProject, job.project_id)
     settle(db, project, entry.reserved_fen, 0)
+    from app.wedding_attempts import return_unsubmitted_attempts
+    return_unsubmitted_attempts(db, job)
     for receipt in db.scalars(select(WeddingBillingReceipt).where(WeddingBillingReceipt.job_id == job.id)):
         receipt.settled = True
-        receipt.state = 'not_submitted'
+        if receipt.provider in ('budget_envelope', 'legacy_unknown'):
+            receipt.state = 'not_submitted'
         receipt.estimated_fen = 0
     set_budget_status(entry, BudgetLedgerStatus.RELEASED)
     entry.released_fen = entry.reserved_fen

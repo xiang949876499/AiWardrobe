@@ -294,6 +294,14 @@ def _complete_or_release_reservation(db: Session, job: GenerationJob, *, success
 def _restore_project_workflow_state(db: Session, project: WeddingProject) -> None:
     if project.status != WeddingProjectStatus.GENERATING:
         return
+    db.flush()
+    if db.scalar(select(GenerationJob.id).where(GenerationJob.project_id == project.id,
+            GenerationJob.status.in_(['queued', 'processing', 'cancel_requested'])).limit(1)):
+        return
+    try:
+        validate_active_consents(db, project)
+    except HTTPException:
+        return
     has_candidates = db.execute(
         select(ShotCandidate.id)
         .join(StoryboardShot, ShotCandidate.shot_id == StoryboardShot.id)
@@ -410,6 +418,14 @@ def _dispatch_preflight(
             return None, "BUDGET_LIMIT_EXCEEDED"
         from app.wedding_accounting import lock_account
         account = lock_account(db, project.owner_id)
+        from app.wedding_accounting import require_no_unsettled_overrun
+        from app.wedding_video_operations import receipt_for
+        previous = receipt_for(db, job.id, shot_id)
+        if previous is None or not previous.task_id:
+            try:
+                require_no_unsettled_overrun(db, project.owner_id)
+            except HTTPException as exc:
+                return None, str(exc.detail)
         if account.spent_fen + account.reserved_fen > get_settings().wedding_account_budget_limit_fen:
             return None, "ACCOUNT_BUDGET_LIMIT_EXCEEDED"
         ledger = db.execute(select(BudgetLedger).where(BudgetLedger.generation_job_id == job.id)).scalar_one_or_none()

@@ -6,6 +6,12 @@
 
 生产环境使用 PostgreSQL。配置 `ENVIRONMENT=production`、有效的 `DATABASE_URL`、至少 32 字节的随机 `JWT_SECRET`、私有对象存储凭证和实际启用的 AI/provider 凭证。`AI_DEMO_MODE` 只用于演示；生产识别失败会报告错误，不会伪造演示结果。
 
+从可信密码管理器生成唯一的随机密钥（至少32字节），保存在部署密钥系统或未跟踪的 `.env` 中，设置 `JWT_SECRET`；不要复制公开字符串。`.env.example` 将该字段留空。Compose 使用必填插值，缺失或空值会在配置解析阶段报错，并将同一个值传给迁移、API和两个worker。生产校验同时拒绝旧 Compose 默认值与旧示例占位符，验证异常不显示输入值。开发/测试的显式行为保持独立。曾使用公开默认值的部署必须配置新密钥并重启所有消费者，旧 JWT 会话随之失效；本说明不会自动生成或修改用户密钥。
+
+Compose 还要求显式 `POSTGRES_PASSWORD`、`S3_ACCESS_KEY_ID` 和 `S3_SECRET_ACCESS_KEY`。两个密码分别使用唯一、至少32字节的随机值；`.env.example` 留空且没有公开回退。`POSTGRES_PASSWORD` 是原始密码，Settings 通过 SQLAlchemy URL 构造器编码写入连接串，支持 `@:/?#%` 等字符；不要手工把原文拼接到 URL。Compose 固定内部数据库主机 `postgres`、账号/库名 `aiwardrobe`，同一原始密码传给 PostgreSQL 与迁移/API/两个worker。MinIO server、应用和 bucket 初始化使用同一对显式 S3 凭证。`validate-config` 在启动 PostgreSQL/MinIO 前验证这些设置；不会输出解析后的凭证。
+
+默认 PostgreSQL、S3 API 和 MinIO 控制台只在 Compose 内网提供服务。本地管理需要显式运行 `docker compose -f docker-compose.yml -f docker-compose.local.yml up --build`，附加文件仅将5432/9100/9101绑定到127.0.0.1，仍要求唯一凭证。不要把解析后的 `docker compose config` 输出写入公开日志。已有 PostgreSQL volume 的实际账号密码不会因修改初始化 `POSTGRES_PASSWORD` 自动轮换：需先备份并由操作者按现有部署完成数据库账号密码变更，再同步所有消费者。旧MinIO公开管理凭证也需由操作者轮换；本次仓库变更不操作现有服务、volume或凭证。
+
 先运行 schema migrations，再启动 API 和 worker：
 
 ```powershell
