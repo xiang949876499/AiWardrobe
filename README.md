@@ -23,6 +23,7 @@ AiWardrobe keeps a candidate separate from a confirmed garment. The wardrobe onl
 - 通过商品 URL 或图片创建可恢复购买候选，查看依据、修正识别、记录购买/跳过/退货，并将确认拥有的候选关联到衣橱。
 - 购买候选、搭配历史、反馈与穿着记录持久保存；衣橱报告根据实际穿着事件计算利用情况，数据不足时不推断长期闲置。
 - 使用 Open-Meteo 天气服务，以及 Demo 或已配置的 Taobao/Tmall 商品搜索；推荐商品图片分析进入同一后台任务流程。
+- 提供独立婚礼 MV 工作区：双方授权、照片与故事、AI 分镜和短镜头任务、共同审核、音乐与字幕、历史成片和私有导出；默认禁用外部模型。
 
 ## 工作流 / How it works
 
@@ -42,7 +43,7 @@ Windows 下可使用一键启动：
 .\start.bat
 ~~~
 
-默认本地模式会启动独立 FastAPI API、后台 worker 和 Vite 前端，共用数据库、私有存储及 provider 配置；未配置时使用 SQLite 与本地存储。进程隐藏运行，日志保存在 `.local-services/`。停止服务使用 `start.bat stop-local`，会校验进程身份后停止本次记录的服务。
+默认本地模式会启动独立 FastAPI API、衣橱 worker、婚礼 worker 和 Vite 前端，共用数据库、私有存储及 provider 配置；未配置时使用 SQLite 与本地存储。进程隐藏运行，日志保存在 `.local-services/`。停止服务使用 `start.bat stop-local`，会校验进程身份后停止本次记录的服务。
 
 优化分支八项审核问题的修复与本地复验见[修复报告](docs/reviews/2026-10-01-optimization-fix-verification.md)；PostgreSQL 和真实供应商验证仍需在对应环境执行。[部署说明](docs/deployment-and-migrations.md)包含独立 worker、迁移与恢复操作。
 
@@ -54,6 +55,7 @@ Windows 下可使用一键启动：
 ~~~powershell
 .\start.bat backend
 .\start.bat worker
+.\start.bat wedding-worker
 .\start.bat frontend
 ~~~
 
@@ -72,7 +74,7 @@ uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
 
 ~~~powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ~~~
 
@@ -87,6 +89,8 @@ npm run dev
 - POST /v2/tasks/garment-upload 与 POST /v2/tasks/purchase-analysis：提交可恢复的衣物或购买分析任务；GET /v2/tasks 查询进度。
 - GET /v2/purchase/candidates：按游标查看购买记录；候选的修正、决定、关联衣橱和重新分析接口位于 `/v2/purchase/candidates/{id}`。
 - POST /v2/feedback 与 POST /v2/wear-events：保存搭配/候选反馈和实际穿着记录。
+
+前端使用 Node 24.14.x（`>=24.14.0 <25`）。婚礼 MV 的固定模型、worker、音乐授权配置与接口见[运行说明](./docs/wedding-mv.md)，工程证据和待完成的真人付费验收见[完成核查](./docs/wedding-mv-completion-audit-2026-10-01.md)。一键启动包含婚礼 worker，共享环境配置，婚礼模式默认禁用；正式制作使用 PostgreSQL 和私有存储。
 
 ## 模型、商品与天气配置 / Providers
 
@@ -127,6 +131,8 @@ OPEN_METEO_BASE_URL=https://api.open-meteo.com
 ~~~powershell
 docker compose up --build
 ~~~
+
+使用 Docker Compose 2.24 或以上；API 与两个 worker 共享 `.env`，实际授权音乐目录只读挂载。容器内的音乐目录、FFmpeg 与字体配置见婚礼运行说明。
 
 默认服务：
 
@@ -181,3 +187,5 @@ npm run build
 本仓库维护者的原创贡献采用[学习与非商业使用许可](./LICENSE)：个人学习与非商业研究可免费使用；任何商业使用均须先获得著作权人的书面授权。第三方依赖、字体、素材、数据与服务仍适用各自的许可证或条款，详见[第三方声明](./THIRD_PARTY_NOTICES.md)。
 
 商业授权请通过本仓库的 GitHub Issues，或 [维护者主页](https://github.com/xiang949876499) 联系。
+
+生产部署先运行 `cd backend; python -m app.migrations upgrade`，再启动 API 和两个 worker；生产启动只验证衣橱13及婚礼2两套 schema。Compose 已包含迁移先行服务。婚礼邀请披露、一次性重新进入、已批准故事修订及费用恢复规则见 [婚礼 MV 指南](docs/wedding-mv.md)。

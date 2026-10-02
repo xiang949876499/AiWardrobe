@@ -98,3 +98,7 @@ def legacy_worker(monkeypatch):
         return result
 
     monkeypatch.setattr(shopping_recommendations, "analyze_recommendation_item", recommendation_analysis)
+
+def invitation_hash(client, token):
+    response = client.post('/consent-invites/preview', json={'token':token})
+    return response.json().get('disclosure_hash', '0'*64)

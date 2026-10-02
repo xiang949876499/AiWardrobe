@@ -14,6 +14,7 @@ if /i "%MODE%"=="local" goto local
 if /i "%MODE%"=="dev" goto local
 if /i "%MODE%"=="backend" goto backend
 if /i "%MODE%"=="worker" goto backend
+if /i "%MODE%"=="wedding-worker" goto backend
 if /i "%MODE%"=="frontend" goto frontend
 if /i "%MODE%"=="docker" goto docker
 if /i "%MODE%"=="stop" goto stop
@@ -31,7 +32,7 @@ goto usage
 title AiWardrobe Local Launcher
 echo.
 echo AiWardrobe one-click start
-echo Mode: local API/worker/frontend
+echo Mode: local API/wardrobe-worker/wedding-worker/frontend
 echo.
 
 where python >nul 2>&1
@@ -139,7 +140,7 @@ echo.
 echo Frontend: %FRONTEND_URL%
 echo Backend:  %BACKEND_URL%/docs
 echo.
-echo API, worker and frontend are independent hidden processes.
+echo API, wardrobe worker, wedding worker and frontend are independent hidden processes.
 echo Logs and process IDs are in .local-services.
 echo.
 pause
@@ -208,7 +209,9 @@ if errorlevel 1 (
 popd
 
 pushd "%BACKEND_DIR%"
-if /i "%MODE%"=="worker" (
+if /i "%MODE%"=="wedding-worker" (
+    ".venv\Scripts\python.exe" -m app.local_launcher wedding-worker
+) else if /i "%MODE%"=="worker" (
     ".venv\Scripts\python.exe" -m app.local_launcher worker
 ) else (
     ".venv\Scripts\python.exe" -m app.local_launcher backend
@@ -340,11 +343,12 @@ exit /b %STOP_CODE%
 echo AiWardrobe startup script
 echo.
 echo Usage:
-echo   start.bat             Start the local API, worker and frontend
-echo   start.bat local       Start the local API, worker and frontend
+echo   start.bat             Start the local API, wardrobe worker, wedding worker and frontend
+echo   start.bat local       Start the local API, wardrobe worker, wedding worker and frontend
 echo   start.bat dev         Alias for local
 echo   start.bat backend     Start only the local FastAPI backend
 echo   start.bat worker      Start only the independent task worker
+echo   start.bat wedding-worker  Start only the independent wedding worker
 echo   start.bat frontend    Start only the local Vite frontend
 echo   start.bat docker      Start the full stack with Docker Compose
 echo   start.bat stop        Stop Docker Compose services

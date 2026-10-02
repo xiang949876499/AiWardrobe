@@ -9,7 +9,7 @@ def test_default_launcher_uses_managed_api_worker_and_hidden_processes():
     from app.local_launcher import service_commands, process_options
 
     commands = service_commands(root, "local")
-    assert set(commands) == {"api", "worker", "frontend"}
+    assert set(commands) == {"api", "worker", "wedding-worker", "frontend"}
     assert commands["worker"][0][-2:] == ["-m", "app.task_worker"]
     assert commands["api"][1] == commands["worker"][1] == root / "backend"
     assert process_options("win32")["creationflags"] != 0

@@ -9,7 +9,7 @@ from app.ai import AiAnalysisError
 from app.config import get_settings
 from app.database import get_session_factory, init_db
 from app.models import Garment, PurchaseCandidate, UploadSession
-from app.routers import assets, auth, decision, garments, outfits, pagination, preferences, purchase, reports, shopping, tasks, uploads, weather
+from app.routers import assets, auth, decision, garments, outfits, pagination, preferences, purchase, reports, shopping, tasks, uploads, weather, wedding
 from app.task_service import TaskServiceError
 
 
@@ -82,10 +82,20 @@ def create_app() -> FastAPI:
             content={"detail": {"code": exc.code, "retryable": exc.retryable}},
         )
 
+    app.include_router(wedding.router)
+    from app.wedding_authoring import router as authoring_router
+    app.include_router(authoring_router)
+    from app.wedding_creation import router as creation_router
+    app.include_router(creation_router)
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    from app.wedding_invitations import router as invitation_router
+    app.include_router(invitation_router)
+    from app.wedding_revisions import router as revision_router
+    app.include_router(revision_router)
     return app
 
 

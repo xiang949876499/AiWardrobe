@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AiWardrobe is an AI buy-before-you-buy wardrobe assistant (MVP). Users can analyze a product URL or image before purchase, see a structured buy/consider/skip recommendation, then use their wardrobe, preferences, reports, and outfit generation to improve future advice.
+AiWardrobe is an AI wardrobe assistant with buy-before-you-buy analysis, wardrobe and outfit tools, and an independent wedding MV studio. Users can analyze a product URL or image before purchase and use their wardrobe, preferences, reports, and outfit generation; wedding projects have separate participant consent and private media access.
 
 ## Tech Stack
 
@@ -13,7 +13,11 @@ AiWardrobe is an AI buy-before-you-buy wardrobe assistant (MVP). Users can analy
 - **Storage**: S3-compatible (MinIO in Docker, boto3 client), local filesystem fallback
 - **Database**: PostgreSQL in production; SQLite for development/tests only
 - **AI**: Configurable vision and outfit providers; explicit demo mode for local/demo use, provider failures remain errors
-- **Infrastructure**: Docker Compose (postgres, minio, minio-init, backend, worker, frontend)
+- **Infrastructure**: Docker Compose (postgres, minio, minio-init, migrate, backend, worker, wedding-worker, frontend)
+
+## Wedding production boundaries
+
+Run `cd backend; python -m app.migrations upgrade` before production API/worker; startup verifies both wardrobe13 and wedding2 only, including TESTING mode. Upgrade steps must share the locked connection/transaction. Compose uses a successful migration service barrier. Invitation acceptance requires preview-bound disclosure hash; re-entry rotates session without new consent. Use explicit storyboard revisions for approved facts/scenes, preserving unchanged lineage/attempts. Shared frame/composition guards apply to LIVE even during tests; unknown provider outcomes retain reservations. See `docs/wedding-mv.md` for API contracts.
 
 ## Commands
 
@@ -24,6 +28,7 @@ cd backend
 uv venv .venv --python python
 uv pip install --link-mode=copy --python .venv\Scripts\python.exe -e ".[dev]"
 .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8031
+python -m app.wedding_worker --poll-seconds 2
 python -m pytest
 ```
 
@@ -31,7 +36,7 @@ python -m pytest
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 npm run build
 npm test
@@ -43,7 +48,9 @@ npm test
 docker compose up --build
 ```
 
-Docker services: frontend `:5173`, backend `:8000`, MinIO console `:9101`, Postgres `:5432`. `start.bat` starts independent API/worker/frontend with shared configuration, frontend `:5174` and backend `:8031`; logs/process identities are in `.local-services/`. Use `start.bat stop-local` to stop recorded services safely.
+Docker services: frontend `:5173`, backend `:8000`, MinIO console `:9101`, Postgres `:5432`. `start.bat` starts independent API/wardrobe-worker/wedding-worker/frontend with shared configuration, frontend `:5174` and backend `:8031`; logs/process identities are in `.local-services/`. Use `start.bat stop-local` to stop recorded services safely.
+
+Node `>=24.14.0 <25`; Compose >=2.24. API and both workers share `.env` and the read-only licensed music directory.
 
 ## Configuration
 
@@ -54,6 +61,7 @@ Copy `.env.example` to `.env`. Key env vars:
 - `OUTFIT_AI_PROVIDER`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` - outfit generation provider settings
 - `SHOPPING_RECOMMENDATION_DEMO_MODE`, `TAOBAO_*` - wardrobe gap product search settings
 - `STORAGE_DRIVER` - `local` (default) or `s3` (requires `S3_ENDPOINT_URL`, `S3_BUCKET`, AWS credentials)
+- `WEDDING_*` - wedding MV provider, budget, worker, FFmpeg, and music settings; media mode defaults to `disabled`, and wedding S3 storage uses a private bucket distinct from wardrobe storage
 - `JWT_SECRET`, `SMTP_*` for email codes
 
 ## Architecture
@@ -76,15 +84,23 @@ Copy `.env.example` to `.env`. Key env vars:
 - **`wardrobe_report.py`** - wardrobe totals, distributions, scene coverage, duplicate risks, and gaps; `reports.py` adds 30-day wear coverage and only reports low-use garments when observation is sufficient
 - **`shopping_recommendations.py`** - wardrobe-gap keywords, avoid categories, recommendation groups, candidate search, caching, and rate limits; recommendation item analysis runs through the durable task worker
 - **`routers/`** - legacy auth/garment/upload/outfit/purchase/shopping/report/preference/weather routes plus v2 assets, decisions, tasks, and pagination
+- **`wedding_service.py`, `wedding_providers.py`, `wedding_creation.py`, `wedding_worker.py`** - separate participant authorization/private storage, fixed provider adapters and durable story/frame/video jobs
+- **`wedding_authoring.py`, `wedding_accounting.py`, `wedding_render_worker.py`, `wedding_retention.py`** - scoped original-photo/identity gates, music and immutable history, account receipts, leased FFmpeg rendering and reference-aware cleanup
+- **`routers/wedding.py`** - wedding MV projects, consent, private assets, storyboard, generation, review, and export APIs
 
 Key patterns:
 
-- All user endpoints use `Depends(get_db)` for DB sessions and `Depends(get_current_user)` (JWT bearer) for auth
+- Wardrobe resource endpoints use `Depends(get_db)` for DB sessions and `Depends(get_current_user)` (JWT bearer) for auth
 - New AI garment results remain pending confirmation; legacy routes stay available for compatibility
 - Purchase candidates stay separate from trusted garments until explicitly confirmed/saved; use Idempotency-Key for task creation and do not blindly retry unknown provider submissions
 - Legacy analysis creation uses `legacy_tasks.py` with the same worker/quotas and at most 20 seconds of synchronous waiting. Persist accepted workflow IDs before querying; recovery and cancelled cleanup remain read-only.
 - Trusted garments require ready + confirmed + user_confirmed_at. Use `candidate_ownership.py`, unique `source_candidate_id`, and User-first locks for ownership/reanalysis. Schema 13 adds durable save/link receipts.
 - Private images must use the owner-authorized asset routes; do not restore public static exposure
+
+- Wedding endpoints use their own owner/participant actor scope. Both participants must have active portrait consent before media access or processing; revoked consent cancels renders and blocks export.
+- Wedding writes lock project before child task/render; close transactions before provider/storage/FFmpeg I/O. Known provider IDs resume GET; unknown submissions retain reservations and require reconciliation rather than another paid POST.
+- Preserve exact asset/person reviews and immutable render snapshots. Account financial receipts survive project deletion. Same-version draft edits use raw `If-Match` fingerprints; enqueue drains valid local saves first.
+- PostgreSQL naive-time migration requires original writer timezone provenance; already-aware timestamps remain absolute. Photo quality uses per-thread CPU/OpenCL-off detection; see `docs/wedding-mv.md` for rationale and commands.
 - Outfits store an `items` JSON column with `[{garment_id, image_url, category}]` and a `weather_snapshot` JSON
 
 ### Frontend (`frontend/src/`)
@@ -102,6 +118,8 @@ Single-page React app. `App.tsx` owns the shell and several views; purchase hist
 - **OutfitView** - AI generation by context, optional target garment, result feedback, and manual outfit creation via `ManualPicker`
 - **HistoryView** - cursor-paged outfit history, favorites, and wear-event undo
 - **PurchaseHistoryView**, **ResumablePurchasePanel** - candidate history/feedback and recoverable task status
+
+- **WeddingStudio.tsx** - independent wedding project flow; participant invite tokens stay in `sessionStorage` and do not replace the wardrobe login token
 - **PreferencePrompt** - five-field lightweight personalization prompt after enough wardrobe context or a completed purchase analysis
 
 Supporting files:
@@ -113,6 +131,8 @@ Supporting files:
 Vite proxies `/v2` and the legacy auth/garment/upload/outfit/purchase/shopping/report/preference/weather/static routes to `http://127.0.0.1:8031`; override with `VITE_BACKEND_TARGET`.
 
 Production migrations run with `python -m app.migrations upgrade` before API/worker startup. Run a standalone worker with `python -m app.task_worker`. See `docs/api-v2.md`, `docs/architecture.md`, and `docs/deployment-and-migrations.md`.
+
+Wedding routes are also proxied. Draft/blob recovery stays scoped to account, actor, project and content version; see `docs/wedding-mv.md`.
 
 ### Test Strategy
 

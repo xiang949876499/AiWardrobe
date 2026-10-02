@@ -1,6 +1,6 @@
 # 部署与数据迁移
 
-这份说明覆盖优化分支加入的版本化 schema、私有图片迁移和后台任务 worker。生产 API 不会自动修改数据库；数据库、对象存储、API 和 worker 的配置必须保持一致。
+这份说明覆盖衣橱与婚礼工作区的版本化 schema、私有图片迁移和两个后台 worker。生产 API 不会自动修改数据库；数据库、对象存储、API 和 worker 的配置必须保持一致。
 
 ## 首次部署
 
@@ -12,18 +12,21 @@
 cd backend
 python -m app.migrations upgrade
 python -m app.migrations current
+python -m app.migrations verify
 ```
 
 生产应用启动时要求数据库版本与当前代码一致。独立 worker 使用同一份数据库、存储和 provider 配置：
 
-当前 schema version 为 **13**；从 version 12 升级时会创建候选保存/关联的 `CandidateOwnershipOperation` 幂等回执表。
+衣橱版本表 `schema_migrations` 当前为 **13**，婚礼版本表 `wedding_schema_versions` 当前为 **2**。一个 `upgrade` 命令在同一连接、同一事务及迁移锁中升级两套历史；PostgreSQL 使用 advisory lock，SQLite 使用 `BEGIN IMMEDIATE`。重复和并发升级均按锁顺序执行，失败回滚两套变更。`current` 保留衣橱版本查询接口，`verify` 验证两套版本及全部必需表/列。生产启动包括 `TESTING=true` 情况只验证，不执行 DDL。衣橱 version 13 创建候选保存/关联的 `CandidateOwnershipOperation` 幂等回执表；婚礼旧无时区列的来源配置见[婚礼指南](wedding-mv.md)。
 
 ```powershell
 cd backend
 python -m app.task_worker
+# 在独立进程中启动婚礼任务消费者
+python -m app.wedding_worker --poll-seconds 2
 ```
 
-Docker Compose 已定义 `backend` 和 `worker` 两个服务。生产编排中应分别部署和监控 API 与 worker；worker 停止时任务会留在数据库中，重新启动后按租约恢复。
+Docker Compose >=2.24 定义 `migrate`、`backend`、`worker` 和 `wedding-worker`。API 与两个 worker 都等待迁移成功，共用 `.env`、数据库和私有存储配置；两类素材分别存放在非公开 bucket。婚礼音乐目录只读挂载。分别监控两个 worker；停止期间任务留在数据库，重启后按租约恢复。
 
 ## 从旧版升级
 
@@ -60,7 +63,7 @@ Docker Compose 已定义 `backend` 和 `worker` 两个服务。生产编排中�
 
 ## Windows 本地运行
 
-`start.bat` 默认启动独立 API、worker 和 Vite，使用同一份数据库、私有存储及 provider 配置。进程隐藏运行，日志和带进程创建时间的身份记录保存在根目录 `.local-services/`。可分别使用 `start.bat backend`、`start.bat worker`、`start.bat frontend`；单独启动 API 时也必须启动 worker 才能消费任务。
+`start.bat` 默认启动独立 API、衣橱 worker、婚礼 worker 和 Vite，使用同一份数据库、私有存储及 provider 配置。进程隐藏运行，日志和带进程创建时间的身份记录保存在根目录 `.local-services/`。可分别使用 `start.bat backend`、`start.bat worker`、`start.bat wedding-worker`、`start.bat frontend`；单独启动 API 时也必须启动相应 worker 才能消费任务。
 
 运行 `start.bat stop-local` 停止已记录的本地服务。停止前会验证 PID 和进程创建时间；身份变化或旧版记录缺少身份时拒绝停止，避免 PID 被复用后结束其他进程。重复启动已记录服务会报错，先检查日志并停止旧服务。`start.bat stop` 仍用于 Docker Compose。
 

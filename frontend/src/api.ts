@@ -14,7 +14,18 @@ import type {
   UserPreference,
   WearEvent,
   WardrobeReport,
-  Weather
+  Weather,
+  WeddingAsset,
+  WeddingCapabilities,
+  WeddingCandidate,
+  WeddingJob,
+  WeddingProject,
+  WeddingProjectDetail,
+  WeddingRender,
+  WeddingStoryboard,
+  WeddingStoryDraft,
+  WeddingStyle,
+  WeddingCreationJob, WeddingPhotoReadiness, WeddingMusicTrack,
 } from "./types";
 
 const TOKEN_KEY = "aiwardrobe_token";
@@ -514,4 +525,235 @@ export function setOutfitFixed(token: string, id: string, isFixed: boolean) {
     method: "PATCH",
     body: JSON.stringify({ is_fixed: isFixed })
   }, token);
+}
+
+export function getWeddingCapabilities(token: string) {
+  return request<WeddingCapabilities>("/wedding-capabilities", {}, token);
+}
+
+export function listWeddingProjects(token: string) {
+  return request<WeddingProject[]>("/wedding-projects", {}, token);
+}
+
+export function createWeddingProject(token: string, body: { title: string; owner_name: string; style: WeddingStyle }) {
+  return request<WeddingProject>("/wedding-projects", { method: "POST", body: JSON.stringify(body) }, token);
+}
+
+export function fetchWeddingProject(token: string, projectId: string) {
+  return request<WeddingProjectDetail>(`/wedding-projects/${encodeURIComponent(projectId)}`, {}, token);
+}
+
+export function confirmWeddingOwnerConsent(token: string, projectId: string, providerList: string[] = ["local_demo"]) {
+  return request(`/wedding-projects/${encodeURIComponent(projectId)}/self-consent`, {
+    method: "POST",
+    body: JSON.stringify({
+      terms_version: "portrait-v1",
+      scope: ["portrait_processing", "preview_review", "storage"],
+      provider_list: providerList
+    })
+  }, token);
+}
+
+export function revokeWeddingConsent(token: string, projectId: string) {
+  return request<{ revoked: boolean; person_key: "A" | "B"; revoked_at: string }>(
+    `/wedding-projects/${encodeURIComponent(projectId)}/consent/revoke`,
+    { method: "POST" },
+    token
+  );
+}
+
+export function deleteWeddingProject(token: string, projectId: string) {
+  return request<void>(`/wedding-projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }, token);
+}
+
+export function createWeddingInvite(token: string, projectId: string, displayName: string, providerList: string[]) {
+  return request<{ id: string; invite_token: string; person_key: "B"; expires_at: string }>(
+    `/wedding-projects/${encodeURIComponent(projectId)}/consent-invites`,
+    { method: "POST", body: JSON.stringify({ person_key: "B", display_name: displayName, provider_list: providerList, terms_version: "portrait-v1" }) },
+    token
+  );
+}
+
+export type WeddingInviteDisclosure = { project_id: string; person_key: "B"; display_name: string; kind: "consent" | "access"; terms_version: string; provider_list: string[]; scope: string[]; purposes: string[]; deletion: string; expires_at: string; disclosure_hash: string };
+export function previewWeddingInvite(token: string) {
+  return request<WeddingInviteDisclosure>("/consent-invites/preview", {method:"POST",body:JSON.stringify({token})});
+}
+export function createWeddingAccessInvite(token: string, projectId: string) {
+  return request<{invite_token:string}>(`/wedding-projects/${encodeURIComponent(projectId)}/access-invites`,{method:"POST"},token);
+}
+export function reviseWeddingStoryboard(token: string, projectId: string, draft: WeddingStoryDraft, fingerprint: string) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard/revisions`,
+    {method:"POST",headers:{"If-Match":fingerprint},body:JSON.stringify(draft)},token);
+}
+export function acceptWeddingInvite(inviteToken: string, displayName: string, disclosure: WeddingInviteDisclosure) {
+  return request<{
+    access_token: string | null;
+    accepted: boolean;
+    project_id: string;
+    participant: { person_key: "B"; display_name: string; consent_status: string; confirmed_at: string | null };
+  }>("/consent-invites/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token: inviteToken, accepted: true, display_name: displayName, terms_version: disclosure.terms_version, disclosure_hash: disclosure.disclosure_hash })
+  });
+}
+
+export function uploadWeddingPhoto(token: string, projectId: string, file: File, personKey: "A" | "B") {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("person_key", personKey);
+  form.append("asset_type", "photo");
+  return request<WeddingAsset>(`/wedding-projects/${encodeURIComponent(projectId)}/assets`, { method: "POST", body: form }, token);
+}
+
+export function listWeddingAssets(token: string, projectId: string) {
+  return request<WeddingAsset[]>(`/wedding-projects/${encodeURIComponent(projectId)}/assets`, {}, token);
+}
+
+async function requestWeddingBlob(path: string, token: string): Promise<Blob> {
+  const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(errorDetail(body.detail));
+  }
+  return response.blob();
+}
+
+export function fetchWeddingAssetBlob(token: string, assetId: string) {
+  return requestWeddingBlob(`/wedding-assets/${encodeURIComponent(assetId)}`, token);
+}
+
+export function fetchWeddingStoryboard(token: string, projectId: string) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard`, {}, token);
+}
+
+export function saveWeddingStoryboard(token: string, projectId: string, body: WeddingStoryDraft, update: boolean, fingerprint?: string) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard`, {
+    method: update ? "PUT" : "POST",
+    headers: fingerprint ? {"If-Match": fingerprint} : {},
+    body: JSON.stringify(body)
+  }, token);
+}
+
+export function approveWeddingStoryboard(token: string, projectId: string, version: number, fingerprint?: string) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/storyboard/approve`, {
+    method: "POST", headers: fingerprint ? {"If-Match": fingerprint} : {}, body: JSON.stringify({ version })
+  }, token);
+}
+
+export function approveWeddingFrames(token: string, projectId: string, version: number, frames: Array<{ shot_id: string; asset_id: string }>) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/frames/approve`, {
+    method: "POST", body: JSON.stringify({ version, frames })
+  }, token);
+}
+
+export function submitWeddingShotReview(token: string, shotId: string, assetId: string, version: number, result: "approved" | "rejected") {
+  return request(`/participant-reviews/${encodeURIComponent(shotId)}`, {
+    method: "POST", body: JSON.stringify({ asset_id: assetId, project_version: version, result })
+  }, token);
+}
+
+export function fetchWeddingJobs(token: string, projectId: string) {
+  return request<WeddingJob[]>(`/wedding-projects/${encodeURIComponent(projectId)}/generation-jobs`, {}, token);
+}
+
+export function fetchWeddingCandidates(token: string, projectId: string) {
+  return request<WeddingCandidate[]>(`/wedding-projects/${encodeURIComponent(projectId)}/candidates`, {}, token);
+}
+
+export function fetchWeddingRenders(token: string, projectId: string) {
+  return request<WeddingRender[]>(`/wedding-projects/${encodeURIComponent(projectId)}/renders`, {}, token);
+}
+
+export function selectWeddingCandidate(token: string, projectId: string, shotId: string, candidateId: string, version: number) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/select-candidate`, {
+    method: "POST", body: JSON.stringify({ project_version: version, candidate_id: candidateId })
+  }, token);
+}
+
+export function acceptWeddingPhotoFallback(token: string, projectId: string, shotId: string, assetId: string, version: number) {
+  return request<WeddingStoryboard>(`/wedding-projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/accept-fallback`, {
+    method: "POST", body: JSON.stringify({ project_version: version, asset_id: assetId })
+  }, token);
+}
+
+export function createWeddingQuote(token: string, projectId: string, shotId?: string) {
+  return request<{ id: string; project_version: number; max_budget_fen: number; currency: "CNY"; price_version: string; issued_at: string; expires_at: string }>(
+    `/wedding-projects/${encodeURIComponent(projectId)}/quote${shotId ? `?${new URLSearchParams({shot_id: shotId})}` : ""}`, {}, token
+  );
+}
+
+export function createWeddingGenerationJob(token: string, projectId: string, quoteId: string, version: number) {
+  return request<WeddingJob>(`/wedding-projects/${encodeURIComponent(projectId)}/generation-jobs`, {
+    method: "POST",
+    headers: { "Idempotency-Key": `wedding-${projectId}-${version}-${crypto.randomUUID()}` },
+    body: JSON.stringify({ quote_id: quoteId, version })
+  }, token);
+}
+
+export function regenerateWeddingShot(token: string, projectId: string, shotId: string, quoteId: string, version: number) {
+  const requestId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return request<WeddingJob>(`/wedding-projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/regenerate`, {
+    method: "POST",
+    headers: { "Idempotency-Key": `wedding-shot-${projectId}-${shotId}-${version}-${requestId}` },
+    body: JSON.stringify({ quote_id: quoteId, version })
+  }, token);
+}
+
+export function createWeddingRender(token: string, projectId: string, version: number, edits: {subtitles?: Record<string,string>; music_track_id?: string; source_render_id?: string} = {}) {
+  return request<WeddingRender>(`/wedding-projects/${encodeURIComponent(projectId)}/render`, {
+    method: "POST", body: JSON.stringify({ version, ...edits })
+  }, token);
+}
+
+export function submitWeddingRenderReview(token: string, projectId: string, renderId: string, assetId: string, version: number) {
+  const params = new URLSearchParams({ render_version_id: renderId });
+  return request(`/wedding-projects/${encodeURIComponent(projectId)}/render-reviews?${params}`, {
+    method: "POST", body: JSON.stringify({ asset_id: assetId, project_version: version, result: "approved" })
+  }, token);
+}
+
+export function approveWeddingRender(token: string, projectId: string, renderId: string) {
+  const params = new URLSearchParams({ render_version_id: renderId });
+  return request<WeddingRender>(`/wedding-projects/${encodeURIComponent(projectId)}/approve?${params}`, { method: "POST" }, token);
+}
+
+export function exportWeddingRender(token: string, projectId: string, renderId: string) {
+  return request<{ render_version_id: string; asset_id: string; mime: string; size_bytes: number }>(
+    `/wedding-projects/${encodeURIComponent(projectId)}/export?${new URLSearchParams({render_version_id: renderId})}`, { method: "POST" }, token
+  );
+}
+
+const weddingPath = (id: string) => `/wedding-projects/${encodeURIComponent(id)}`;
+export function fetchWeddingCreationJobs(token: string, id: string) {
+  return request<WeddingCreationJob[]>(`${weddingPath(id)}/creation-jobs`, {}, token);
+}
+export function createWeddingStoryJob(token: string, id: string, version: number, story_text: string) {
+  return request<WeddingCreationJob>(`${weddingPath(id)}/story-jobs`, {method:"POST", headers:{"Idempotency-Key": crypto.randomUUID()}, body:JSON.stringify({version,story_text})}, token);
+}
+export function createWeddingFrameJob(token: string, id: string, version: number, photos: Array<{shot_id:string;asset_id:string}>) {
+  return request<WeddingCreationJob>(`${weddingPath(id)}/frame-jobs`, {method:"POST", headers:{"Idempotency-Key":crypto.randomUUID()}, body:JSON.stringify({version,photos})}, token);
+}
+export function cancelWeddingCreationJob(token:string,id:string,jobId:string) {
+  return request<WeddingCreationJob>(`${weddingPath(id)}/creation-jobs/${encodeURIComponent(jobId)}/cancel`, {method:"POST"}, token);
+}
+export function fetchWeddingPhotoReadiness(token: string,id: string) {
+  return request<WeddingPhotoReadiness>(`${weddingPath(id)}/photo-readiness`, {}, token);
+}
+export function analyzeWeddingPhoto(token:string,id:string,assetId:string) {
+  return request(`${weddingPath(id)}/photos/${encodeURIComponent(assetId)}/analyze-quality`, {method:"POST"}, token);
+}
+export function confirmWeddingPhotoQuality(token:string,id:string,assetId:string,confirmed:boolean) {
+  return request(`${weddingPath(id)}/photos/${encodeURIComponent(assetId)}/confirm-quality`, {method:"POST",body:JSON.stringify({confirmed})}, token);
+}
+export function selectWeddingPrimaryPhoto(token:string,id:string,person:"A"|"B",version:number,asset_id:string) {
+  return request<{cost_notice:string; affected_shot_ids:string[]; regeneration_required:boolean}>(`${weddingPath(id)}/participants/${person}/primary-photo`, {method:"PUT",body:JSON.stringify({version,asset_id})}, token);
+}
+export function fetchWeddingMusic(token:string) {
+  return request<{available:boolean; tracks:WeddingMusicTrack[]}>("/wedding-music",{},token);
+}
+export function selectWeddingMusic(token:string,id:string,track_id:string) {
+  return request<WeddingMusicTrack>(`${weddingPath(id)}/music`, {method:"PUT",body:JSON.stringify({track_id})},token);
+}
+export function restoreWeddingRender(token:string,id:string,renderId:string,version:number) {
+  return request<WeddingRender>(`${weddingPath(id)}/renders/${encodeURIComponent(renderId)}/restore`, {method:"POST",body:JSON.stringify({version})}, token);
 }

@@ -11,6 +11,9 @@ flowchart LR
   Worker[Task worker] --> DB
   Worker --> Assets
   Worker --> Providers[Vision and product providers]
+  WeddingWorker[Wedding worker] --> DB
+  WeddingWorker --> WeddingAssets[Separate private wedding storage]
+  WeddingWorker --> WeddingProviders[Story / frame / video / FFmpeg]
   Browser -->|owner-bound short-lived URL| API
 ```
 
@@ -39,6 +42,12 @@ Every user-facing resource query filters by the authenticated user. Cursor token
 
 The frontend treats a garment as trusted only when `status=ready`, `review_status=confirmed`, and `user_confirmed_at` is present. Purchase restoration selects only the newest task; selection and account generations prevent older polls, cursor pages, and delayed responses from replacing the current result.
 
+## Wedding workspace and schema integration
+
+The same API hosts wedding routes with separate owner/participant scopes. Invitation tokens enter through request bodies, participant sessions stay separate from wardrobe JWT storage, and every media read rechecks current consent. `wedding_worker` independently consumes story, frame, video and render jobs; it does not consume `AnalysisTask`. Exact portrait/frame/candidate provenance and reviews gate submission and completion. Known remote IDs recover with read-only queries; unknown submissions retain budget reservations. Immutable revisions preserve lineage and attempt ceilings. See [wedding contracts and operations](wedding-mv.md).
+
+Both products share SQLAlchemy metadata but keep independent migration ledgers: wardrobe13 and wedding2. The explicit upgrade runs all steps through one locked connection/transaction. Generic wardrobe column upgrades exclude wedding tables so wedding foreign keys and timestamp provenance use their specific migrations. Production API and both workers only verify readiness, even when TESTING is set. Compose waits for the shared migration barrier; the local launcher records and stops all four processes by verified identity.
+
 ## Module map
 
 | Area | Modules |
@@ -50,6 +59,7 @@ The frontend treats a garment as trusted only when `status=ready`, `review_statu
 | Private images | `backend/app/asset_service.py`, `backend/app/asset_access.py`, `backend/app/asset_storage.py`, `backend/app/asset_gc.py` |
 | Purchase context | `backend/app/decision_context.py`, `backend/app/purchase_analysis.py`, `backend/app/feedback_service.py` |
 | Candidate ownership | `backend/app/candidate_ownership.py` |
+| Wedding processing | `backend/app/wedding_worker.py`, `backend/app/wedding_creation.py`, `backend/app/wedding_render_worker.py`, `backend/app/wedding_accounting.py` |
 | Browser app | `frontend/src/App.tsx`, `frontend/src/api.ts`, `frontend/src/PurchaseHistoryView.tsx`, `frontend/src/ResumablePurchasePanel.tsx` |
 
 Schema and old-image upgrade steps are documented in [deployment and migrations](deployment-and-migrations.md); request examples are in the [v2 API guide](api-v2.md). The [repair verification](reviews/2026-10-01-optimization-fix-verification.md) records local evidence and remaining production-environment checks.

@@ -80,7 +80,7 @@ def stop_local(root: Path) -> list[str]:
     if not path.exists():
         return []
     records = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(records, dict) or set(records) - {"api", "worker", "frontend"}:
+    if not isinstance(records, dict) or set(records) - {"api", "worker", "wedding-worker", "frontend"}:
         raise RuntimeError("Invalid local service manifest")
     stopped = []
     for name, record in list(records.items()):
@@ -127,6 +127,7 @@ def service_commands(root: Path, mode: str) -> dict[str, tuple[list[str], Path]]
     commands = {
         "api": ([sys.executable, "-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8031"], backend),
         "worker": ([sys.executable, "-m", "app.task_worker"], backend),
+        "wedding-worker": ([sys.executable, "-m", "app.wedding_worker", "--poll-seconds", "2"], backend),
         "frontend": ([shutil.which("npm.cmd") or shutil.which("npm") or "npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5174", "--strictPort"], root / "frontend"),
     }
     if mode == "local":
@@ -152,9 +153,9 @@ def launch(root: Path, mode: str) -> None:
     if set(commands) & set(records):
         raise RuntimeError("Service already recorded; run start.bat stop-local first")
     backend = root / "backend"
-    if "api" in commands or "worker" in commands:
+    if set(commands) & {"api", "worker", "wedding-worker"}:
         # Imports + DB initialization must succeed before either consumer starts.
-        check = subprocess.run([sys.executable, "-c", "from app.main import create_app; from app.task_worker import TaskWorker; from app.database import init_db; create_app(); init_db()"],
+        check = subprocess.run([sys.executable, "-c", "from app.main import create_app; from app.task_worker import TaskWorker; import app.wedding_worker; from app.database import init_db; create_app(); init_db()"],
                                cwd=backend, env=environment, capture_output=True, text=True, **process_options())
         if check.returncode:
             raise RuntimeError("Backend/worker preflight failed: " + check.stderr[-2000:])
@@ -186,7 +187,7 @@ def launch(root: Path, mode: str) -> None:
 
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else "local"
-    if mode not in {"local", "backend", "worker", "frontend", "stop-local"}:
+    if mode not in {"local", "backend", "worker", "wedding-worker", "frontend", "stop-local"}:
         print("Unknown launcher mode", file=sys.stderr)
         return 1
     try:
